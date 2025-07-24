@@ -146,15 +146,6 @@ import logging
 
 
 def write_signatures(mutect_dir: Path, manifest_file: Path, out_dir: Path, label: str):
-    """
-    Extracts mutation signatures from Mutect files and writes signature matrices.
-
-    Args:
-        mutect_dir (Path): Directory containing <ID>-mutect.txt files
-        manifest_file (Path): File with list of sample IDs (one per line)
-        out_dir (Path): Output directory where signature CSV will be written
-        label (str): Prefix for the output CSV filename (e.g., 'luad' or 'lusc')
-    """
     sample_ids = pd.read_table(manifest_file, header=None).iloc[:, 0]
     out_file = out_dir / f"{label}-signature.csv"
     out_dir.mkdir(parents=True, exist_ok=True)
