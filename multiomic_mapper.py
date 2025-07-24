@@ -14,7 +14,29 @@ Arguments:
     <out>     - Output directory
     <ref>     - Directory with mapping reference files
     <suffix>  - File suffix, e.g. -snv.csv
-    --step    - Optional: Step to run [all, prep, ch3
+    --step    - Optional: Step to run [all, prep, gene, uni, ch3]
+
+### Step Options
+
+- `all`: Full pipeline
+- `prep`: Creates directories
+- `gene`: Adds gene symbols and names
+- 'uni': Includes splitting by chromosome, UniProt and protein ID mapping, and joining
+- `ch3`: Add methylation probe matches
+
+## Output Structure
+
+```
+out/
+├── tmp/	# Deleted after run
+│   ├── gene/       # Gene symbol added
+│   ├── name/      # Gene name added
+│   ├── split/    # Split by chromosome
+│   ├── split-uni/  # UniProt added
+│   ├── split-uniprot/ # Protein IDs added
+│   ├── joined/   # Joined CSVs
+├── SAMPLEID-snv.csv  # Final output (example)
+
 """
 
 import pandas as pd
