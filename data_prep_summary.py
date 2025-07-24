@@ -5,7 +5,7 @@ Pipeline for processing VEP-annotated Mutect variant files and generating SNP/SN
 
 Dependencies: pandas gunzip
 
-Usage example: python aa_1.py <folder> <manifest> <out> <x> <y>
+Usage example: python data_prep_summary.py <folder> <manifest> <out> <x> <y>
 
 <folder> = path to folder with vep-annotated mutect files
 <manifest> = path to GDC manifest or list of IDs
