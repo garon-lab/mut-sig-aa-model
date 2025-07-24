@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Pipeline for processing VEP-annotated Mutect variant files and generating SNP/SNV summaries and amino acid substitution matrices.
+Pipeline for processing VEP-annotated Mutect variant files and generating SNP/SNV summaries, mutational signature, and amino acid substitution matrices.
 
 Dependencies: pandas gunzip
 
@@ -18,6 +18,7 @@ Creates directory:
 output/
 ├── m.txt
 ├── summary.csv
+├── signature.csv
 ├── prep/
 │   └── sampleID-mutect.txt
 ├── snp/
@@ -139,6 +140,85 @@ def summarize_variants(out_dir: Path, manifest_file: Path):
                 f.write(f"{sample_id},{snp_count},{snv_count}\n")
         except Exception as e:
             logging.warning(f"Skipping {sample_id}: {e}")
+from pathlib import Path
+import pandas as pd
+import logging
+
+
+def write_signatures(mutect_dir: Path, manifest_file: Path, out_dir: Path, label: str):
+    """
+    Extracts mutation signatures from Mutect files and writes signature matrices.
+
+    Args:
+        mutect_dir (Path): Directory containing <ID>-mutect.txt files
+        manifest_file (Path): File with list of sample IDs (one per line)
+        out_dir (Path): Output directory where signature CSV will be written
+        label (str): Prefix for the output CSV filename (e.g., 'luad' or 'lusc')
+    """
+    sample_ids = pd.read_table(manifest_file, header=None).iloc[:, 0]
+    out_file = out_dir / f"{label}-signature.csv"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    header = ['ID', 'SUM', 'CTGA', 'CAGT', 'GCCG', 'ATTA', 'AGTC', 'ACTG']
+    all_rows = []
+
+    for sample_id in sample_ids:
+        file_path = mutect_dir / f"{sample_id}-mutect.txt"
+
+        if not file_path.exists():
+            logging.warning(f"{sample_id}: file not found at {file_path}")
+            continue
+
+        try:
+            df = pd.read_table(file_path)
+
+            df['sA'] = df.iloc[:, 3].str.contains('A', na=False)
+            df['sC'] = df.iloc[:, 3].str.contains('C', na=False)
+            df['sG'] = df.iloc[:, 3].str.contains('G', na=False)
+            df['sT'] = df.iloc[:, 3].str.contains('T', na=False)
+            df['eA'] = df.iloc[:, 4].str.contains('A', na=False)
+            df['eC'] = df.iloc[:, 4].str.contains('C', na=False)
+            df['eG'] = df.iloc[:, 4].str.contains('G', na=False)
+            df['eT'] = df.iloc[:, 4].str.contains('T', na=False)
+
+            df['NM'] = df.iloc[:, 6].str.strip().str[:3]
+            df1 = df[df['NM'].str.contains('alt', na=False)]
+
+            # Define mutation combinations
+            mutations = {
+                'AC': df1['sA'] & df1['eC'],
+                'AG': df1['sA'] & df1['eG'],
+                'AT': df1['sA'] & df1['eT'],
+                'CA': df1['sC'] & df1['eA'],
+                'CG': df1['sC'] & df1['eG'],
+                'CT': df1['sC'] & df1['eT'],
+                'GA': df1['sG'] & df1['eA'],
+                'GC': df1['sG'] & df1['eC'],
+                'GT': df1['sG'] & df1['eT'],
+                'TA': df1['sT'] & df1['eA'],
+                'TC': df1['sT'] & df1['eC'],
+                'TG': df1['sT'] & df1['eG'],
+            }
+
+            counts = {
+                'CTGA': (mutations['CT'] | mutations['GA']).sum(),
+                'CAGT': (mutations['CA'] | mutations['GT']).sum(),
+                'GCCG': (mutations['CG'] | mutations['GC']).sum(),
+                'ATTA': (mutations['AT'] | mutations['TA']).sum(),
+                'AGTC': (mutations['AG'] | mutations['TC']).sum(),
+                'ACTG': (mutations['AC'] | mutations['TG']).sum(),
+            }
+
+            total = sum(counts.values())
+            row = [sample_id, total] + [counts[key] for key in ['CTGA', 'CAGT', 'GCCG', 'ATTA', 'AGTC', 'ACTG']]
+            all_rows.append(row)
+
+        except Exception as e:
+            logging.warning(f"Failed to process {sample_id}: {e}")
+
+    # Save all results to CSV
+    df_out = pd.DataFrame(all_rows, columns=header)
+    df_out.to_csv(out_file, index=False)
 
 
 def extract_mutations(prep_dir: Path, out_dir: Path, manifest_file: Path, mutation_type: str):
