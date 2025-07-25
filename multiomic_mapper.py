@@ -57,8 +57,6 @@ import shutil
 from pathlib import Path
 import logging
 
-# Default file extension for sample files
-SUFFIX = ".csv"
 
 logging.basicConfig(level=logging.INFO)
 CHROM_LIST = [f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY"]
@@ -88,9 +86,9 @@ def add_gene_symbol(ids, folder, out_dir, ref_dir):
     gene_map = pd.read_csv(Path(ref_dir, "esng_gene-sym.txt"), sep="\t", names=["Gene", "Ensembl"])
     for i in ids:
         try:
-            df = pd.read_csv(Path(folder, f"{i}{SUFFIX}"))
+            df = pd.read_csv(Path(folder, f"{i}.csv"))
             merged = df.merge(gene_map, how="left", left_on="ENSGene", right_on="Ensembl").iloc[:, :5]
-            merged.to_csv(Path(out_dir, "tmp/gene", i, f"{i}{SUFFIX}"), index=False)
+            merged.to_csv(Path(out_dir, "tmp/gene", i, f"{i}.csv"), index=False)
         except Exception as e:
             logging.warning(f"Skipping {i} in gene symbol step: {e}")
 
@@ -99,10 +97,10 @@ def add_gene_name(ids, out_dir, ref_dir):
     name_map = pd.read_csv(Path(ref_dir, "gene-sym_name.txt"), sep="\t", names=["symbol", "name"])
     for i in ids:
         try:
-            df = pd.read_csv(Path(out_dir, "tmp/gene", i, f"{i}{SUFFIX}"))
+            df = pd.read_csv(Path(out_dir, "tmp/gene", i, f"{i}.csv"))
             merged = df.merge(name_map, how="left", left_on="Gene", right_on="symbol")
             cols = pd.concat([merged.iloc[:, :5], merged.iloc[:, 6]], axis=1)
-            cols.to_csv(Path(out_dir, "tmp/name", i, f"{i}{SUFFIX}"), index=False)
+            cols.to_csv(Path(out_dir, "tmp/name", i, f"{i}.csv"), index=False)
         except Exception as e:
             logging.warning(f"Skipping {i} in gene name step: {e}")
 
@@ -110,7 +108,7 @@ def split_by_chromosome(ids, out_dir):
     logging.info("Splitting files by chromosome...")
     for i in ids:
         try:
-            df = pd.read_csv(Path(out_dir, "tmp/name", i, f"{i}{SUFFIX}")).iloc[1:]
+            df = pd.read_csv(Path(out_dir, "tmp/name", i, f"{i}.csv")).iloc[1:]
             for chrom in df["#CHROM"].unique():
                 df[df["#CHROM"] == chrom].to_csv(Path(out_dir, "tmp/split", i, f"{chrom}.csv"), index=False)
         except Exception as e:
@@ -163,7 +161,7 @@ def add_methylation(ids, out_dir, ref_dir):
         try:
             df = pd.read_csv(Path(out_dir, "tmp/joined", f"{i}.csv"))
             merged = df.merge(map_df, how="left", left_on="Gene", right_on="Match").iloc[:, :9]
-            merged.to_csv(Path(out_dir, f"{i}{SUFFIX}"), index=False)
+            merged.to_csv(Path(out_dir, f"{i}.csv"), index=False)
         except Exception as e:
             logging.warning(f"Skipping {i} in methylation step: {e}")
 
