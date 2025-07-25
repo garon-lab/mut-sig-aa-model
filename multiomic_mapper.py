@@ -165,19 +165,6 @@ def add_methylation(ids, out_dir, ref_dir):
         except Exception as e:
             logging.warning(f"Skipping {i} in methylation step: {e}")
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Multiomic Mapping Pipeline")
-    parser.add_argument('--folder', required=True,
-                        help='Directory with SNV/SNP input files')
-    parser.add_argument('--manifest', required=True,
-                        help='CSV file with sample IDs (first column)')
-    parser.add_argument('--out', required=True,
-                        help='Output directory')
-    parser.add_argument('--ref', required=True,
-                        help='Reference directory with mapping files')
-    parser.add_argument("--step", default="all", choices=["all", "prep", "gene", "uni", "ch3"],
-                        help="Pipeline step to run: all | prep | gene | uni | ch3")
-    return parser.parse_args()
 
 def main():
     args = parse_args()
