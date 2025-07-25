@@ -7,7 +7,7 @@ This script processes protein PSM files by:
 1. Splitting a sample manifest into channels.
 2. Creating index folders for output.
 3. Filtering and reorganizing raw data by TMT channel.
-4. Rejoining processed files into complete datasets.
+4. Rejoining processed files into complete datasets and saving as sample-id csvs.
 
 Usage:
     python protein_preprocessor.py \
