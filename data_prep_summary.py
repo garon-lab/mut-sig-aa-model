@@ -3,19 +3,34 @@
 """
 Pipeline for processing VEP-annotated Mutect variant files and generating SNP/SNV summaries, mutational signature, and amino acid substitution matrices.
 
-Dependencies: pandas gunzip
+Dependencies: pandas, gunzip
 
-Usage example: python data_prep_summary.py <folder> <manifest> <out> <x> <y>
+Usage example: 
+    python data_prep_summary.py \
+        --folder <folder with mutect files> \
+        --manifest <sample_ID manifest> \
+        --out <output directory> \
+        --mode <mode> \
+        [--step all|summary|signatures|matrices]
 
-<folder> = path to folder with vep-annotated mutect files
-<manifest> = path to GDC manifest or list of IDs
-<out> = output directory
-<x> = 1 if using gdc manifest ends in extension (e.g., .csv), 2 if multiple entries per field
-<y> = 1 if need to create manifest/preprocess, 2 if only creating snv/snp summary files
-
+Arguments:
+    --folder   Directory containing the input variant files
+    --manifest Tab-delimited manifest file with sample metadata
+    --out      Output directory for results
+    --mode     Manifest mode (1 = use column 2 trimmed (removes .gz from naming); 2 = use column 6 split for multiple samples)
+    --step     Pipeline step to run: all (default), summary, signatures, or matrices
+    
 Creates directory:
-
-output/
+    m.txt                  - Simplified manifest file
+    summary.csv            - Counts of SNP/SNV per sample
+    signature.csv          - Mutational signature files for SNP/SNV
+    prep/                  - Preprocessed VCF text files (sampleID-mutect.txt)
+    snp/                   - Extracted SNP amino acid changes
+        matrices/          - SNP substitution matrices
+    snv/                   - Extracted SNV amino acid changes
+        matrices/          - SNV substitution matrices
+        
+out/
 ├── m.txt
 ├── summary.csv
 ├── signature.csv
@@ -41,32 +56,6 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 AA_LIST = list("ACDEFGHIKLMNPQRSTVWY")
-
-def print_help():
-    help_text = """
-    Amino Acid Pipeline Help
-
-    Usage:
-        python aa_1.py <folder> <manifest> <out> <x> <y>
-
-    Arguments:
-        <folder>   - Directory containing the input variant files
-        <manifest> - Tab-delimited manifest file with sample metadata
-        <out>      - Output directory to store results
-        <x>        - Manifest mode (1 = use column 2 trimmed; 2 = use column 6 split)
-        <y>        - Step flag (1 = do full preprocessing; 0 = skip to summary/matrix steps)
-
-    Outputs:
-        - m.txt: Simplified manifest file
-        - summary.csv: Counts of SNP/SNV per sample
-        - Preprocessed VCF text files in prep/
-        - Extracted amino acid changes in snp/ and snv/
-        - Amino acid substitution matrices in snp/matrices/ and snv/matrices/
-
-    Requirements:
-        - Python 3, pandas
-        - gunzip must be available for decompressing files
-    """
 
 
 def create_manifest(folder: Path, manifest_file: Path, out_dir: Path, mode: int):
@@ -111,7 +100,7 @@ def preprocess_mutect(folder: Path, manifest_file: Path, out_dir: Path):
 
     for path, name, sid in zip(filepaths, names, sample_ids):
         infile = folder / path / name
-        outfile = out_dir / "prep" / f"{sid}-mutect.txt"
+        outfile = out_dir / "prep" / f"{sid}.txt"
         if infile.exists():
             with open(infile, 'r') as fin, open(outfile, 'w') as fout:
                 for line in fin:
@@ -129,7 +118,7 @@ def summarize_variants(out_dir: Path, manifest_file: Path):
 
     for sample_id in ids:
         try:
-            filepath = out_dir / "prep" / f"{sample_id}-mutect.txt"
+            filepath = out_dir / "prep" / f"{sample_id}.txt"
             vcf_df = pd.read_table(filepath, sep='\t', header=None)
             vcf_df.columns = ['#CHROM', 'POS', 'ID', 'REF', 'ALT', 'QUAL', 'FILTER', 'INFO', 'FORMAT', 'NORMAL', 'TUMOR']
 
@@ -140,9 +129,6 @@ def summarize_variants(out_dir: Path, manifest_file: Path):
                 f.write(f"{sample_id},{snp_count},{snv_count}\n")
         except Exception as e:
             logging.warning(f"Skipping {sample_id}: {e}")
-from pathlib import Path
-import pandas as pd
-import logging
 
 
 def write_signatures(mutect_dir: Path, manifest_file: Path, out_dir: Path, label: str):
@@ -154,7 +140,7 @@ def write_signatures(mutect_dir: Path, manifest_file: Path, out_dir: Path, label
     all_rows = []
 
     for sample_id in sample_ids:
-        file_path = mutect_dir / f"{sample_id}-mutect.txt"
+        file_path = mutect_dir / f"{sample_id}.txt"
 
         if not file_path.exists():
             logging.warning(f"{sample_id}: file not found at {file_path}")
@@ -219,7 +205,7 @@ def extract_mutations(prep_dir: Path, out_dir: Path, manifest_file: Path, mutati
 
     for sample_id in ids:
         try:
-            infile = prep_dir / f"{sample_id}-mutect.txt"
+            infile = prep_dir / f"{sample_id}.txt"
             vcf_df = pd.read_table(infile, sep='\t', header=None)
             vcf_df.columns = ['#CHROM', 'POS', 'ID', 'REF', 'ALT', 'QUAL', 'FILTER', 'INFO', 'FORMAT', 'NORMAL', 'TUMOR']
 
@@ -269,23 +255,31 @@ def main():
     parser.add_argument("folder", type=Path)
     parser.add_argument("manifest", type=Path)
     parser.add_argument("out", type=Path)
-    parser.add_argument("x", type=int)
-    parser.add_argument("y", type=int)
-    parser.add_argument("--help-pipeline", action="store_true", help="Display usage information for the pipeline")
+    parser.add_argument("x", type=int,
+                        help="Manifest mode (1 = use column 2 trimmed; 2 = use column 6 split)")
+    parser.add_argument("--step", choices=["all","summary","signatures","matrices"], default="all",
+                        help="Pipeline step to run: all (default), summary, signatures, or matrices")
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
 
-    if args.y == 1:
+    if args.step in ["all"]:
         create_manifest(args.folder, args.manifest, args.out, args.x)
         make_directories(args.out / "m.txt", args.out)
         unzip_files(args.folder, args.manifest)
         preprocess_mutect(args.folder, args.manifest, args.out)
 
-    summarize_variants(args.out, args.manifest)
-    extract_mutations(args.out / "prep", args.out / "snp", args.manifest, "snp")
-    extract_mutations(args.out / "prep", args.out / "snv", args.manifest, "snv")
-    write_matrices(args.out, args.manifest)
+    if args.step in ["all","summary"]:
+        summarize_variants(args.out, args.manifest)
+
+    if args.step in ["all","signatures"]:
+        write_signatures(args.out / "prep", args.manifest, args.out, "snp")
+        write_signatures(args.out / "prep", args.manifest, args.out, "snv")
+
+    if args.step in ["all","matrices"]:
+        extract_mutations(args.out / "prep", args.out / "snp", args.manifest, "snp")
+        extract_mutations(args.out / "prep", args.out / "snv", args.manifest, "snv")
+        write_matrices(args.out, args.manifest)
 
 
 if __name__ == "__main__":
