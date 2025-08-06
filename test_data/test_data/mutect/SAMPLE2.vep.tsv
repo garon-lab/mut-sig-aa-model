@@ -1,3 +1,0 @@
-CHROM	POS	REF	ALT	Gene	Consequence	Protein_position	Amino_acids
-1	12345	A	G	TP53	missense_variant	100	A/G
-1	67890	C	T	BRCA1	missense_variant	200	C/T

@@ -1,3 +1,0 @@
-Sample_ID
-SAMPLE1
-SAMPLE2
