@@ -205,7 +205,7 @@ def compare_multiple(observed_dir, comparison_dir, out_dir, vector_file=None):
     
     text1 = HEADING
     text2 = ID.T
-    outpath = Out + {id}'-compared.png'
+    outpath = Out + {id} +'-compared.png'
     delt = delt.T
     sb.set(rc={'figure.figsize':(30,40)})
     cbar_kws= {'shrink':0.25,'ticks':[-5,-4,-3,-2,-1,0,1,2,3,4,5],'label':'Percent of Substitutions','orientation':'vertical',"use_gridspec":False}
