@@ -3,13 +3,16 @@ Uses publicly available genomic data to create multiomic structures of amino aci
 
 You will need downloaded VEP-annotated mutect, RNA (RNASeq), CH3 (methylation), PSM (protein), and copy number (CN) files with their respective manifests in standard CPTAC format (https://proteomic.datacommons.cancer.gov/pdc/). Standard references are available for dowload with this script and otherwise should include esng gene symbols, gene symbol names, uni-ensg, uni-np, and methylation probe IDs matched to chromosome (CHR) and gene name.
 
+Python 3.7+ is required.
+
 Recommended order of scripts:
 1. Data prep summary
 2. Protein (PSM) preprocesser
 3. Multiomic mapping
 4. Multiomic data integration
-5. Analysis
-6. Comparison and modeling
+5. Multiomic analysis
+6. Signature modeler (optional)
+7. Comparative analysis (optional)
 
 Additional information regarding each script is below and can be accessed with the --help flag.
 
@@ -166,12 +169,64 @@ Arguments:
     --step       Analysis step to run: stats, plots, cluster, protein_only (selects for genes with protein expression), no_protein (selects for genes without protein expression), single_entry (compresses each gene information into a single row selecting for highest E value and averaging beta values), or all (default: all)
 
 
-# COMPARISON AND MODELING
+# SIGNATURE MODELER
 
-This script provides the ability to model probabilistic variant (SNP/SNV) amino acids based on mutional signature and compare observed data.
+This repository provides a standalone script to model expected amino acid substitution profiles from mutational signature context proportions.
 
-Dependencies:
+Features:
+1. Provides expected amino acid substitution matrices (21x21) using embedded base matrices.
+2. Performs row-wise normalization to predefined amino-acid frequency targets based on GRCh38 amino-acid frequency targets.
+3. Flattens vectors for downstream analysis (expected_vectors.csv).
+4. Optional heatmap visualization of expected substitution profiles (expected_heatmap.png).
+
+Dependencies: pandas, numpy, matplotlib, seaborn
 
 Usage:
+   python signature_modeling.py \
+    --signature_vector contexts.csv \
+    --out_dir results/ \
+    [--step model|heatmap|both] \
+    [--log_level DEBUG|INFO|WARNING|ERROR]
 
 Arguments:
+    --signature_vector  Path to CSV file with columns [ID, AC, AG, AT, CA, CG, CT, GA, GC, GT, TA, TC, TG]
+    --out_dir           Directory where outputs will be written (created if necessary)
+    --step              Pipeline step(s) to run: model, heatmap, both (default both)
+    --log_level         Logging verbosity (default INFO)
+
+
+# COMPARATIVE ANALYSIS
+
+This script summarizes observed amino acid variant counts per sample, compares amino acid substitution profiles from observed or modeled data (e.g., from signature modeler), and visualizes results as heatmaps.
+
+Features:
+1. Aggregation of observed amino acid variants into a single vector per sample.
+2. Calculates cosine similarity between observed variant vectors and/or modeled vectors.
+3. Generates heatmaps of similarity matrices or per-sample counts.
+
+Dependencies: pip, install, pandas, numpy, matplotlib, seaborn
+
+Usage:
+  python comparative_analysis.py \
+    --observed_dir <directory of observed AA matrix CSVs> \
+    --comparison_dir <directory of comparison AA matrix CSVs> \
+    --manifest <manifest file> \
+    --out_dir <output directory> \
+    [--vector_file <observed summary CSV>] \
+    [--step summarize|compare|heatmap|single-file|all]
+
+Arguments:
+    --observed_dir      Directory of observed amino acid csvs, names {sample-id}.csv
+    --comparison_dir    Directory of comparison amino acid csvs,  named {sample-id}.csv
+    --mainfest          Tab-deliminted manifest listing sample IDs (first column)
+    --out_dir           Output directory for csvs and plots
+    --vector_file       Path to save/load summary csvs (default: out_dir/observed_summary.csv)
+    --step              Pipeline step(s) to run: summarize, compare, heatmap, single-file, or all (default: all)
+
+Output structure
+results/
+├── observed_summary.csv        # Summarized observed counts
+├── similarity_matrix.csv       # Cosine similarity scores
+├── heatmap.png                  # Similarity matrix heatmap
+├── aa-count.png                 # Per-sample count heatmap
+└── aa-proportion.png            # Per-sample proportion heatmap
