@@ -10,40 +10,33 @@ Usage example:
         --folder <folder with mutect files> \
         --manifest <sample_ID manifest> \
         --out <output directory> \
-        --mode <mode> \
+        --mode <1 or 2> \
         [--step all|summary|signatures|matrices]
 
 Arguments:
     --folder   Directory containing the input variant files
     --manifest Tab-delimited manifest file with sample metadata
     --out      Output directory for results
-    --mode     Manifest mode (1 = use column 2 trimmed (removes .gz from naming); 2 = use column 6 split for multiple samples)
-    --step     Pipeline step to run: all (default), summary, signatures, or matrices
+    --mode     Manifest mode 
+                 1 = use column 2, removes `.gz`
+                 2 = use column 6, comma-split (multi-samples)
+    --step     Pipeline step to run 
+                 all (default), summary, signatures, or matrices
     
 Creates directory:
     m.txt                  - Simplified manifest file
     summary.csv            - Counts of SNP/SNV per sample
-    signature.csv          - Mutational signature files for SNP/SNV
+    snp-signature.csv      - SNP signature profile
+    snv-signature.csv      - SNV signature profile
     prep/                  - Preprocessed VCF text files (sampleID-mutect.txt)
-    snp/                   - Extracted SNP amino acid changes
-        matrices/          - SNP substitution matrices
-    snv/                   - Extracted SNV amino acid changes
-        matrices/          - SNV substitution matrices
-        
-out/
-├── m.txt
-├── summary.csv
-├── signature.csv
-├── prep/
-│   └── sampleID-mutect.txt
-├── snp/
-│   ├── sampleID-snp.csv
-│   └── matrices/
-│       └── sampleID.csv
-├── snv/
-│   ├── sampleID-snv.csv
-│   └── matrices/
-│       └── sampleID.csv
+      snp/
+        ├── sampleID-snp.csv
+        └── matrices/
+              └── sampleID.csv
+      snv/
+        ├── sampleID-snv.csv
+        └── matrices/
+              └── sampleID.csv
 
 
 """
@@ -67,13 +60,13 @@ def parse_args():
     return parser.parse_args()
 
 
-def create_manifest(args.folder, args.manifest, args.out, int(args.mode)):
+def create_manifest(manifest_file: Path, out_dir: Path, mode: int):
     df = pd.read_table(manifest_file)
     out_file = out_dir / "m.txt"
     logging.info("Creating manifest file...")
 
     if mode == 1:
-        df = df.iloc[:, 1].str.strip().str[:-3]
+        df = df.iloc[:, 1].str.strip().str.replace(r"\.gz$", "", regex=True)
     elif mode == 2:
         df = df.iloc[:, 5].str.split(',', expand=True).iloc[:, 0]
     else:
@@ -82,13 +75,15 @@ def create_manifest(args.folder, args.manifest, args.out, int(args.mode)):
     df.to_csv(out_file, index=False, header=False)
 
 
-def make_directories(manifest_file: Path, out_dir: Path):
+def make_directories(out_dir: Path):
     df = pd.read_csv(manifest_file, header=None)
     ids = df.iloc[:, 0]
     for i in ids:
-        (out_dir / i).mkdir(parents=True, exist_ok=True)
-        for subfolder in ["prep", "snp/matrices", "snv/matrices"]:
-            (out_dir / i / subfolder).mkdir(parents=True, exist_ok=True)
+        (out_dir / "prep").mkdir(parents=True, exist_ok=True)
+        (out_dir / "snp").mkdir(parents=True, exist_ok=True)
+        (out_dir / "snp/matrices").mkdir(parents=True, exist_ok=True)
+        (out_dir / "snv").mkdir(parents=True, exist_ok=True)
+        (out_dir / "snv/matrices").mkdir(parents=True, exist_ok=True)
 
 
 def unzip_files(folder: Path, manifest_file: Path):
@@ -96,7 +91,7 @@ def unzip_files(folder: Path, manifest_file: Path):
     ids = df.iloc[:, 0]
     names = df.iloc[:, 1]
     for i, name in zip(ids, names):
-        filepath = folder / i / name
+        filepath = Path(folder) / str(i) / str(name)
         if filepath.exists():
             subprocess.run(["gunzip", str(filepath)], check=False)
 
@@ -108,7 +103,7 @@ def preprocess_mutect(folder: Path, manifest_file: Path, out_dir: Path):
     sample_ids = df.iloc[:, 5].str.split(',', expand=True).iloc[:, 0]
 
     for path, name, sid in zip(filepaths, names, sample_ids):
-        infile = folder / path / name
+        infile = Path(folder) / str(path) / str(name)
         outfile = out_dir / "prep" / f"{sid}.txt"
         if infile.exists():
             with open(infile, 'r') as fin, open(outfile, 'w') as fout:
@@ -262,25 +257,48 @@ def write_matrices(out_dir: Path, manifest_file: Path):
 def main():
     args = parse_args()
     args.out = Path(args.out)
+    args.manifest = Path(args.manifest)
+
+    manifest_simplified = args.out / "m.txt"
+    
+    # 🔍 Check if manifest file exists and is valid
+    if not args.manifest.exists():
+        logging.error(f"Manifest file not found: {args.manifest}")
+        return
+
+    try:
+        df_test = pd.read_table(args.manifest, header=None)
+        if args.mode == 1 and df_test.shape[1] < 2:
+            logging.error("Manifest file must have at least 2 columns for mode 1.")
+            return
+        elif args.mode == 2 and df_test.shape[1] < 6:
+            logging.error("Manifest file must have at least 6 columns for mode 2.")
+           
+            return
+    except Exception as e:
+        logging.error(f"Failed to read manifest file: {e}")
+        return
+
     args.out.mkdir(parents=True, exist_ok=True)
 
+    # Pipeline steps
     if args.step in ["all"]:
         create_manifest(args.folder, args.manifest, args.out, args.mode)
-        make_directories(args.out / "m.txt", args.out)
+        make_directories(args.out)
         unzip_files(args.folder, args.manifest)
         preprocess_mutect(args.folder, args.manifest, args.out)
 
     if args.step in ["all","summary"]:
-        summarize_variants(args.out, args.manifest)
+        summarize_variants(args.out)
 
     if args.step in ["all","signatures"]:
-        write_signatures(args.out / "prep", args.manifest, args.out, "snp")
-        write_signatures(args.out / "prep", args.manifest, args.out, "snv")
+        write_signatures(args.out / "prep", manifest_simplified, args.out, "snp")
+        write_signatures(args.out / "prep", manifest_simplified, args.out, "snv")
 
     if args.step in ["all","matrices"]:
-        extract_mutations(args.out / "prep", args.out / "snp", args.manifest, "snp")
-        extract_mutations(args.out / "prep", args.out / "snv", args.manifest, "snv")
-        write_matrices(args.out, args.manifest)
+        extract_mutations(args.out / "prep", args.out / "snp", manifest_simplified, "snp")
+        extract_mutations(args.out / "prep", args.out / "snv", manifest_simplified, "snv")
+        write_matrices(args.out, manifest_simplified)
 
 
 if __name__ == "__main__":
