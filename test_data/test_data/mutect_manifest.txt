@@ -1,0 +1,3 @@
+Sample_ID	Filename
+SAMPLE1	SAMPLE1.vep.tsv
+SAMPLE2	SAMPLE2.vep.tsv
