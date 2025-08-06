@@ -126,6 +126,16 @@ def load_observed(observed_dir, manifest):
     return obs
 
 
+def load_comparison(comparison_dir, manifest):
+    ids = pd.read_table(manifest, header=None).iloc[:,0].astype(str)
+    obs = {}
+    for sid in ids:
+        fp = Path(comparison_dir)/f"{sid}.csv"
+        if fp.exists(): obs[sid] = pd.read_csv(fp, index_col=0)
+        else: logging.warning(f"Missing observed for {sid}")
+    return obs
+
+
 def summarize_observed(observed, out_dir, vector_file=None):
     rows = []
     for sid, df in observed.items():
@@ -255,7 +265,7 @@ def main():
     args = parse_args()
     out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
 
-    signatures = load_signatures(args.signature_file)
+    comparison = load_comparison(args.comparison_dir,args.manifest)
     observed = load_observed(args.observed_dir,args.manifest)
 
     if args.step in ['summarize','all']:
