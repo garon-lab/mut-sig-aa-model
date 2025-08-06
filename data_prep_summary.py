@@ -57,8 +57,17 @@ import logging
 logging.basicConfig(level=logging.INFO)
 AA_LIST = list("ACDEFGHIKLMNPQRSTVWY")
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--folder', required=True, help='Path to folder with input VEP files')
+    parser.add_argument('--manifest', required=True, help='Path to manifest file')
+    parser.add_argument('--out', required=True, help='Output directory')
+    parser.add_argument('--mode', type=int, default=1, help='Mode: 1 = removes .gz, 2 = separates list')
+    parser.add_argument('--step', default='all', help='Optional step control')
+    return parser.parse_args()
 
-def create_manifest(folder: Path, manifest_file: Path, out_dir: Path, mode: int):
+
+def create_manifest(args.folder, args.manifest, args.out, int(args.mode)):
     df = pd.read_table(manifest_file)
     out_file = out_dir / "m.txt"
     logging.info("Creating manifest file...")
@@ -251,20 +260,12 @@ def write_matrices(out_dir: Path, manifest_file: Path):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("folder", type=Path)
-    parser.add_argument("manifest", type=Path)
-    parser.add_argument("out", type=Path)
-    parser.add_argument("x", type=int,
-                        help="Manifest mode (1 = use column 2 trimmed; 2 = use column 6 split)")
-    parser.add_argument("--step", choices=["all","summary","signatures","matrices"], default="all",
-                        help="Pipeline step to run: all (default), summary, signatures, or matrices")
-    args = parser.parse_args()
-
+    args = parse_args()
+    args.out = Path(args.out)
     args.out.mkdir(parents=True, exist_ok=True)
 
     if args.step in ["all"]:
-        create_manifest(args.folder, args.manifest, args.out, args.x)
+        create_manifest(args.folder, args.manifest, args.out, args.mode)
         make_directories(args.out / "m.txt", args.out)
         unzip_files(args.folder, args.manifest)
         preprocess_mutect(args.folder, args.manifest, args.out)
