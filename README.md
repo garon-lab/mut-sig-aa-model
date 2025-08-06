@@ -17,6 +17,13 @@ Recommended order of scripts:
 Additional information regarding each script is below and can be accessed with the --help flag.
 
 
+# QUICK START
+To check install, the run_sample_pipeline script will download dependencies and use test_data may be used to ensure all components are functioning as expected.
+
+Usage example:
+python run_sample_pipeline.py
+
+
 # DATA PREP SUMMARY
 
 Pipeline for processing VEP-annotated Mutect variant files and generating SNP/SNV summaries, mutational signature, and amino acid substitution matrices. These can be used for observed inputs in the comparison and modeling script.
