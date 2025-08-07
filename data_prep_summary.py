@@ -232,6 +232,11 @@ def extract_mutations(prep_dir: Path, out_dir: Path, simplified: Path, mutation_
                 filtered = vcf_df[vcf_df['FILTER'].str.contains("PASS", na=False)]
 
             info = filtered['INFO'].str.split('|', expand=True)
+
+            if 15 not in info.columns:
+                logging.warning(f"Sample {sample_id}: INFO field has fewer than 16 fields - skipping")
+                continue
+                
             aa_df = pd.DataFrame({
                 'ST': info[15].str[0],
                 'END': info[15].str[-1],
