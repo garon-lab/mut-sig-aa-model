@@ -96,10 +96,10 @@ def main():
     # Step arguments
     step_args = {
         "data_prep_summary.py": [
-            f"{DATA_DIR}/test_data/mutect",
-            f"{DATA_DIR}/test_data/mutect_manifest.txt",
+            f"{DATA_DIR}/test_data/test_mutect",
+            f"{DATA_DIR}/test_data/mutect_manifest.tsv",
             f"{RESULTS_DIR}/data_prep",
-            "1", "--step", "all"
+            "2", "--step", "all"
         ],
         "protein_preprocessor.py": [
             "--folder", f"{DATA_DIR}/test_data/psm",
