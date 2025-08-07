@@ -321,7 +321,7 @@ def main():
         write_matrices(args.out, simplified)
 
     if args.step not in ("all", "summary", "signatures", "matrices"):
-    parser.error("Invalid --step value. Choose from: all, summary, signatures, matrices.")
+        parser.error("Invalid --step value. Choose from: all, summary, signatures, matrices.")
 
 
 
