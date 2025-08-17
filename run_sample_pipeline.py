@@ -24,6 +24,7 @@ What it does:
 
 #!/usr/bin/env python3
 import argparse
+import shutil
 import sys
 import os
 import re
@@ -48,28 +49,13 @@ def log(msg: str) -> None:
 # ---------- Utilities ----------
 def extract_zip(zip_path: Path, dest_dir: Path, keep_extracted: bool) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
-    # Extract into a fixed subdir for predictability
     extract_root = dest_dir / "_test_data"
-    if extract_root.exists() and keep_extracted:
-        log(f"Using existing extracted data at {extract_root}")
-        return extract_root
     if extract_root.exists():
-        # Clear previous
-        for p in sorted(extract_root.rglob('*'), reverse=True):
-            try:
-                p.unlink()
-            except IsADirectoryError:
-                pass
-        for p in sorted(extract_root.glob('*')):
-            if p.is_dir():
-                try:
-                    p.rmdir()
-                except OSError:
-                    pass
-        try:
-            extract_root.rmdir()
-        except OSError:
-            pass
+        if keep_extracted:
+            log(f"Using existing extracted data at {extract_root}")
+            return extract_root
+        else:
+            shutil.rmtree(extract_root, ignore_errors=True)
     extract_root.mkdir(parents=True, exist_ok=True)
     log(f"Extracting {zip_path} -> {extract_root}")
     with zipfile.ZipFile(zip_path, 'r') as zf:
