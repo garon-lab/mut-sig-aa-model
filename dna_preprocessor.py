@@ -509,7 +509,7 @@ def parse_args():
     p.add_argument("--folder", required=True, help="Project root containing dna/ or vep/ subfolders")
     p.add_argument("--manifest", required=True, help="Path to dna_manifest.tsv (GDC-like)")
     p.add_argument("--out_dir", required=True, help="Output directory root (CSV written under out_dir/dna/)")
-    p.add_argument("--unzip-inputs", action="store true", help="If set, automatically materialize compressed inputs (.gz, .zip) into a scratch directory before processing.")
+    p.add_argument("--unzip-inputs", action="store-true", help="If set, automatically materialize compressed inputs (.gz, .zip) into a scratch directory before processing.")
     p.add_argument("--scratch-dir",default=None, help="Optional directory to use for temporary extracted files. Defaults to a new Temporary Directory each run.")
     p.add_argument("--max-records", type=int, default=None, help="Optional cap on parsed VCF records per case (for testing)")
     p.add_argument("--make-simplified", action="store_true", help="Emit a Case-ID list derived from --manifest")
