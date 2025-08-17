@@ -53,29 +53,29 @@ python dna_preprocessor.py \
 
 Arguments:\
 (Required)\
-   --manifest                    GDC-like TSV/CSV with at least Case ID, File Name (File ID optional)\
-   --folder                      Input directory that contains raw data, format <folder>/dna/<File ID>/<File Name>\
-   --out_dir                     Output directory that will contain <dna/<Case-ID>.csv that can be used in multiomic integration\
+   --manifest &emsp &emsp &emsp GDC-like TSV/CSV with at least Case ID, File Name (File ID optional)\
+   --folder &emsp &emsp &emsp Input directory that contains raw data, format <folder>/dna/<File ID>/<File Name>\
+   --out_dir &emsp &emsp &emsp Output directory that will contain <dna/<Case-ID>.csv that can be used in multiomic integration\
 
 General:\
-   --max-records N               Cap parsed VCF rows per case (for smoke tests)\
-   --jobs                        Controls parallel execution, if not provided, script uses min(8, CPU count)
+   --max-records N &emsp &emsp &emsp Cap parsed VCF rows per case (for smoke tests)\
+   --jobs &emsp &emsp &emsp Controls parallel execution, if not provided, script uses min(8, CPU count)
 
 Make/list Case-IDS:\
-   --make-simplified              Provides unique Case-IDs derived from --manifest\
-   --simplified-out               Path to write the Case-ID list (default: <out_dir>/case_ids.txt)\
+   --make-simplified &emsp &emsp &emsp Provides unique Case-IDs derived from --manifest\
+   --simplified-out &emsp &emsp &emsp Path to write the Case-ID list (default: <out_dir>/case_ids.txt)\
    
 Preprocess: \
-   --preprocess-mutect            Flag for extended analysis, strips '##' headers and writes prep/<Case-ID>.txt\
-   --vcf-folder                   Where per-case VCFs live (default <folder/dna>)
+   --preprocess-mutect &emsp &emsp &emsp Flag for extended analysis, strips '##' headers and writes prep/<Case-ID>.txt\
+   --vcf-folder &emsp &emsp &emsp Where per-case VCFs live (default <folder/dna>)
 
 Analytics (require --simplified file listing Case-IDs):\
-   --simplified FILE              Path to case_ids.txt if it has been previously made, should have one Case-ID per line (no header)\
-   --summarize-variants           Write SNP/SNV counts to <out.dir>/summary.csv\
-   --write-signatures             Write <out_dir>/<label>-signature.csv\
-   --signature-label L            Label for signature file prefix (default: dna)\
-   --extract-mutations {snp|snv}  Extracts ST/END AA pairs to <out_dir>/<type>/<Case-ID>.csv\
-   --write-matrices               Writes 21 x 21 amino acid matrices to <out_dir>/<type>/matrices/<Case-IDs>.csv\
+   --simplified FILE &emsp &emsp &emsp Path to case_ids.txt if it has been previously made, should have one Case-ID per line (no header)\
+   --summarize-variants &emsp &emsp &emsp Write SNP/SNV counts to <out.dir>/summary.csv\
+   --write-signatures &emsp &emsp &emsp Write <out_dir>/<label>-signature.csv\
+   --signature-label L &emsp &emsp &emsp Label for signature file prefix (default: dna)\
+   --extract-mutations {snp|snv} &emsp &emsp Extracts ST/END AA pairs to <out_dir>/<type>/<Case-ID>.csv\
+   --write-matrices &emsp &emsp &emsp Writes 21 x 21 amino acid matrices to <out_dir>/<type>/matrices/<Case-IDs>.csv\
 
 Notes
 1. Case-ID normalization: uses first token before a comma (e.g., "case-01, C3N-04155" -> case-01)
