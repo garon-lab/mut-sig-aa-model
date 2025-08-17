@@ -22,7 +22,7 @@ python dna_preprocessor.py \
 
 (Optional)\
   --make-simplified \
-  --preproccess-mutect \
+  --preprocess-mutect \
   --vcf-folder <vcf directory> \
   --simplified <case_ids.txt> \
   --write-signatures --signature-label <type> defaults dna> \
@@ -414,6 +414,8 @@ def parse_args():
     p.add_argument("--max-records", type=int, default=None, help="Optional cap on parsed VCF records per case (for testing)")
     p.add_argument("--make-simplified", action="store_true", help="Emit a Case-ID list derived from --manifest")
     p.add_argument("--simplified-out", help="Path to write the Case-ID list (default: <out_dir>/case_ids.txt)")
+    p.add_argument("--preprocess-mutect", dest="preprocess_mutect", action="store_true", help="Preprocess Mutect VCFs prior to downstream steps.")
+    p.add_argument("--vcf-folder", dest="vcf_folder", default=None, help="Optional directory containing VCFs (overrides manifest paths).")
     return p.parse_args()
 
 
@@ -499,7 +501,7 @@ def main():
 
     # ----- Optional utilities -----
     # Preprocess MuTect-style VCFs: strips '##' and writes out_dir/prep/{Case-ID}.txt
-    if args.preprocess-mutect:
+    if args.preprocess_mutect:
         vcf_folder = Path(args.vcf_folder).resolve() if args.vcf_folder else (project_root / "dna")
         preprocess_mutect(vcf_folder, Path(args.manifest), out_root)
 
