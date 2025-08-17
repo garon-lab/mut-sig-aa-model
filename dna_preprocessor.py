@@ -72,6 +72,12 @@ Troubleshooting
 
 import argparse
 import logging
+import gzip
+import zipfile
+import shutil
+import tempfile
+from contextlib import contextmanager
+from typing import Optional, List, Tuple
 from pathlib import Path
 import pandas as pd
 import gzip
@@ -232,6 +238,28 @@ def write_matrices(out_dir: Path, simplified: Path):
                 matrix.to_csv(out_path)
             except Exception as e:
                 logging.warning(f"Matrix generation failed for {case_id}-{mtype}: {e}")
+              
+def _find_vcf_for_case(folder: Path, case_id: str) -> Optional[Path]:
+    """
+    Try common layouts:
+      - <folder>/{case_id}.vcf
+      - <folder>/{case_id}.vcf.gz
+      - any depth: **/*{case_id}*.vcf or **/*{case_id}*.vcf.gz
+    Returns a Path or None if not found.
+    """
+    folder = Path(folder)
+    # Fast checks first
+    direct = [folder / f"{case_id}.vcf", folder / f"{case_id}.vcf.gz"]
+    for p in direct:
+        if p.exists():
+            return p
+    # Recursive fallback: relax to contains case_id
+    # (adjust if you need stricter matching)
+    for pat in (f"*{case_id}*.vcf", f"*{case_id}*.vcf.gz"):
+        hit = next(folder.rglob(pat), None)
+        if hit is not None:
+            return hit
+    return None
 
 def preprocess_mutect(folder: Path, manifest_file: Path, out_dir: Path):
     """
@@ -266,26 +294,25 @@ def preprocess_mutect(folder: Path, manifest_file: Path, out_dir: Path):
         ids = [line.strip() for line in Path(manifest_file).read_text().splitlines() if line.strip()]
 
     for case_id in ids:
-        case_id = str(case_id).split(",")[0].strip().strip('"')
-        src_plain = folder / f"{case_id}.vcf"
-        src_gz = folder / f"{case_id}.vcf.gz"
-        target = prep_dir / f"{case_id}.txt"
-        try:
-            if src_plain.exists():
-                with open(src_plain, "rt", encoding="utf-8", errors="replace") as fin, open(target, "w") as fout:
-                    for line in fin:
-                        if not line.startswith("##"):
-                            fout.write(line)
-                continue
-            if src_gz.exists():
-                with _gzip.open(src_gz, "rt", encoding="utf-8", errors="replace") as fin, open(target, "w") as fout:
-                    for line in fin:
-                        if not line.startswith("##"):
-                            fout.write(line)
-                continue
-            logging.warning(f"{case_id}: VCF not found in {folder}")
-        except Exception as e:
-            logging.warning(f"{case_id}: failed to preprocess VCF: {e}")
+      case_id = str(case_id).split(",")[0].strip().strip('"')
+      vcf_path = _find_vcf_for_case(folder, case_id)
+      target = (Path(out_dir) / "prep" / f"{case_id}.txt")
+      try:
+          if vcf_path is None:
+              logging.warning(f"{case_id}: VCF not found under {folder}")
+              continue
+          if vcf_path.suffix == ".gz":
+              with _gzip.open(vcf_path, "rt", encoding="utf-8", errors="replace") as fin, open(target, "w") as fout:
+                  for line in fin:
+                      if not line.startswith("##"):
+                          fout.write(line)
+          else:
+              with open(vcf_path, "rt", encoding="utf-8", errors="replace") as fin, open(target, "w") as fout:
+                  for line in fin:
+                      if not line.startswith("##"):
+                          fout.write(line)
+      except Exception as e:
+          logging.warning(f"{case_id}: failed to preprocess VCF: {e}")
 
 
 # ---- Helpers ----
@@ -339,7 +366,78 @@ def emit_simplified_case_list(manifest_path: Path, out_path: Path) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(uniq) + "\n")
     return out_path
-  
+
+COMPRESSED_EXTS = (".gz", ".zip")
+TEXT_LIKE = (".vcf", ".tsv", ".txt", ".maf", ".csv")
+
+def _strip_gz_suffix(p: Path) -> Path:
+    # Remove a single .gz suffix
+    if p.suffix == ".gz":
+        return p.with_suffix("")  # e.g., foo.vcf.gz -> foo.vcf
+    return p
+
+def is_compressed(p: Path) -> bool:
+    s = p.suffix.lower()
+    return s in COMPRESSED_EXTS
+
+def is_zip(p: Path) -> bool:
+    return p.suffix.lower() == ".zip"
+
+@contextmanager
+def _scratch(args) -> Path:
+    """
+    Yields a scratch directory Path. If --scratch-dir is provided, re-use it.
+    Otherwise, create a TemporaryDirectory and clean it up automatically.
+    """
+    if args.scratch_dir:
+        d = Path(args.scratch_dir).resolve()
+        d.mkdir(parents=True, exist_ok=True)
+        yield d
+    else:
+        with tempfile.TemporaryDirectory(prefix="dna_preproc_") as td:
+            yield Path(td)
+
+def materialize_input(p: Path, scratch_dir: Path) -> Path:
+    """
+    Ensure an input path is a real, readable file on disk.
+    - If uncompressed: return as-is (after existence check).
+    - If .gz: decompress to scratch and return the decompressed path.
+    - If .zip: extract to a subdir and return the most likely file (heuristic).
+    """
+    if not p.exists():
+        # Some manifests store relative paths — try to be forgiving
+        # (Callers should also join a project root if needed)
+        raise FileNotFoundError(f"Input not found: {p}")
+
+    if not is_compressed(p):
+        return p
+
+    if is_zip(p):
+        extract_root = scratch_dir / (p.stem + "_unzipped")
+        extract_root.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(p, "r") as zf:
+            zf.extractall(extract_root)
+        # Heuristic: pick a likely text-like file if present
+        candidates: List[Path] = []
+        for ext in TEXT_LIKE:
+            candidates.extend(extract_root.rglob(f"*{ext}"))
+        if candidates:
+            # Prefer shortest path / “closest match”
+            candidates.sort(key=lambda x: len(str(x)))
+            return candidates[0]
+        # Fallback: first file in tree
+        all_files = [q for q in extract_root.rglob("*") if q.is_file()]
+        if all_files:
+            all_files.sort(key=lambda x: len(str(x)))
+            return all_files[0]
+        raise FileNotFoundError(f"Zip archive had no files: {p}")
+
+    # .gz case: stream-decompress to scratch
+    out_path = scratch_dir / _strip_gz_suffix(p).name
+    with gzip.open(p, "rb") as src, open(out_path, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    return out_path
+
 def read_table_guess(path: Path) -> pd.DataFrame:
     """Read CSV/TSV by sniffing delimiter (fallback to TSV)."""
     try:
@@ -411,6 +509,8 @@ def parse_args():
     p.add_argument("--folder", required=True, help="Project root containing dna/ or vep/ subfolders")
     p.add_argument("--manifest", required=True, help="Path to dna_manifest.tsv (GDC-like)")
     p.add_argument("--out_dir", required=True, help="Output directory root (CSV written under out_dir/dna/)")
+    p.add_argument("--unzip-inputs", action="store true", help="If set, automatically materialize compressed inputs (.gz, .zip) into a scratch directory before processing.")
+    p.add_argument("--scratch-dir",default=None, help="Optional directory to use for temporary extracted files. Defaults to a new Temporary Directory each run.")
     p.add_argument("--max-records", type=int, default=None, help="Optional cap on parsed VCF records per case (for testing)")
     p.add_argument("--make-simplified", action="store_true", help="Emit a Case-ID list derived from --manifest")
     p.add_argument("--simplified", help="Path to write the Case-ID list (default: <out_dir>/case_ids.txt)")
@@ -504,6 +604,12 @@ def main():
     if args.preprocess_mutect:
         vcf_folder = Path(args.vcf_folder).resolve() if args.vcf_folder else (project_root / "dna")
         preprocess_mutect(vcf_folder, Path(args.manifest), out_root)
+
+    # Calls preprocess_mutect before downstream steps
+    if getattr(args, "preprocess_mutect", False):
+    vcf_root = Path(args.vcf_folder) if args.vcf_folder else Path(args.folder)
+    logging.info(f"[DNA] Preprocessing Mutect VCFs from {vcf_root} -> {Path(args.out_dir) / 'prep'}")
+    preprocess_mutect(folder=vcf_root, manifest_file=Path(args.manifest), out_dir=Path(args.out_dir))
 
     # These steps require a --simplified file listing Case-IDs (one per line; no header)
     if args.simplified:
