@@ -486,21 +486,41 @@ def resolve_dna_file(project_root: Path, file_id: str, file_name: str) -> Path:
       2) {project_root}/vep/{File ID}/{File Name}
       3) Absolute path in file_name if it exists
     """
-    # normalize file_id (can be empty)
-    file_id = (file_id or "").strip().strip("/")
-    # candidate 1: dna/
-    cand1 = (project_root / "dna" / file_id / file_name).resolve() if file_id else (project_root / "dna" / file_name).resolve()
-    if cand1.exists():
-        return cand1
-    # candidate 2: vep/
-    cand2 = (project_root / "vep" / file_id / file_name).resolve() if file_id else (project_root / "vep" / file_name).resolve()
-    if cand2.exists():
-        return cand2
-    # candidate 3: absolute (or relative to cwd)
-    cand3 = Path(file_name).expanduser().resolve()
-    if cand3.exists():
-        return cand3
-    raise FileNotFoundError(f"DNA source file not found for File ID '{file_id}', File Name '{file_name}'")
+    root = Path(project_root)
+
+    # 1) direct exact path if file_name contains dirs
+    candidate = root / file_name
+    if candidate.exists():
+        return candidate
+
+    # 2) search by basename anywhere under root
+    base = Path(file_name).name
+    hit = next(root.rglob(base), None)
+    if hit is not None:
+        return hit
+
+    # 3) if it's .vcf.gz in the manifest, try plain .vcf in case it was decompressed
+    if base.endswith(".vcf.gz"):
+        alt = base[:-3]  # drop .gz -> .vcf
+        hit = next(root.rglob(alt), None)
+        if hit is not None:
+            return hit
+
+    # 4) if it's .vcf in the manifest, try .vcf.gz
+    if base.endswith(".vcf"):
+        alt = base + ".gz"
+        hit = next(root.rglob(alt), None)
+        if hit is not None:
+            return hit
+
+    # 5) last-ditch: search by (partial) file_id token if present
+    fid = (file_id or "").strip()
+    if fid:
+        hit = next((p for p in root.rglob("*") if p.is_file() and fid in p.name), None)
+        if hit is not None:
+            return hit
+
+    raise FileNotFoundError(f"Could not resolve DNA file for '{file_name}' (id='{file_id}') under {root}")
 
 # ---- Core ----
 
@@ -580,15 +600,30 @@ def main():
             logging.warning(f"[{case_id}] {e}")
             continue
 
-        # Must be a VCF (plain or .gz)
-        if not (str(src).endswith(".vcf") or str(src).endswith(".vcf.gz")):
-            logging.warning(f"[{case_id}] Source is not a VCF (.vcf or .vcf.gz): {src.name}; skipping")
+        # create one scratch dir per run, not per file
+        if 'SCRATCH_ENTERED' not in globals():
+            SCRATCH_ENTERED = True
+            _scratch_cm = _scratch(args)   # contextmanager you added earlier
+            _scratch_ctx = _scratch_cm.__enter__()  # enter once
+            globals()['_SCRATCH_DIR'] = _scratch_ctx
+        
+        src = resolve_dna_file(project_root, file_id, file_name)
+        
+        # If requested, materialize compressed inputs to scratch and use THAT path downstream
+        eff_src = src
+        if getattr(args, "unzip_inputs", False):
+            eff_src = materialize_input(src, globals()['_SCRATCH_DIR'])
+        
+        # Accept .vcf or .vcf.gz (after materialization, eff_src will typically be .vcf)
+        suffs = "".join(eff_src.suffixes[-2:])  # handles .vcf.gz nicely
+        if not (eff_src.suffix == ".vcf" or suffs == ".vcf.gz"):
+            logging.warning(f"[{case_id}] Source is not a VCF (.vcf or .vcf.gz): {eff_src.name}; skipping")
             continue
-
+        
         try:
-            vdf = parse_vcf_to_df(src, max_records=args.max_records)
+            vdf = parse_vcf_to_df(eff_src, max_records=args.max_records)
         except Exception as e:
-            logging.warning(f"[{case_id}] Failed to parse VCF '{src.name}': {e}")
+            logging.warning(f"[{case_id}] Failed to parse VCF '{eff_src.name}': {e}")
             continue
 
         # Prepend Case-ID column and write out
@@ -626,6 +661,12 @@ def main():
     if produced == 0:
         logging.warning("No per-case DNA CSVs were produced. Check your dna_manifest.tsv and input files.")
     else:
+      # close the scratch context if we opened it
+        if '_scratch_cm' in globals():
+            try:
+                _scratch_cm.__exit__(None, None, None)
+            except Exception:
+                pass
         logging.info(f"Done. Wrote {produced} case CSVs under {out_root/'dna'}.")
 
 if __name__ == "__main__":
