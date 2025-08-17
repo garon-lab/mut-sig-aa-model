@@ -48,7 +48,7 @@ python dna_preprocessor.py \
   --preproccess-mutect \
   --vcf-folder <vcf directory> \
   --simplified <case_ids.txt>
-  --write-signatures --signature-label <name> defaults dna> \
+  --write-signatures --signature-label <type> defaults dna> \
   --extract-mutations <type, e.g., snp|snv> --write-matrices
 
 Arguments:
@@ -59,7 +59,7 @@ Arguments:
 
 General:
    --max-records N               Cap parsed VCF rows per case (for smoke tests)
-   --workers                     Controls parallel execution, if not provided, script uses min(8, CPU count)
+   --jobs                        Controls parallel execution, if not provided, script uses min(8, CPU count)
 
 Make/list Case-IDS:
    --make-simplified              Provides unique Case-IDs derived from --manifest
@@ -76,7 +76,6 @@ Analytics (require --simplified file listing Case-IDs):
    --signature-label L            Label for signature file prefix (default: dna)
    --extract-mutations {snp|snv}  Extracts ST/END AA pairs to <out_dir>/<type>/<Case-ID>.csv
    --write-matrices               Writes 21 x 21 amino acid matrices to <out_dir>/<type>/matrices/<Case-IDs>.csv
-
 
 Notes
 1. Case-ID normalization: uses first token before a comma (e.g., "case-01, C3N-04155" -> case-01)
@@ -95,6 +94,8 @@ Troubleshooting
 
 # PROTEIN PREPROCESSOR
 
+This script creates per-case protein CSVs under 'protein/{Case-ID}.csv' that can be used in multiomic integration. Output csvs will have PSM columns listed per case-id: NP (protein accessions), SEQ (peptide sequence), EV (reliability of match), INT (intensity for the selected channel).
+
 This script processes protein PSM files by:
 1. Splitting a sample manifest into channels.
 2. Creating index folders for output.
@@ -104,10 +105,33 @@ This script processes protein PSM files by:
 Dependencies: pandas, numpy, argparse, pathlib
 
 Usage:
-    python protein_preprocessor.py \
-
+python protein_preprocessor.py \
+  --folder <input directory> \
+  --manifest <gdc-manifest> \
+  --out_dir <output directory> \
+  --channel <channel list (e.g. [all|126|127N|127C|128N|128C|129N|129C|130N|130C|131])> \
+  --step <step (e.g., [all|split|prep|join])> \
+  --jobs 8
 
 Arguments:
+(Required)
+   --manifest    GDC-like TSV/CSV with at least Case ID, Channel, Directory, File Name
+   --folder      Input directory that contains raw data, format <folder>/P{##}/<File>.f{##}.psm>
+   --out_dir     Output directory that will contain <protein/<Case-ID>.csv that can be used in multiomic integration
+   --channel     Channel list (should mirror what is found in manifest)
+   --step        Step(s) to run: split, prep, join, all 
+                 *split writes per-channel manifests to <out_dir>/channel_<CH>.txt
+                 *prep reads psm parts and filters by --channel, writes to <out_dir>/<case-id>/part-XX.csv
+                 *join concatenantes part-*.csv for each case-id into <out_dir>/<case-id>.csv
+                 *all runs split, then prep, then join
+
+General:
+   --jobs        Controls parallel execution, if not provided, script uses min(8, CPU count)
+
+Troubleshooting
+1. If join says "No parts found", ensure prep ran and that FilefXX.psm were found for each ID.
+2. IF you see "Unrecognizaed channel", confirm the Channel matches one of the listed values.
+3. For I/O-heavy runs on fast storage, slightly increasing --jobs over core count can help; reduce if you observe disk contention or high memory.
 
 
 # MAKE MANIFEST
@@ -159,8 +183,7 @@ Arguments:
 # MULTIOMIC INTEGRATION
 
 This pipeline integrates multiple omics layers (DNA, RNA, methylation, protein, and copy number)
-for each case-id listed in a manifest. Can be used with an existing unifed manifest built with make_manifest.py or separate manifestsOnly the final protein files (with copy number added) are retained
-in the output directory. Note protein files must be preprocessed and in the format {Case-ID}.csv (see protein_preprocessor.py)
+for each case-id listed in a manifest. Can be used with an existing unifed manifest built with make_manifest.py or separate manifests. Only the final protein files (with copy number added) are retained in the output directory. Note protein files must be preprocessed and in the format {Case-ID}.csv (see protein_preprocessor.py). DNA files similarly can be modified with the dna_preprocessor.py.
 
 Dependencies: csv, argparse, shutil, pandas, numpy
 
