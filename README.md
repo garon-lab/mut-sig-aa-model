@@ -43,13 +43,13 @@ python dna_preprocessor.py \
   --manifest <gdc-manifest tsv> \
   --out_dir <output directory>
 
-(Optional)
+(Optional)\
   --make-simplified \
   --preproccess-mutect \
   --vcf-folder <vcf directory> \
   --simplified <case_ids.txt>
   --write-signatures --signature-label <type> defaults dna> \
-  --extract-mutations <type, e.g., snp|snv> --write-matrices \
+  --extract-mutations <type, e.g., snp|snv> --write-matrices 
 
 Arguments:
 (Required)
