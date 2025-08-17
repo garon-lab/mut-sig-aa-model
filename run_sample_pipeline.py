@@ -197,7 +197,7 @@ def main() -> None:
         "--manifest", str(dna_manifest),
         "--out_dir", str(dna_out),
         "--make-simplified",
-        "--jobs", str(args.jobs),
+        #"--jobs", str(args.jobs),
     ]
     run(cmd_dna, dry_run)
 
