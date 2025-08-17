@@ -116,7 +116,7 @@ def safe_read_csv(path: str) -> Optional[pd.DataFrame]:
     try:
         return pd.read_csv(path)
     except Exception as e:
-        logging.warning(f"Could not read CSV: {path} ({e})")
+        warning(f"Could not read CSV: {path} ({e})")
         return None
 
 def merge_with_reference(df_left: pd.DataFrame, df_right: pd.DataFrame, left_on: str, right_on: str) -> pd.DataFrame:
@@ -128,9 +128,9 @@ def resolve_reference_dir(ref_dir_opt: Optional[str], ref_zip_opt: Optional[str]
     if ref_dir_opt:
         ref_dir = Path(ref_dir_opt).resolve()
         if ref_dir.exists():
-            logging.info(f"Using reference directory: {ref_dir}")
+            info(f"Using reference directory: {ref_dir}")
             return ref_dir
-        logging.warning(f"--ref_dir not found: {ref_dir}")
+        warning(f"--ref_dir not found: {ref_dir}")
     # Zip
     zcandidates = [ref_zip_opt] if ref_zip_opt else []
     zcandidates += ["reference.zip"]
@@ -144,10 +144,10 @@ def resolve_reference_dir(ref_dir_opt: Optional[str], ref_zip_opt: Optional[str]
                 out.mkdir(parents=True, exist_ok=True)
                 with zipfile.ZipFile(zp, 'r') as zf:
                     zf.extractall(out)
-                logging.info(f"Extracted reference to: {out}")
+                info(f"Extracted reference to: {out}")
                 return out
             except Exception as e:
-                logging.warning(f"Failed to extract {zp}: {e}")
+                warning(f"Failed to extract {zp}: {e}")
     return None
 
 
@@ -217,11 +217,11 @@ def integrate_dna(df: pd.DataFrame) -> pd.DataFrame:
 
 def integrate_rna(case_id: str, folder: Path, ref_dir: Optional[Path], rna_manifest_name: str, base_df: pd.DataFrame) -> Optional[pd.DataFrame]:
     if ref_dir is None:
-        logging.warning("RNA integration requested but no reference directory; skipping.")
+        warning("RNA integration requested but no reference directory; skipping.")
         return base_df
     rna_manifest_path = ref_dir / rna_manifest_name
     if not rna_manifest_path.exists():
-        logging.warning(f\"RNA manifest not found: {rna_manifest_path}; skipping RNA.\")
+        logging.warning(f"RNA manifest not found: {rna_manifest_path}; skipping RNA.")
         return base_df
     df_rna = pd.read_table(rna_manifest_path, sep='\t', names=['Ensembl', 'Count'])
     df_rna['Ensembl'] = df_rna['Ensembl'].astype(str).str.split('.').str[0]
@@ -234,7 +234,7 @@ def integrate_ch3(case_id: str, folder: Path, ref_dir: Optional[Path], ch3_manif
         return base_df
     ch3_manifest_path = ref_dir / ch3_manifest_name
     if not ch3_manifest_path.exists():
-        logging.warning(f\"CH3 manifest not found: {ch3_manifest_path}; skipping CH3.\")
+        logging.warning(f"CH3 manifest not found: {ch3_manifest_path}; skipping CH3.")
         return base_df
     df_ch3 = pd.read_table(ch3_manifest_path, sep='\t', names=['cg', 'beta'])
     df_ch3.rename(columns={'cg': 'IlmnID', 'beta': 'beta_val'}, inplace=True)
