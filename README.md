@@ -23,10 +23,74 @@ To check install, the run_sample_pipeline script will download dependencies and 
 Usage example:
 python run_sample_pipeline.py
 
+
 # DNA PREPROCESSOR
 
-This script pre-processes VEP files to select for any variants of interest. The example in our manuscript is selecting for single nucleotide variants (SNVs) and sningle nucleotide polymorphisms (SNPs), but can be adapted as needed by the user.
+This script creates per-case DNA CSVs under 'dna/{Case-ID}.csv' that can be used in multiomic integration. It reads a GDC-like 'dna_manifest.tsv' and parses VCF/VCF.GZ files for each case. Our manuscript selects for single nucleotide variants (SNVs) and sningle nucleotide polymorphisms (SNPs), which is available pre-built in optional steps, but can be adapted as needed by the user. 
 
+This script processes VEP annotated mutect files by:
+1. Using a VCF parser to select for variants of interest (e.g., SNV/SNP).
+2. Summarizing SNP/SNV counts (optional).
+3. Extracting DNA mutational signatures (optional).
+4. Extracting amino acid substitutions from SNV/SNPs (optional).
+5. Displaying in amino acid substitutions in matrix format for further comparison/analysis (optional).
+
+Dependencies: pandas
+
+Usage:
+python dna_preprocessor.py \
+  --folder <input directory> \
+  --manifest <gdc-manifest tsv> \
+  --out_dir <output directory>
+
+(Optional)
+  --make-simplified \
+  --preproccess-mutect \
+  --vcf-folder <vcf directory> \
+  --simplified <case_ids.txt>
+  --write-signatures --signature-label <name> defaults dna> \
+  --extract-mutations <type, e.g., snp|snv> --write-matrices
+
+Arguments:
+(Required)
+   --manifest                    GDC-like TSV/CSV with at least Case ID, File Name (File ID optional)
+   --folder                      Input directory that contains raw data, format <folder>/dna/<File ID>/<File Name>
+   --out_dir                     Output directory that will contain <dna/<Case-ID>.csv that can be used in multiomic integration
+
+General:
+   --max-records N               Cap parsed VCF rows per case (for smoke tests)
+   --workers                     Controls parallel execution, if not provided, script uses min(8, CPU count)
+
+Make/list Case-IDS:
+   --make-simplified              Provides unique Case-IDs derived from --manifest
+   --simplified-out               Path to write the Case-ID list (default: <out_dir>/case_ids.txt)
+   
+Preprocess: 
+   --preprocess-mutect            Flag for extended analysis, strips '##' headesr and writes prep/<Case-ID>.txt
+   --vcf-folder                   Where per-case VCFs live (default <folder/dna>)
+
+Analytics (require --simplified file listing Case-IDs):
+   --simplified FILE              Path to case_ids.txt if it has been previously made, should have one Case-ID per line (no header)
+   --summarize-variants           Write SNP/SNV counts to <out.dir>/summary.csv
+   --write-signatures             Write <out_dir>/<label>-signature.csv
+   --signature-label L            Label for signature file prefix (default: dna)
+   --extract-mutations {snp|snv}  Extracts ST/END AA pairs to <out_dir>/<type>/<Case-ID>.csv
+   --write-matrices               Writes 21 x 21 amino acid matrices to <out_dir>/<type>/matrices/<Case-IDs>.csv
+
+
+Notes
+1. Case-ID normalization: uses first token before a comma (e.g., "case-01, C3N-04155" -> case-01)
+2. VCF parser: minimal; catpures core fields; genotype fileds are not parsed in the main CSVs.
+3. Analytics: expects MuTect-style flast TSVs from --preprocess-mutect with columns mapped to ['#CHROM', 'POS','ID','REF','ALT','QUAL','FILTER','INFO','FORMAT','NORMAL','TUMOR']
+4. Filters: SNP - FILTER contains alt and INFO contains missense, SNV - FILTER contains PASS and INFO contains missense
+5. Amino acid (AA) parsing: extract-mutations uses the 16th INFO pipe-filed (info.split('|')[15]) and takes its first/last char as AA start/end. Adjust if your annotation format differs.
+6. Duplicates: first row per Case-ID in the manifest "wins".
+
+Troubleshooting
+1. “DNA source file not found …” → Check that File Name and (if used) File ID match your folder/dna or folder/vep paths, or provide an absolute path in File Name.
+2. No CSVs produced → Verify Case ID and File Name columns exist in your manifest and that files are .vcf or .vcf.gz.
+3. Optional steps say file not found → Run --preprocess-mutect first to populate <out_dir>/prep/*.txt or ensure those files already exist.
+4. AA field index errors → Your annotation pipeline may place AA changes in a different INFO index. Update the parsing logic accordingly.
 
 
 # PROTEIN PREPROCESSOR
@@ -35,24 +99,15 @@ This script processes protein PSM files by:
 1. Splitting a sample manifest into channels.
 2. Creating index folders for output.
 3. Filtering and reorganizing raw data by TMT channel.
-4. Rejoining processed files into complete datasets named by sample-id.
+4. Rejoining processed files into complete datasets named by case-id.
 
 Dependencies: pandas, numpy, argparse, pathlib
 
 Usage:
     python protein_preprocessor.py \
-        --folder <input directory> \
-        --manifest <manifest file> \
-        --out_dir <output directory> \
-        --channel <TMT channel (e.g., 126,127N)> \
-        [--step all|channels|index|prep|join]
+
 
 Arguments:
-    --folder    Directory with raw input files
-    --manifest  Tab-delimited manifest file listing sample metadata
-    --out_dir   Output directory to store results
-    --channel   TMT channel identifier (e.g., 126, 127N, etc.)
-    --step      Pipeline step to run: all (default), channels, index, prep, or join
 
 
 # MAKE MANIFEST
@@ -123,7 +178,7 @@ Optional Usage:
         --input_protein_dir PROTEIN_DIR \
         --input_cn_dir CNV_DIR \
         --cn_manifest CNV_MANIFEST \
-        --out OUTPUT_DIR [--skip_rna] [--skip_ch3] [--skip_protein] [--skip_cn]
+        --out_dir OUTPUT_DIR [--skip_rna] [--skip_ch3] [--skip_protein] [--skip_cn]
 
 Arguments:
     --manifest            Tab-delimited file listing sample IDs (first column)
@@ -140,7 +195,7 @@ Arguments:
 
 Outputs:
     Only the final protein files (with SNV/SNP, RNA, CH3, protein, and CNV) are written to:
-        OUTPUT_DIR/{sample-ID}.csv
+        OUTPUT_DIR/{case-ID}.csv
 
 
 # MULTIOMIC ANALYSIS
@@ -230,3 +285,7 @@ results/
 ├── heatmap.png                  # Similarity matrix heatmap
 ├── aa-count.png                 # Per-sample count heatmap
 └── aa-proportion.png            # Per-sample proportion heatmap
+
+
+# LICENSE
+UCLA, Edward Garon & Amy Cummings, 2025.
