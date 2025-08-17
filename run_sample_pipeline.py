@@ -22,6 +22,7 @@ What it does:
 
 """
 
+#!/usr/bin/env python3
 import argparse
 import sys
 import os
@@ -30,12 +31,21 @@ from pathlib import Path
 import zipfile
 import subprocess
 from typing import Optional, List
+import logging
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import tempfile
 
 HERE = Path(__file__).resolve().parent
+
+# ---------- Logging ----------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+LOGGER = logging.getLogger("run_sample_pipeline")
 
 def log(msg: str) -> None:
     print(f"[run_sample_pipeline] {msg}")
 
+# ---------- Utilities ----------
 def extract_zip(zip_path: Path, dest_dir: Path, keep_extracted: bool) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
     # Extract into a fixed subdir for predictability
@@ -87,13 +97,68 @@ def run(cmd: List[str], dry_run: bool = False) -> None:
     if result.returncode != 0:
         raise SystemExit(result.returncode)
 
+def read_case_ids(case_list_path: Path) -> List[str]:
+    if not case_list_path.exists():
+        raise FileNotFoundError(f"Case list not found: {case_list_path}")
+    ids: List[str] = []
+    with case_list_path.open() as f:
+        for line in f:
+            s = line.strip()
+            if s:
+                ids.append(s)
+    if not ids:
+        raise ValueError(f"No case IDs found in {case_list_path}")
+    LOGGER.info("Loaded %d case IDs from %s", len(ids), case_list_path)
+    return ids
+
+def write_single_id_manifest(dest_dir: Path, case_id: str) -> Path:
+    """
+    Create a tiny manifest file acceptable to multiomic_integration.py that contains
+    exactly one ID. We keep it as plain text with just the ID per line, which matches
+    the repo's common 'case list' pattern.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    path = dest_dir / f"{case_id}.txt"
+    with path.open("w") as f:
+        f.write(case_id + "\n")
+    return path
+
+def run_integration_for_case(
+    case_id: str,
+    extracted_root: Path,
+    base_out: Path,
+    dry_run: bool,
+) -> str:
+    """
+    Per-sample worker: creates a small one-ID manifest and calls multiomic_integration.py
+    directing outputs into a per-case subdirectory.
+    """
+    single_out = base_out / case_id
+    single_out.mkdir(parents=True, exist_ok=True)
+    tmp_manifest_dir = base_out / "_tmp_manifests"
+    tmp_manifest = write_single_id_manifest(tmp_manifest_dir, case_id)
+
+    cmd_integ = [
+        sys.executable, str(HERE / "multiomic_integration.py"),
+        "--folder", str(extracted_root),
+        "--manifest", str(tmp_manifest),
+        "--out_dir", str(single_out),
+        "--step", "all",
+    ]
+    run(cmd_integ, dry_run)
+    return case_id
+
+# ---------- CLI / Main ----------
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Run sample pipeline on test.zip")    
+    ap = argparse.ArgumentParser(description="Run sample pipeline on test.zip (parallel-enabled)")
     ap.add_argument("--zip", default="test.zip", help="Path to test data zip (default: test.zip)")
     ap.add_argument("--out_dir", default="results", help="Output directory (default: results)")
-    ap.add_argument("--jobs", type=int, default=8, help="Parallel jobs where supported (default: 8)")
+    ap.add_argument("--jobs", type=int, default=max(1, (multiprocessing.cpu_count() or 1) - 1),
+                    help="Parallel jobs where supported (default: CPU count minus one)")
     ap.add_argument("--keep-extracted", action="store_true", help="Reuse previously extracted data if present")
-    ap.add_argument("--dry-run", action="store_true", help="Only print commands, do not execute")    
+    ap.add_argument("--dry-run", action="store_true", help="Only print commands, do not execute")
+    ap.add_argument("--per-sample-integration", action="store_true",
+                    help="Run multiomic integration per case in parallel using --jobs")
     args = ap.parse_args()
 
     dry_run = args.dry_run
@@ -114,7 +179,11 @@ def main() -> None:
     extracted_root = extract_zip(zip_path, HERE, keep_extracted=args.keep_extracted)
 
     # 2) Discover DNA manifest
-    dna_manifest = find_manifest(extracted_root, ["dna", "manifest"]) or find_manifest(extracted_root, ["mutect"]) or find_manifest(extracted_root, ["vep"])    
+    dna_manifest = (
+        find_manifest(extracted_root, ["dna", "manifest"])
+        or find_manifest(extracted_root, ["mutect"])
+        or find_manifest(extracted_root, ["vep"])
+    )
     if dna_manifest is None:
         raise FileNotFoundError("Could not locate a DNA manifest (looked for *dna*manifest*.tsv/.txt/.csv)")
 
@@ -123,7 +192,7 @@ def main() -> None:
     dna_out.mkdir(parents=True, exist_ok=True)
 
     cmd_dna = [
-        sys.executable, str(HERE / "dna_preprocessor.py"),
+        sys.argv[0] if sys.executable is None else sys.executable, str(HERE / "dna_preprocessor.py"),
         "--folder", str(extracted_root),
         "--manifest", str(dna_manifest),
         "--out_dir", str(dna_out),
@@ -153,20 +222,55 @@ def main() -> None:
     ]
     run(cmd_manifest, dry_run)
 
-    # 5) Run multiomic_integration.py (recommended usage)
+    # 5) Run multiomic_integration.py
     integ_out = out_dir / "integration"
     integ_out.mkdir(parents=True, exist_ok=True)
-    cmd_integ = [
-        sys.executable, str(HERE / "multiomic_integration.py"),
-        "--folder", str(extracted_root),
-        "--manifest", str(case_list),
-        "--out_dir", str(integ_out),
-        "--step", "all",
-    ]
-    run(cmd_integ, dry_run)
+
+    if args.per_sample_integration:
+        # Parallel per-case execution using ProcessPoolExecutor
+        ids = read_case_ids(case_list)
+        LOGGER.info("Per-sample integration enabled with --jobs=%d", args.jobs)
+        failed = 0
+        if args.jobs <= 1 or len(ids) <= 1:
+            for sid in ids:
+                try:
+                    run_integration_for_case(sid, extracted_root, integ_out, dry_run)
+                except Exception as e:
+                    failed += 1
+                    LOGGER.exception("Sample %s failed: %s", sid, e)
+        else:
+            with ProcessPoolExecutor(max_workers=args.jobs) as ex:
+                futures = {
+                    ex.submit(run_integration_for_case, sid, extracted_root, integ_out, dry_run): sid
+                    for sid in ids
+                }
+                for fut in as_completed(futures):
+                    sid = futures[fut]
+                    try:
+                        fut.result()
+                    except Exception as e:
+                        failed += 1
+                        LOGGER.exception("Sample %s failed: %s", sid, e)
+        if failed:
+            LOGGER.warning("Integration completed with %d failed sample(s).", failed)
+    else:
+        # Original behavior: one integration run over all cases
+        cmd_integ = [
+            sys.executable, str(HERE / "multiomic_integration.py"),
+            "--folder", str(extracted_root),
+            "--manifest", str(case_list),
+            "--out_dir", str(integ_out),
+            "--step", "all",
+        ]
+        run(cmd_integ, dry_run)
 
     log("Pipeline complete.")
     log(f"Outputs:\n- DNA: {dna_out}\n- Manifests: {mani_out}\n- Integration: {integ_out}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        LOGGER.exception("Pipeline failed: %s", e)
+        sys.exit(1)
+
