@@ -1,176 +1,172 @@
-#!/usr/bin/env python3
-import os
+"""
+RUN SAMPLE PIPELINE
+----------------------
+Extracts a test dataset zip and runs the recommended usage of:
+  1) dna_preprocessor.py
+  2) make_manifest.py (build-main mode)
+  3) multiomic_integration.py
+
+Defaults assume a `test.zip` laid out with subfolders like dna/, rna/, ch3/, cn/, protein/
+and GDC-style manifests.
+
+Usage:
+    python run_sample_pipeline.py         --zip test.zip         --out_dir results         [--jobs 8] [--keep-extracted]
+
+What it does:
+- Extracts the zip to ./_test_data (unless already extracted or --keep-extracted).
+- Auto-discovers a DNA manifest matching *dna*manifest*.tsv|.txt in the extracted tree.
+- Runs dna_preprocessor.py with the discovered manifest and writes outputs to <out_dir>/dna.
+- Writes a case list (<out_dir>/dna/case_ids.txt) via --make-simplified (used by integration).
+- Runs make_manifest.py --build-main to create a unified manifest set in <out_dir>/manifests.
+- Runs multiomic_integration.py with --folder <extracted_root>, --manifest <case_ids.txt>, --out_dir <out_dir>/integration, --step all.
+
+"""
+
+import argparse
 import sys
-import subprocess
-import time
-import urllib.request
-import zipfile
+import os
+import re
 from pathlib import Path
-import importlib.util
+import zipfile
+import subprocess
+from typing import Optional, List
 
-# -----------------------
-# Config
-# -----------------------
-ZIP_URL = "https://github.com/garon-lab/mut-sig-aa-model/raw/main/test_data.zip"
-ZIP_NAME = "test_data.zip"
-DATA_DIR = "test_data"
-RESULTS_DIR = "results"
-SUMMARY_FILE = os.path.join(RESULTS_DIR, "summary.txt")
-REPO_ROOT = Path(__file__).parent.resolve()
+HERE = Path(__file__).resolve().parent
 
-REQUIRED_SCRIPTS = [
-    "data_prep_summary.py",
-    "protein_preprocessor.py",
-    "multiomic_mapper.py",
-    "multiomic_integration.py",
-    "multiomic_analysis.py",
-    "signature_modeler.py",
-    "comparative_analysis.py"
-]
+def log(msg: str) -> None:
+    print(f"[run_sample_pipeline] {msg}")
 
-REQUIRED_PKGS = ["pandas", "numpy", "matplotlib", "seaborn"]
+def extract_zip(zip_path: Path, dest_dir: Path, keep_extracted: bool) -> Path:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    # Extract into a fixed subdir for predictability
+    extract_root = dest_dir / "_test_data"
+    if extract_root.exists() and keep_extracted:
+        log(f"Using existing extracted data at {extract_root}")
+        return extract_root
+    if extract_root.exists():
+        # Clear previous
+        for p in sorted(extract_root.rglob('*'), reverse=True):
+            try:
+                p.unlink()
+            except IsADirectoryError:
+                pass
+        for p in sorted(extract_root.glob('*')):
+            if p.is_dir():
+                try:
+                    p.rmdir()
+                except OSError:
+                    pass
+        try:
+            extract_root.rmdir()
+        except OSError:
+            pass
+    extract_root.mkdir(parents=True, exist_ok=True)
+    log(f"Extracting {zip_path} -> {extract_root}")
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        zf.extractall(extract_root)
+    return extract_root
 
-# ANSI Colors
-GREEN = "\033[92m"
-RED = "\033[91m"
-RESET = "\033[0m"
+def find_manifest(root: Path, pattern_keywords: List[str]) -> Optional[Path]:
+    # Search for files containing ALL keywords in their name, case-insensitive
+    candidates = []
+    for p in root.rglob("*.*"):
+        name = p.name.lower()
+        if any(name.endswith(ext) for ext in (".tsv", ".txt", ".csv")):
+            if all(kw in name for kw in pattern_keywords):
+                candidates.append(p)
+    # Prefer .tsv > .txt > .csv, shortest path first
+    ext_rank = {".tsv": 0, ".txt": 1, ".csv": 2}
+    candidates.sort(key=lambda p: (ext_rank.get(p.suffix.lower(), 3), len(str(p))))
+    return candidates[0] if candidates else None
 
-# -----------------------
-# Helpers
-# -----------------------
-def install_dependencies():
-    for pkg in REQUIRED_PKGS:
-        if importlib.util.find_spec(pkg) is None:
-            print(f"Installing missing dependency: {pkg}")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+def run(cmd: List[str], dry_run: bool = False) -> None:
+    log("$ " + " ".join(cmd))
+    if dry_run:
+        return
+    result = subprocess.run(cmd, stdout=sys.stdout, stderr=sys.stderr)
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Run sample pipeline on test.zip")    
+    ap.add_argument("--zip", default="test.zip", help="Path to test data zip (default: test.zip)")
+    ap.add_argument("--out_dir", default="results", help="Output directory (default: results)")
+    ap.add_argument("--jobs", type=int, default=8, help="Parallel jobs where supported (default: 8)")
+    ap.add_argument("--keep-extracted", action="store_true", help="Reuse previously extracted data if present")
+    ap.add_argument("--dry-run", action="store_true", help="Only print commands, do not execute")    
+    args = ap.parse_args()
+
+    dry_run = args.dry_run
+
+    zip_path = Path(args.zip).resolve()
+    if not zip_path.exists():
+        # Try to resolve relative to script dir
+        alt = (HERE / args.zip).resolve()
+        if alt.exists():
+            zip_path = alt
         else:
-            print(f"Dependency OK: {pkg}")
+            raise FileNotFoundError(f"Zip not found: {args.zip}")
 
-def download_data():
-    if not Path(ZIP_NAME).exists():
-        print(f"Downloading {ZIP_NAME} from {ZIP_URL} ...")
-        urllib.request.urlretrieve(ZIP_URL, ZIP_NAME)
-        print("Download complete.")
+    out_dir = Path(args.out_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-def extract_data():
-    if not Path(DATA_DIR).exists():
-        print(f"Extracting {ZIP_NAME} ...")
-        with zipfile.ZipFile(ZIP_NAME, "r") as zip_ref:
-            zip_ref.extractall(DATA_DIR)
-        print("Extraction complete.")
+    # 1) Extract
+    extracted_root = extract_zip(zip_path, HERE, keep_extracted=args.keep_extracted)
 
-def ensure_gitignore():
-    gitignore_path = REPO_ROOT / ".gitignore"
-    if gitignore_path.exists():
-        content = gitignore_path.read_text().splitlines()
-    else:
-        content = []
-    if f"{DATA_DIR}/" not in content:
-        content.append(f"{DATA_DIR}/")
-        gitignore_path.write_text("\n".join(content))
-        print(f"Added {DATA_DIR}/ to .gitignore")
+    # 2) Discover DNA manifest
+    dna_manifest = find_manifest(extracted_root, ["dna", "manifest"]) or find_manifest(extracted_root, ["mutect"]) or find_manifest(extracted_root, ["vep"])    
+    if dna_manifest is None:
+        raise FileNotFoundError("Could not locate a DNA manifest (looked for *dna*manifest*.tsv/.txt/.csv)")
 
-def run_step(script, args):
-    cmd = [sys.executable, str(REPO_ROOT / script)] + args
-    start = time.time()
-    try:
-        subprocess.run(cmd, check=True)
-        duration = time.time() - start
-        return ("PASS", duration, "Completed successfully")
-    except subprocess.CalledProcessError as e:
-        duration = time.time() - start
-        return ("FAIL", duration, e.stderr.decode() if e.stderr else str(e))
+    # 3) Run dna_preprocessor.py (recommended minimal usage, plus make-simplified)
+    dna_out = out_dir / "dna"
+    dna_out.mkdir(parents=True, exist_ok=True)
 
-def main():
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    install_dependencies()
-    download_data()
-    extract_data()
-    ensure_gitignore()
+    cmd_dna = [
+        sys.executable, str(HERE / "dna_preprocessor.py"),
+        "--folder", str(extracted_root),
+        "--manifest", str(dna_manifest),
+        "--out_dir", str(dna_out),
+        "--make-simplified",
+        "--jobs", str(args.jobs),
+    ]
+    run(cmd_dna, dry_run)
 
-    # Detect scripts
-    scripts_found = [s for s in REQUIRED_SCRIPTS if (REPO_ROOT / s).exists()]
-    if len(scripts_found) < len(REQUIRED_SCRIPTS):
-        print(f"Warning: Missing scripts: {set(REQUIRED_SCRIPTS) - set(scripts_found)}")
+    # Case list path (default from README: <out_dir>/case_ids.txt)
+    case_list = dna_out / "case_ids.txt"
+    if not case_list.exists():
+        # Fallback: try common names
+        alt = list(dna_out.glob("*case*id*.txt"))
+        if alt:
+            case_list = alt[0]
+        else:
+            raise FileNotFoundError("Case list not found after dna_preprocessor. Expected results/dna/case_ids.txt")
 
-    # Step arguments
-    step_args = {
-        "data_prep_summary.py": [
-            f"{DATA_DIR}/test_data/test_mutect",
-            f"{DATA_DIR}/test_data/mutect_manifest.tsv",
-            f"{RESULTS_DIR}/data_prep",
-            "2", "--step", "all"
-        ],
-        "protein_preprocessor.py": [
-            "--folder", f"{DATA_DIR}/test_data/psm",
-            "--manifest", f"{DATA_DIR}/test_data/psm_manifest.txt",
-            "--out", f"{RESULTS_DIR}/psm",
-            "--channel", "Expression",
-            "--step", "all"
-        ],
-        "multiomic_mapper.py": [
-            "--folder", f"{RESULTS_DIR}/data_prep",
-            "--manifest", f"{DATA_DIR}/test_data/mutect_manifest.txt",
-            "--out", f"{RESULTS_DIR}/mapper",
-            "--ref", f"{REPO_ROOT}/reference",
-            "--step", "all"
-        ],
-        "multiomic_integration.py": [
-            "--manifest", f"{DATA_DIR}/test_data/mutect_manifest.txt",
-            "--input_var_dir", f"{RESULTS_DIR}/mapper",
-            "--input_rna_dir", f"{DATA_DIR}/test_data/rna",
-            "--rna_manifest", f"{DATA_DIR}/test_data/rna_manifest.txt",
-            "--input_ch3_dir", f"{DATA_DIR}/test_data/ch3",
-            "--ch3_manifest", f"{DATA_DIR}/test_data/ch3_manifest.txt",
-            "--input_protein_dir", f"{RESULTS_DIR}/psm",
-            "--input_cn_dir", f"{DATA_DIR}/test_data/cn",
-            "--cn_manifest", f"{DATA_DIR}/test_data/cn_manifest.txt",
-            "--out", f"{RESULTS_DIR}/integration"
-        ],
-        "multiomic_analysis.py": [
-            "--input_dir", f"{RESULTS_DIR}/integration",
-            "--manifest", f"{DATA_DIR}/test_data/mutect_manifest.txt",
-            "--out_dir", f"{RESULTS_DIR}/analysis",
-            "--step", "all"
-        ],
-        "signature_modeler.py": [
-            "--observed_dir", f"{RESULTS_DIR}/data_prep",
-            "--manifest", f"{DATA_DIR}/test_data/mutect_manifest.txt",
-            "--out", f"{RESULTS_DIR}/comparison",
-            "--step", "all"
-        ],
-        "comparative_analysis.py": [
-            "--observed_dir", f"{DATA_DIR}/observed",
-            "--comparison_dir", f"{DATA_DIR}/comparison",
-            "--manifest", f"{DATA_DIR}/test_data/mutect_manifest.txt",
-            "--out_dir", f"{RESULTS_DIR}/comparative",
-            "--step", "all"
-        ]
-    }
+    # 4) Run make_manifest.py --build-main
+    mani_out = out_dir / "manifests"
+    mani_out.mkdir(parents=True, exist_ok=True)
+    cmd_manifest = [
+        sys.executable, str(HERE / "make_manifest.py"),
+        "--build-main",
+        "--project_root", str(extracted_root),
+        "--main_out", str(mani_out),
+    ]
+    run(cmd_manifest, dry_run)
 
-    summary = []
-    for script in scripts_found:
-        print(f"\n=== Running {script} ===")
-        status, duration, message = run_step(script, step_args[script])
-        color_status = f"{GREEN}{status}{RESET}" if status == "PASS" else f"{RED}{status}{RESET}"
-        print(f"{script} - {color_status} ({duration:.2f}s) - {message}")
-        summary.append((script, status, duration, message))
+    # 5) Run multiomic_integration.py (recommended usage)
+    integ_out = out_dir / "integration"
+    integ_out.mkdir(parents=True, exist_ok=True)
+    cmd_integ = [
+        sys.executable, str(HERE / "multiomic_integration.py"),
+        "--folder", str(extracted_root),
+        "--manifest", str(case_list),
+        "--out_dir", str(integ_out),
+        "--step", "all",
+    ]
+    run(cmd_integ, dry_run)
 
-    # Print and save summary table
-    header = f"{'Step':<30} {'Status':<8} {'Time (s)':<10} Message"
-    sep = "-" * len(header)
-    print("\n" + header)
-    print(sep)
-    with open(SUMMARY_FILE, "w") as f:
-        f.write(header + "\n" + sep + "\n")
-        for step, status, duration, message in summary:
-            status_col = status
-            color_status = f"{GREEN}{status}{RESET}" if status == "PASS" else f"{RED}{status}{RESET}"
-            line = f"{step:<30} {color_status:<8} {duration:<10.2f} {message}"
-            print(line)
-            f.write(f"{step:<30} {status_col:<8} {duration:<10.2f} {message}\n")
-
-    print(f"\nSummary saved to {SUMMARY_FILE}")
+    log("Pipeline complete.")
+    log(f"Outputs:\n- DNA: {dna_out}\n- Manifests: {mani_out}\n- Integration: {integ_out}")
 
 if __name__ == "__main__":
     main()
