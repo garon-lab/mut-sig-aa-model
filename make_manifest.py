@@ -23,7 +23,7 @@ Usage
    python make_manifest.py \
         --build-main \
         --project_root <project directory> \
-        --main_out <output directory>
+        --out_dir <output directory>
 
 (Single-file):
    python make_manifest.py \
@@ -50,6 +50,7 @@ Arguments:
 """
 
 import argparse
+import logging
 from pathlib import Path
 import re
 import pandas as pd
@@ -72,6 +73,7 @@ def _read_gdc(path: Path) -> pd.DataFrame:
 
 def _write_tsv(df: pd.DataFrame, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("Writing TSF to %s")
     df.to_csv(out_path, sep="\t", index=False)
 
 def _norm_case_id(val: str) -> str:
@@ -99,7 +101,7 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
     Protein files are picked by filename from: protein/{Case-ID}.csv (or any *.csv containing the Case-ID).
     """
     project_root = Path(project_root).resolve()
-
+    logger.info("Building main manifest from root: %s", project_root)
     gdc_candidates = {
         "rna": [project_root / "rna" / "gdc-rna.tsv"],
         "ch3": [project_root / "ch3" / "gdc-ch3.tsv"],
@@ -188,6 +190,7 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
 
     out_df = pd.DataFrame(rows, columns=["Case-ID", "DNA", "RNA", "CH3", "CN", "Protein"])
     _write_tsv(out_df, out_path)
+    logger.info ("Manifest written to %s", out_path)
     return out_path
 
 # ---------- Emit per-modality GDC-like manifests from a unified main manifest ----------
@@ -302,7 +305,7 @@ def parse_args():
     p.add_argument("--build-main", action="store_true",
                    help="Build a unified main-manifest.tsv from per-modality GDC TSVs under --project_root")
     p.add_argument("--project_root", help="Project root containing rna/ch3/cn(v)/vep(dna)/protein subfolders")
-    p.add_argument("--main_out", default="main-manifest.tsv", help="Output path for unified manifest when --build-main")
+    p.add_argument("--out_dir", help="Directory to write output manifests")
     p.add_argument("--prefer-sample-type", default="Primary Tumor",
                    help="Preferred Sample Type string when multiple rows per case (default: Primary Tumor)")
 
@@ -323,7 +326,24 @@ def parse_args():
 
 def main():
     args = parse_args()
+    logging.basicConfig(
+       level=getattr(logging, args.log_level.upper(), logging.INFO),
+       format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    )
+    logger.info("Starting make_manifest.")
+   
+    out_dir = Path(args.out_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    outp = out_dir / "manifest.tsv"
 
+    project_root = Path(args.project_root).expanduser().resolve()
+    built = build_main_manifest(
+    project_root,
+    outp,
+    prefer_sample_type=args.prefer_sample_type,
+    )
+    logger.info("Inputs resolved")
+   
     if args.build_main:
         if not args.project_root:
             raise SystemExit("--project_root is required with --build-main")
