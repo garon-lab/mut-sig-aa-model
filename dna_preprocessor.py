@@ -383,7 +383,6 @@ def is_compressed(p: Path) -> bool:
 def is_zip(p: Path) -> bool:
     return p.suffix.lower() == ".zip"
 
-@contextmanager
 def _scratch(args) -> Path:
     """
     Yields a scratch directory Path. If --scratch-dir is provided, re-use it.
@@ -628,7 +627,7 @@ def main():
 
         # Prepend Case-ID column and write out
         vdf.insert(0, "Case-ID", case_id)
-        out_path = out_root / "dna" / f"{safe_case}.csv"
+        out_path = out_root / "dna" / f"{case_id}.csv"
         ensure_dir(out_path.parent)
         vdf.to_csv(out_path, index=False)
         produced += 1
