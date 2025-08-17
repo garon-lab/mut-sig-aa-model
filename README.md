@@ -37,7 +37,7 @@ This script processes VEP annotated mutect files by:
 
 Dependencies: pandas
 
-Usage:
+Usage:\
 python dna_preprocessor.py \
   --folder <input directory> \
   --manifest <gdc-manifest tsv> \
@@ -47,35 +47,35 @@ python dna_preprocessor.py \
   --make-simplified \
   --preproccess-mutect \
   --vcf-folder <vcf directory> \
-  --simplified <case_ids.txt>
+  --simplified <case_ids.txt> \
   --write-signatures --signature-label <type> defaults dna> \
   --extract-mutations <type, e.g., snp|snv> --write-matrices 
 
-Arguments:
-(Required)
+Arguments:\
+(Required)\
    --manifest                    GDC-like TSV/CSV with at least Case ID, File Name (File ID optional)\
    --folder                      Input directory that contains raw data, format <folder>/dna/<File ID>/<File Name>\
    --out_dir                     Output directory that will contain <dna/<Case-ID>.csv that can be used in multiomic integration\
 
-General:
+General:\
    --max-records N               Cap parsed VCF rows per case (for smoke tests)\
-   --jobs                        Controls parallel execution, if not provided, script uses min(8, CPU count)\
+   --jobs                        Controls parallel execution, if not provided, script uses min(8, CPU count)
 
 Make/list Case-IDS:\
    --make-simplified              Provides unique Case-IDs derived from --manifest\
    --simplified-out               Path to write the Case-ID list (default: <out_dir>/case_ids.txt)\
    
-Preprocess: 
+Preprocess: \
    --preprocess-mutect            Flag for extended analysis, strips '##' headers and writes prep/<Case-ID>.txt\
    --vcf-folder                   Where per-case VCFs live (default <folder/dna>)
 
-Analytics (require --simplified file listing Case-IDs):
-   --simplified FILE              Path to case_ids.txt if it has been previously made, should have one Case-ID per line (no header)
-   --summarize-variants           Write SNP/SNV counts to <out.dir>/summary.csv
-   --write-signatures             Write <out_dir>/<label>-signature.csv
-   --signature-label L            Label for signature file prefix (default: dna)
-   --extract-mutations {snp|snv}  Extracts ST/END AA pairs to <out_dir>/<type>/<Case-ID>.csv
-   --write-matrices               Writes 21 x 21 amino acid matrices to <out_dir>/<type>/matrices/<Case-IDs>.csv
+Analytics (require --simplified file listing Case-IDs):\
+   --simplified FILE              Path to case_ids.txt if it has been previously made, should have one Case-ID per line (no header)\
+   --summarize-variants           Write SNP/SNV counts to <out.dir>/summary.csv\
+   --write-signatures             Write <out_dir>/<label>-signature.csv\
+   --signature-label L            Label for signature file prefix (default: dna)\
+   --extract-mutations {snp|snv}  Extracts ST/END AA pairs to <out_dir>/<type>/<Case-ID>.csv\
+   --write-matrices               Writes 21 x 21 amino acid matrices to <out_dir>/<type>/matrices/<Case-IDs>.csv\
 
 Notes
 1. Case-ID normalization: uses first token before a comma (e.g., "case-01, C3N-04155" -> case-01)
