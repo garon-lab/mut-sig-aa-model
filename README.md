@@ -49,24 +49,24 @@ python dna_preprocessor.py \
   --vcf-folder <vcf directory> \
   --simplified <case_ids.txt>
   --write-signatures --signature-label <type> defaults dna> \
-  --extract-mutations <type, e.g., snp|snv> --write-matrices
+  --extract-mutations <type, e.g., snp|snv> --write-matrices \
 
 Arguments:
 (Required)
-   --manifest                    GDC-like TSV/CSV with at least Case ID, File Name (File ID optional)
-   --folder                      Input directory that contains raw data, format <folder>/dna/<File ID>/<File Name>
-   --out_dir                     Output directory that will contain <dna/<Case-ID>.csv that can be used in multiomic integration
+   --manifest                    GDC-like TSV/CSV with at least Case ID, File Name (File ID optional)\
+   --folder                      Input directory that contains raw data, format <folder>/dna/<File ID>/<File Name>\
+   --out_dir                     Output directory that will contain <dna/<Case-ID>.csv that can be used in multiomic integration\
 
 General:
-   --max-records N               Cap parsed VCF rows per case (for smoke tests)
-   --jobs                        Controls parallel execution, if not provided, script uses min(8, CPU count)
+   --max-records N               Cap parsed VCF rows per case (for smoke tests)\
+   --jobs                        Controls parallel execution, if not provided, script uses min(8, CPU count)\
 
-Make/list Case-IDS:
-   --make-simplified              Provides unique Case-IDs derived from --manifest
-   --simplified-out               Path to write the Case-ID list (default: <out_dir>/case_ids.txt)
+Make/list Case-IDS:\
+   --make-simplified              Provides unique Case-IDs derived from --manifest\
+   --simplified-out               Path to write the Case-ID list (default: <out_dir>/case_ids.txt)\
    
 Preprocess: 
-   --preprocess-mutect            Flag for extended analysis, strips '##' headesr and writes prep/<Case-ID>.txt
+   --preprocess-mutect            Flag for extended analysis, strips '##' headers and writes prep/<Case-ID>.txt\
    --vcf-folder                   Where per-case VCFs live (default <folder/dna>)
 
 Analytics (require --simplified file listing Case-IDs):
