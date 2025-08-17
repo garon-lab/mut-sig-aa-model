@@ -1,26 +1,73 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-dna_preprocessor.py
+DNA PREPROCESSOR
 
-Create per-case DNA CSVs under `dna/{Case-ID}.csv` that can be consumed by multiomic_pipeline.
-Reads a GDC-like `dna_manifest.tsv` and parses VCF/VCF.GZ files for each case.
+This script creates per-case DNA CSVs under 'dna/{Case-ID}.csv' that can be used in multiomic integration. It reads a GDC-like 'dna_manifest.tsv' and parses VCF/VCF.GZ files for each case. Our manuscript selects for single nucleotide variants (SNVs) and sningle nucleotide polymorphisms (SNPs), which is available pre-built in optional steps, but can be adapted as needed by the user. 
 
-Key changes vs the old script:
-  1) Script name: dna_preprocessor.py
-  2) "sample-id" -> "case-id" everywhere
-  3) "--out" -> "--out_dir"
-  4) Removed "--mode"; fixed to a simple **VCF parser**
-  5) References to "m.txt" replaced by "dna_manifest.tsv"
+This script processes VEP annotated mutect files by:
+1. Using a VCF parser to select for variants of interest (e.g., SNV/SNP).
+2. Summarizing SNP/SNV counts (optional).
+3. Extracting DNA mutational signatures (optional).
+4. Extracting amino acid substitutions from SNV/SNPs (optional).
+5. Displaying in amino acid substitutions in matrix format for further comparison/analysis (optional).
+
+Dependencies: pandas
 
 Usage:
-  python dna_preprocessor.py \
-    --folder /path/to/PROJECT_ROOT \
-    --manifest /path/to/dna_manifest.tsv \
-    --out_dir /path/to/OUT
+python dna_preprocessor.py \
+  --folder <input directory> \
+  --manifest <gdc-manifest tsv> \
+  --out_dir <output directory>
 
-Outputs:
-  OUT/dna/{Case-ID}.csv   (created from the VCF listed in dna_manifest.tsv)
+(Optional)\
+  --make-simplified \
+  --preproccess-mutect \
+  --vcf-folder <vcf directory> \
+  --simplified <case_ids.txt> \
+  --write-signatures --signature-label <type> defaults dna> \
+  --extract-mutations <type, e.g., snp|snv> --write-matrices 
+
+Arguments:
+(Required)\
+   --manifest           GDC-like TSV/CSV with at least Case ID, File Name (File ID optional)\
+   --folder             Input directory that contains raw data, format <folder>/dna/<File ID>/<File Name>\
+   --out_dir            Output directory that will contain <dna/<Case-ID>.csv that can be used in multiomic integration\
+
+General:\
+   --max-records N      Cap parsed VCF rows per case (for smoke tests)\
+   --jobs               Controls parallel execution, if not provided, script uses min(8, CPU count)
+
+Make/list Case-IDS:\
+   --make-simplified    Provides unique Case-IDs derived from --manifest\
+   --simplified-out     Path to write the Case-ID list (default: <out_dir>/case_ids.txt)\
+   
+Preprocess: \
+   --preprocess-mutect  Flag for extended analysis, strips '##' headers and writes prep/<Case-ID>.txt\
+   --vcf-folder         Where per-case VCFs live (default <folder/dna>)
+
+Analytics (require --simplified file listing Case-IDs):\
+   --simplified FILE              Path to case_ids.txt if it has been previously made, should have one Case-ID per line (no header)\
+   --summarize-variants           Write SNP/SNV counts to <out.dir>/summary.csv\
+   --write-signatures             Write <out_dir>/<label>-signature.csv\
+   --signature-label L            Label for signature file prefix (default: dna)\
+   --extract-mutations {snp|snv}  Extracts ST/END AA pairs to <out_dir>/<type>/<Case-ID>.csv\
+   --write-matrices               Writes 21 x 21 amino acid matrices to <out_dir>/<type>/matrices/<Case-IDs>.csv\
+
+Notes
+1. Case-ID normalization: uses first token before a comma (e.g., "case-01, C3N-04155" -> case-01)
+2. VCF parser: minimal; catpures core fields; genotype fileds are not parsed in the main CSVs.
+3. Analytics: expects MuTect-style flast TSVs from --preprocess-mutect with columns mapped to ['#CHROM', 'POS','ID','REF','ALT','QUAL','FILTER','INFO','FORMAT','NORMAL','TUMOR']
+4. Filters: SNP - FILTER contains alt and INFO contains missense, SNV - FILTER contains PASS and INFO contains missense
+5. Amino acid (AA) parsing: extract-mutations uses the 16th INFO pipe-filed (info.split('|')[15]) and takes its first/last char as AA start/end. Adjust if your annotation format differs.
+6. Duplicates: first row per Case-ID in the manifest "wins".
+
+Troubleshooting
+1. “DNA source file not found …” → Check that File Name and (if used) File ID match your folder/dna or folder/vep paths, or provide an absolute path in File Name.
+2. No CSVs produced → Verify Case ID and File Name columns exist in your manifest and that files are .vcf or .vcf.gz.
+3. Optional steps say file not found → Run --preprocess-mutect first to populate <out_dir>/prep/*.txt or ensure those files already exist.
+4. AA field index errors → Your annotation pipeline may place AA changes in a different INFO index. Update the parsing logic accordingly.
+
 """
 
 import argparse
