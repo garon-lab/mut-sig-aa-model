@@ -607,9 +607,9 @@ def main():
 
     # Calls preprocess_mutect before downstream steps
     if getattr(args, "preprocess_mutect", False):
-    vcf_root = Path(args.vcf_folder) if args.vcf_folder else Path(args.folder)
-    logging.info(f"[DNA] Preprocessing Mutect VCFs from {vcf_root} -> {Path(args.out_dir) / 'prep'}")
-    preprocess_mutect(folder=vcf_root, manifest_file=Path(args.manifest), out_dir=Path(args.out_dir))
+      vcf_root = Path(args.vcf_folder) if args.vcf_folder else Path(args.folder)
+      logging.info(f"[DNA] Preprocessing Mutect VCFs from {vcf_root} -> {Path(args.out_dir) / 'prep'}")
+      preprocess_mutect(folder=vcf_root, manifest_file=Path(args.manifest), out_dir=Path(args.out_dir))
 
     # These steps require a --simplified file listing Case-IDs (one per line; no header)
     if args.simplified:
