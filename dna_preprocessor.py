@@ -339,6 +339,7 @@ def emit_simplified_case_list(manifest_path: Path, out_path: Path) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(uniq) + "\n")
     return out_path
+  
 def read_table_guess(path: Path) -> pd.DataFrame:
     """Read CSV/TSV by sniffing delimiter (fallback to TSV)."""
     try:
@@ -498,7 +499,7 @@ def main():
 
     # ----- Optional utilities -----
     # Preprocess MuTect-style VCFs: strips '##' and writes out_dir/prep/{Case-ID}.txt
-    if args.preprocess_mutect:
+    if args.preprocess-mutect:
         vcf_folder = Path(args.vcf_folder).resolve() if args.vcf_folder else (project_root / "dna")
         preprocess_mutect(vcf_folder, Path(args.manifest), out_root)
 
