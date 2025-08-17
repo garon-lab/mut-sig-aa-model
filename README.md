@@ -1,14 +1,14 @@
 # MUT-SIG-AA-MODEL
 Uses publicly available genomic data to create multiomic structures of amino acid substitutions from non-synonymous mutations with ability to compare amino acid substitution matrices and model expected output from mutational signature. 
 
-You will need downloaded VEP-annotated mutect, RNA (RNASeq), CH3 (methylation), PSM (protein), and copy number (CN) files with their respective manifests in standard CPTAC format (https://proteomic.datacommons.cancer.gov/pdc/). Standard references are available for dowload with this script and otherwise should include esng gene symbols, gene symbol names, uni-ensg, uni-np, and methylation probe IDs matched to chromosome (CHR) and gene name.
+You will need downloaded VEP-annotated mutect, RNA (RNASeq), CH3 (methylation), PSM (protein), and copy number (CN) files with their respective manifests in standard GDC format (https://proteomic.datacommons.cancer.gov/pdc/). Standard references are available for dowload with this script and otherwise should include esng gene symbols, gene symbol names, uni-ensg, uni-np, and methylation probe IDs matched to chromosome (CHR) and gene name.
 
-Python 3.7+ is required.
+Python 3.8+ is required.
 
 Recommended order of scripts:
-1. Data prep summary
+1. DNA (VEP) preprocessor
 2. Protein (PSM) preprocesser
-3. Multiomic mapping
+3. Make manifest
 4. Multiomic data integration
 5. Multiomic analysis
 6. Signature modeler (optional)
@@ -23,37 +23,10 @@ To check install, the run_sample_pipeline script will download dependencies and 
 Usage example:
 python run_sample_pipeline.py
 
+# DNA PREPROCESSOR
 
-# DATA PREP SUMMARY
+This script pre-processes VEP files to select for any variants of interest. The example in our manuscript is selecting for single nucleotide variants (SNVs) and sningle nucleotide polymorphisms (SNPs), but can be adapted as needed by the user.
 
-Pipeline for processing VEP-annotated Mutect variant files and generating SNP/SNV summaries, mutational signature, and amino acid substitution matrices. These can be used for observed inputs in the comparison and modeling script.
-
-Dependencies: pandas, gunzip
-
-Usage example: 
-python data_prep_summary.py \
-        --folder <mutect file directory> \
-        --manifest <sample_ID manifest> \
-        --out <output directory> \
-        --mode <mode> \
-        [--step all|summary|signatures|matrices]
-
-Arguments:
-    --folder   Directory containing the input variant files
-    --manifest Tab-delimited manifest file with sample metadata
-    --out      Output directory for results
-    --mode     Manifest mode (1 = use column 2 trimmed (removes .gz); 2 = use column 6 split for multiple samples)
-    --step     Pipeline step to run: all (default), summary, signatures, or matrices
-    
-Creates directory:
-    m.txt                  - Simplified manifest file
-    summary.csv            - Counts of SNP/SNV per sample
-    signature.csv          - Mutational signature files for SNP/SNV
-    prep/                  - Preprocessed VCF text files (sampleID-mutect.txt)
-    snp/                   - Extracted SNP amino acid changes
-        matrices/          - Observed SNP substitution matrices
-    snv/                   - Extracted SNV amino acid changes
-        matrices/          - Observed SNV substitution matrices
 
 
 # PROTEIN PREPROCESSOR
@@ -70,56 +43,76 @@ Usage:
     python protein_preprocessor.py \
         --folder <input directory> \
         --manifest <manifest file> \
-        --out <output directory> \
+        --out_dir <output directory> \
         --channel <TMT channel (e.g., 126,127N)> \
         [--step all|channels|index|prep|join]
 
 Arguments:
     --folder    Directory with raw input files
     --manifest  Tab-delimited manifest file listing sample metadata
-    --out       Output directory to store results
+    --out_dir   Output directory to store results
     --channel   TMT channel identifier (e.g., 126, 127N, etc.)
     --step      Pipeline step to run: all (default), channels, index, prep, or join
 
 
-# MULTIOMIC MAPPER
+# MAKE MANIFEST
 
-This pipeline augments VEP-annotated Mutect variant files with gene symbols, gene names, UniProt IDs, and Illumina methylation probe IDs ('cg'), splitting by chromosome and recombining to enable the addition of multiomic data to to VEP-annotated Mutect files.
+This script organizes metafiles (manifests) that will be used to integrate multiomic information for calling during multiomic integration. Outputs are tab-separated TSVs.
 
-Dependencies: pandas, numpy, argparse, pathlib, logging
+Dependencies: pandas
 
-Usage example: 
-    python multiomic_mapper.py \
-        --folder <variant dir> \
-        --manifest <manifest file> \
-        --out <output directory> \
-        --ref <reference directory> \
-        [--step all|prep|gene|uni|ch3]
+Project layout expected (for --build main)
+
+PROJECT_ROOT/
+   dna/        (optional)         case-id.csv                       #VEP-annotated mutect files
+               gdc-dna.tsv        + dna/{File ID}/{File Name}
+   rna/        gdc-rna.tsv        + rna/{File ID}/{File Name}       #RNA-seq count data
+   ch3/        gdc-ch3.tsv        + ch3/{File ID}/{File Name}       #Methylation data in GDC format
+   cn/         gdc-cn.tsv         + cn/{File ID}/{File Name}        #Copy Number data in GDC format
+   protein/    (optional)         case-id.csv                       #PSM reads (NP, SEQ, EV, INT)
+
+Usage (recommended):
+   python make_manifest.py \
+        --build-main \
+        --project_root <project directory> \
+        --main_out <output directory>
+
+Usage (single-type):
+   python make_manifest.py \
+        --gdc-manifest <manifest file> \
+        --out_dir <output directory> \
+        --type <rna|ch3|cn> \
+        --folder-id-col <# (e.g., 0)> \
+        --file-name-col <# (e.g., 1)> \
+        --case-id-col <# (e.g, 5)> 
 
 Arguments:
-    --folder    Directory with preprocessed VEP-annotated mutect files
-    --manifest  CSV file with sample IDs (first column)
-    --out       Output directory
-    --ref       Directory with mapping reference files
-    --step      Pipeline step to run: all (default), prep, gene, uni, or ch3
+(Recommended Use)
+   --build-main        Flag that creates unified manifest with paths constructed like {PROJECT_ROOT}/{modality}/{File ID}/{File Name}
+   --project_root      Directory that has all project-related files (dna, rna, ch3, cn, protein)
+   --main_out          Directory that will contain all output files
+   
+(Single Use)   
+   --gdc-manifest      Flag to use if opting for creation of single manifest as opposed to build-main
+   --out_dir           Directory that will contain output file
+   --type              Used for naming output manifest (e.g., rna_manifest.tsv)
+   --folder-id-column  Column number that identifies path (downloaded code path; e.g, 123abc)
+   --file-name-col     Column number that identifies file name (downloaded code + file name; e.g., 987zyx.wxs.MuTect2.somatic_annotation.vcf.gz)
+   --case-id-col       Column number that identifies case-id (e.g., C3N-001)
 
-Step options:
-- all: Full pipeline
-- prep: Creates directories
-- gene: Adds gene symbols and names
-- uni: Includes splitting by chromosome, UniProt and protein ID mapping, and joining
-- ch3: Add methylation probe matches
-
-
+   
 # MULTIOMIC INTEGRATION
 
 This pipeline integrates multiple omics layers (DNA, RNA, methylation, protein, and copy number)
-for each sample listed in a manifest. Only the final protein files (with copy number added) are retained
-in the output directory. Note protein files must be preprocessed and in the format {Sample-ID}.csv (see protein_preprocessor.py)
+for each case-id listed in a manifest. Can be used with an existing unifed manifest built with make_manifest.py or separate manifestsOnly the final protein files (with copy number added) are retained
+in the output directory. Note protein files must be preprocessed and in the format {Case-ID}.csv (see protein_preprocessor.py)
 
 Dependencies: csv, argparse, shutil, pandas, numpy
 
-Usage:
+Recommended Usage:
+
+
+Optional Usage: 
     python multiomic_pipeline.py \
         --manifest MANIFEST_FILE \
         --input_var_dir VARIANT_DIR \
