@@ -40,7 +40,7 @@ General:\
 
 Make/list Case-IDS:\
    --make-simplified    Provides unique Case-IDs derived from --manifest\
-   --simplified-out     Path to write the Case-ID list (default: <out_dir>/case_ids.txt)\
+   --simplified         Path to write the Case-ID list (default: <out_dir>/case_ids.txt)\
    
 Preprocess: \
    --preprocess-mutect  Flag for extended analysis, strips '##' headers and writes prep/<Case-ID>.txt\
@@ -413,7 +413,7 @@ def parse_args():
     p.add_argument("--out_dir", required=True, help="Output directory root (CSV written under out_dir/dna/)")
     p.add_argument("--max-records", type=int, default=None, help="Optional cap on parsed VCF records per case (for testing)")
     p.add_argument("--make-simplified", action="store_true", help="Emit a Case-ID list derived from --manifest")
-    p.add_argument("--simplified-out", help="Path to write the Case-ID list (default: <out_dir>/case_ids.txt)")
+    p.add_argument("--simplified", help="Path to write the Case-ID list (default: <out_dir>/case_ids.txt)")
     p.add_argument("--preprocess-mutect", dest="preprocess_mutect", action="store_true", help="Preprocess Mutect VCFs prior to downstream steps.")
     p.add_argument("--vcf-folder", dest="vcf_folder", default=None, help="Optional directory containing VCFs (overrides manifest paths).")
     return p.parse_args()
@@ -429,7 +429,7 @@ def main():
     df = read_table_guess(Path(args.manifest))
     # If requested, emit a simplified Case-ID list early (does not require File Name column)
     if args.make_simplified:
-        simp_out = Path(args.simplified_out) if args.simplified_out else (out_root / "case_ids.txt")
+        simp_out = Path(args.simplified) if args.simplified else (out_root / "case_ids.txt")
         outp = emit_simplified_case_list(Path(args.manifest), simp_out)
         logging.info(f"Wrote simplified Case-ID list: {outp}")
     # Normalize column names in a case-insensitive way
