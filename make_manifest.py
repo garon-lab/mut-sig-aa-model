@@ -461,6 +461,16 @@ def emit_gdc_like_from_main(main_manifest: Path, project_root: Path, out_dir: Pa
     wrote["dna"] = dna_written
     return wrote
 
+    def _write_simple_manifest(paths: dict[str, str], out_file: Path):
+       import pandas as _pd
+       rows = [{"Case ID": cid, "File Name": Path(path).name, "Path": path} for cid, path in sorted(paths.items())]
+       if not rows:
+           return None
+       df = _pd.DataFrame(rows, columns=["Case ID","Path"])
+       out_file.parent.mkdir(parents=True, exist_ok=True)
+       df.to_csv(out_file, sep="\t", index=False)
+       return out_file
+
 # ---------- Legacy: emit single-type manifest from one GDC TSV ----------
 
 def emit_single_type_manifest(gdc_manifest: Path, out_dir: Path, type_name: str,
