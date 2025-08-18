@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 MULTIOMIC INTEGRATION
 
@@ -24,8 +25,9 @@ Manifest (case list):
 
 Steps:
   --step all|dna|rna|ch3|cnv|protein
-  - Running 'dna' will also chain RNA→CH3→Protein→CNV integration into DNA outputs,
-    unless you pass skip flags (e.g., --skip-rna, --skip-ch3, --skip-protein, --skip-cn).
+  
+  Running 'dna' will also chain RNA→CH3→Protein→CNV integration into DNA outputs,
+  unless you pass skip flags (e.g., --skip-rna, --skip-ch3, --skip-protein, --skip-cn).
 
 Reference:
   - By default, we look for 'reference.zip' alongside the script or in CWD.
@@ -93,369 +95,547 @@ Notes
 Only the final protein files (with SNV/SNP, RNA, CH3, protein, and CNV) are written to: OUTPUT_DIR/{case-ID}.csv
 
 """
-
-import os
-import sys
-import csv
 import argparse
-from pathlib import Path
+import logging
+import os
+import re
+import shutil
+import tempfile
+import gzip
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import List, Optional
+from pathlib import Path
+from typing import Optional, Tuple, List
 
 import pandas as pd
 
-# ---- Utilities from pipeline ----
-import logging, warnings, zipfile, shutil, numpy as np
+logging.basicConfig(level=logging.INFO, format='[multiomic_integration] %(levelname)s %(message)s')
 
-def read_table_guess(path: Path) -> pd.DataFrame:
-    """Read CSV/TSV by sniffing delimiter."""
+# ---------------------- helpers ----------------------
+
+def _norm_ensg_ser(s: pd.Series) -> pd.Series:
+    """Extract versionless Ensembl IDs (ENSG#########)."""
+    return s.astype(str).str.extract(r'(ENSG\d+)', expand=False)
+
+def _read_any_table(path: Path, sep: Optional[str] = None, names: Optional[List[str]] = None) -> pd.DataFrame:
+    if sep is None:
+        sep = "," if path.suffix.lower() == ".csv" else "\t"
     try:
-        df = pd.read_csv(path, sep=None, engine="python")
+        return pd.read_csv(path, sep=sep, engine="c", dtype=str, low_memory=False,
+                           header=None if names else "infer", names=names)
     except Exception:
-        df = pd.read_csv(path, sep="\t")
-    return df
+        return pd.read_csv(path, sep=sep, engine="python", dtype=str,
+                           header=None if names else "infer", names=names)
 
-def safe_read_csv(path: str) -> Optional[pd.DataFrame]:
-    try:
-        return pd.read_csv(path)
-    except Exception as e:
-        warning(f"Could not read CSV: {path} ({e})")
+def _safe_to_numeric(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce")
+
+def _ensure_dir(p: Path):
+    p.mkdir(parents=True, exist_ok=True)
+
+def _mod_dir(folder: Path, primary: str, alt: Optional[str] = None) -> Path:
+    """Prefer primary subdir if it exists, otherwise alt, otherwise primary."""
+    p = folder / primary
+    if p.exists():
+        return p
+    if alt:
+        q = folder / alt
+        if q.exists():
+            return q
+    return p
+
+
+# ---------------------- reference (maps only) -----------------------
+
+EXPECTED_BASENAMES = {
+    "esng_gene-sym.txt",
+    "gene-sym_name.txt",
+    "uni-ensg_all.txt",
+    "uni-np_all.txt",
+}
+
+def _pick_best_subdir(tmp_root: Path) -> Path:
+    subs = [d for d in tmp_root.iterdir() if d.is_dir()]
+    for d in subs:
+        if d.name.lower() == "reference":
+            return d
+    for d in subs:
+        names = {p.name for p in d.iterdir() if p.is_file()}
+        if EXPECTED_BASENAMES & names:
+            return d
+    return subs[0] if subs else tmp_root
+
+def resolve_reference_dir(ref_dir: Optional[str], ref_zip: Optional[str]) -> Optional[Path]:
+    if ref_dir:
+        p = Path(ref_dir)
+        if not p.exists():
+            raise FileNotFoundError(f"--ref_dir does not exist: {p}")
+        return p
+    if ref_zip:
+        zp = Path(ref_zip)
+        if not zp.exists():
+            raise FileNotFoundError(f"--ref_zip not found: {zp}")
+        if zp.suffix.lower() != ".zip":
+            raise ValueError(f"--ref_zip must be a .zip file: {zp}")
+        tmp = Path(tempfile.mkdtemp(prefix="reference_"))
+        shutil.unpack_archive(str(zp), str(tmp), format="zip")
+        best = _pick_best_subdir(tmp)
+        logging.info(f"Extracted reference to: {best}")
+        return best
+    return None
+
+# ---------------------------- manifest ------------------------------
+
+def load_case_ids(manifest_path: str) -> List[str]:
+    s = pd.read_table(manifest_path, usecols=[0], header=0, dtype=str,
+                      na_values=["", "NA", "NaN"]).iloc[:, 0]
+    s = s.dropna().astype(str).str.strip()
+    header_like = {"case-id","case_id","id","sample-id","sample_id","Case-ID","Case_ID","ID","Sample-ID","Sample_ID"}
+    s = s[~s.str.lower().isin({x.lower() for x in header_like})]
+    return [x for x in s.unique() if x]
+
+def _read_gdc_manifest(mod_dir: Path, basename: str) -> Optional[pd.DataFrame]:
+    m = mod_dir / basename
+    if not m.exists():
         return None
-
-def merge_with_reference(df_left: pd.DataFrame, df_right: pd.DataFrame, left_on: str, right_on: str) -> pd.DataFrame:
-    return pd.merge(df_left, df_right, how='left', left_on=left_on, right_on=right_on)
-
-def resolve_reference_dir(ref_dir_opt: Optional[str], ref_zip_opt: Optional[str]) -> Optional[Path]:
-    """Resolve a directory where reference files live."""
-    # Explicit directory
-    if ref_dir_opt:
-        ref_dir = Path(ref_dir_opt).resolve()
-        if ref_dir.exists():
-            info(f"Using reference directory: {ref_dir}")
-            return ref_dir
-        warning(f"--ref_dir not found: {ref_dir}")
-    # Zip
-    zcandidates = [ref_zip_opt] if ref_zip_opt else []
-    zcandidates += ["reference.zip"]
-    for z in zcandidates:
-        if not z: 
-            continue
-        zp = Path(z).resolve()
-        if zp.exists():
-            out = zp.with_suffix("")  # ./reference
-            try:
-                out.mkdir(parents=True, exist_ok=True)
-                with zipfile.ZipFile(zp, 'r') as zf:
-                    zf.extractall(out)
-                info(f"Extracted reference to: {out}")
-                return out
-            except Exception as e:
-                warning(f"Failed to extract {zp}: {e}")
+    df = _read_any_table(m, sep="\t")
+    lc = {c.lower().replace("-", " ").replace("_", " "): c for c in df.columns}
+    case_col = lc.get("case id")
+    file_col = lc.get("file id")
+    name_col = lc.get("file name")
+    if case_col and file_col:
+        keep = [case_col, file_col] + ([name_col] if name_col else [])
+        return df[keep].rename(columns={case_col: "Case ID", file_col: "File ID"})
     return None
 
 
-# -------------------------
-# Helpers
-# -------------------------
+# ----------------------------- DNA ---------------------------------
 
-def log(msg: str) -> None:
-    print(f"[multiomic_integration] {msg}")
-
-def ensure_dir(p: Path) -> None:
-    p.mkdir(parents=True, exist_ok=True)
-
-def read_case_list(manifest: Path) -> List[str]:
-    cases: List[str] = []
-    with open(manifest, 'r', newline='') as f:
-        sniff = f.readline()
-        f.seek(0)
-        if '\t' in sniff or ',' in sniff:
-            # CSV/TSV: take first column
-            reader = csv.reader(f, delimiter='\t' if '\t' in sniff and ',' not in sniff else ',')
-            for row in reader:
-                if not row: 
-                    continue
-                v = (row[0] or '').strip()
-                if v and not v.startswith('#'):
-                    cases.append(v)
+def _add_ENSG_columns(df: pd.DataFrame, case_id: str) -> pd.DataFrame:
+    """Ensure both ENSGene (full) and ENSGene_core exist; insert ENSGene right after INFO if INFO exists."""
+    df = df.copy()
+    if "INFO" in df.columns:
+        info_clean = df["INFO"].astype(str).str.strip().str.strip('"').str.strip("'")
+        ensg_full = info_clean.str.extract(r'(ENSG\d+(?:\.\d+)?)', expand=False)
+        if "ENSGene" in df.columns:
+            df["ENSGene"] = df["ENSGene"].where(df["ENSGene"].notna(), ensg_full)
         else:
-            # Plain text, one per line (allow comments)
-            for line in f:
-                s = line.strip()
-                if s and not s.startswith('#'):
-                    cases.append(s.split(',')[0].strip())
-    # de-duplicate, keep order
-    seen = set()
-    out = []
-    for c in cases:
-        if c not in seen:
-            out.append(c); seen.add(c)
-    return out
-
-# -------------------------
-# DNA loader (single-case convenience)
-# -------------------------
-
-def load_dna(folder: Path, case_id: str, input_dna_dir: Optional[str]) -> pd.DataFrame:
-    # default to dna/{case-id}.csv relative to folder
-    path = Path(input_dna_dir) if input_dna_dir else (folder / "dna" / f"{case_id}.csv")
-    if not path.exists():
-        raise FileNotFoundError(f"DNA file not found for {case_id}: {path}")
-    return pd.read_csv(path)
-
-def write_case_output(out_dir: Path, case_id: str, df: pd.DataFrame, suffix: str) -> Path:
-    ensure_dir(out_dir)
-    out_file = out_dir / f"{case_id}_{suffix}.csv"
-    df.to_csv(out_file, index=False)
-    return out_file
-
-# -------------------------
-# Modality processer
-# -------------------------
-# 1) Gene symbol/name mapping in one pass
-def integrate_gene_annotations(base_df: pd.DataFrame, ref_dir: Path) -> pd.DataFrame:
-    sym_map = (ref_dir / "esng_gene-sym.txt")        # columns: Gene,Ensembl
-    name_map = (ref_dir / "gene-sym_name.txt")       # columns: symbol,name
-    if sym_map.exists():
-        m_sym = pd.read_csv(sym_map, sep="\t", names=["Gene","Ensembl"])
-        base_df = pd.merge(base_df, m_sym, how="left", left_on="ENSGene", right_on="Ensembl")
-        # keep a clean set of cols if you like:
-        # base_df = base_df.drop(columns=["Ensembl"])
+            info_idx = df.columns.get_loc("INFO")
+            df.insert(info_idx + 1, "ENSGene", ensg_full)
+        logging.info(f"[DNA] {case_id}: ENSG extracted for {int(df['ENSGene'].notna().sum())} / {len(df)} rows")
     else:
-        logging.warning(f"Gene symbol map not found: {sym_map}")
-
-    if name_map.exists():
-        m_name = pd.read_csv(name_map, sep="\t", names=["symbol","name"])
-        base_df = pd.merge(base_df, m_name, how="left", left_on="Gene", right_on="symbol")
-        # optional tidy:
-        # base_df.rename(columns={"name":"GeneName"}, inplace=True)
+        if "ENSGene" not in df.columns:
+            df.insert(len(df.columns), "ENSGene", pd.Series(index=df.index, dtype=object))
+            logging.warning(f"[DNA] {case_id}: INFO missing; added empty ENSGene column.")
+    # Always build core
+    if "ENSGene" in df.columns:
+        df["ENSGene_core"] = _norm_ensg_ser(df["ENSGene"])
+    elif "INFO" in df.columns:
+        df["ENSGene_core"] = _norm_ensg_ser(df["INFO"])
     else:
-        logging.warning(f"Gene name map not found: {name_map}")
-    return base_df
-
-# 2) UniProt / NP mapping 
-def integrate_uniprot_np(base_df: pd.DataFrame, ref_dir: Path) -> pd.DataFrame:
-    # uni-ensg*.txt were previously per-chrom; now accept a single union file too
-    # Expected columns: From, To  (where To is ENSG; From is UniProt)
-    union_uni_ensg = ref_dir / "uni-ensg_all.txt"
-    if union_uni_ensg.exists():
-        m_ue = pd.read_csv(union_uni_ensg, sep="\t", names=["From","To"])
-        base_df = pd.merge(base_df, m_ue, how="left", left_on="ENSGene", right_on="To")
-    else:
-        logging.warning(f"UniProt-ENSG map not found: {union_uni_ensg}")
-
-    # NP mapping file (From=UniProt, To=NP)
-    uni_np = ref_dir / "uni-np_all.txt"
-    if uni_np.exists():
-        m_unp = pd.read_csv(uni_np, sep="\t", names=["From","NP"])
-        # if previous step added 'From' (UniProt), we can map NP directly
-        if "From" in base_df.columns:
-            base_df = pd.merge(base_df, m_unp, how="left", on="From")
-        else:
-            logging.warning("No UniProt 'From' column in base table; skipping NP map.")
-    else:
-        logging.warning(f"UniProt→NP map not found: {uni_np}")
-    return base_df
-
-def integrate_dna(df: pd.DataFrame) -> pd.DataFrame:
-    # identity pass-through; hook for real integration
-    # inside process_case() after you’ve built base_df from DNA:
-    if ref_dir is not None:
-        base_df = integrate_gene_annotations(base_df, ref_dir)
-        base_df = integrate_uniprot_np(base_df, ref_dir)
+        df["ENSGene_core"] = pd.Series(index=df.index, dtype=object)
     return df
 
-def integrate_rna(case_id: str, folder: Path, ref_dir: Optional[Path], rna_manifest_name: str, base_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-    if ref_dir is None:
-        warning("RNA integration requested but no reference directory; skipping.")
-        return base_df
-    rna_manifest_path = ref_dir / rna_manifest_name
-    if not rna_manifest_path.exists():
-        logging.warning(f"RNA manifest not found: {rna_manifest_path}; skipping RNA.")
-        return base_df
-    df_rna = pd.read_table(rna_manifest_path, sep='\t', names=['Ensembl', 'Count'])
-    df_rna['Ensembl'] = df_rna['Ensembl'].astype(str).str.split('.').str[0]
-    merged = merge_with_reference(base_df, df_rna, 'ENSGene', 'Ensembl')
-    return merged
+def _try_per_case_file(folder: Path, modality: str, case_id: str) -> Optional[Path]:
+    mod_dir = folder / modality
+    for ext in (".csv", ".tsv", ".txt"):
+        p = mod_dir / f"{case_id}{ext}"
+        if p.exists():
+            return p
+    return None
 
-def integrate_ch3(case_id: str, folder: Path, ref_dir: Optional[Path], ch3_manifest_name: str, base_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-    if ref_dir is None:
-        logging.warning("CH3 integration requested but no reference directory; skipping.")
-        return base_df
-    ch3_manifest_path = ref_dir / ch3_manifest_name
-    if not ch3_manifest_path.exists():
-        logging.warning(f"CH3 manifest not found: {ch3_manifest_path}; skipping CH3.")
-        return base_df
-    df_ch3 = pd.read_table(ch3_manifest_path, sep='\t', names=['cg', 'beta'])
-    df_ch3.rename(columns={'cg': 'IlmnID', 'beta': 'beta_val'}, inplace=True)
-    merged = pd.merge(base_df, df_ch3, how='left', left_on='IlmnID', right_on='IlmnID')
-    return merged
+def load_and_enhance_dna(case_id: str, folder: Path, out_dir: Path, ref_dir: Optional[Path], dna_rows: str) -> Path:
+    inp = _try_per_case_file(folder, "dna", case_id)
+    if inp is None:
+        tried = [str(folder / "dna" / f"{case_id}{ext}") for ext in (".csv",".tsv",".txt")]
+        raise FileNotFoundError(f"DNA file not found for {case_id}. Tried: {', '.join(tried)}")
+    df = _read_any_table(inp)
+    df = _add_ENSG_columns(df, case_id)
+    if dna_rows == "ensg_only":
+        before = len(df)
+        df2 = df[df["ENSGene_core"].notna()].copy()
+        if not df2.empty:
+            df = df2
+        logging.info(f"[DNA] {case_id}: filtered to ENSG-only rows: {len(df)} / {before}")
+    df = integrate_gene_annotations(df, ref_dir, case_id)
+    df = integrate_uniprot_np(df, ref_dir, case_id)
+    out_dna = out_dir / "dna"; _ensure_dir(out_dna)
+    out_fp = out_dna / f"{case_id}.csv"
+    df.to_csv(out_fp, index=False)
+    return out_fp
 
-def integrate_protein(case_id: str, folder: Path, base_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-    p = folder / "protein" / f"{case_id}.csv"
-    if p.exists():
-        dfp = pd.read_csv(p)
-        merged = merge_with_reference(base_df, dfp, 'To', 'NP')
-        return merged
-    return base_df
+# ----------------------- modality I/O (GDC-style) -------------------
 
-def integrate_cnv(case_id: str, folder: Path, ref_dir: Optional[Path], cn_manifest_name: str, base_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-    if ref_dir is None:
-        logging.warning("CNV integration requested but no reference directory; skipping.")
-        return base_df
-    cn_manifest_path = ref_dir / cn_manifest_name
-    if not cn_manifest_path.exists():
-        logging.warning(f"CNV manifest not found: {cn_manifest_path}; skipping CNV.")
-        return base_df
-    df_cn = pd.read_table(cn_manifest_path, sep='\t')
-    if 'copy_number' in df_cn.columns:
-        df_cn['copy_number'].replace('', np.nan, inplace=True)
-        df_cn.dropna(subset=['copy_number'], inplace=True)
-    df_cn['EnsemblID'] = df_cn.iloc[:, 0].astype(str).str.split('.').str[0]
-    cn_col = df_cn.columns[5]
-    df_cn2 = df_cn[['EnsemblID', cn_col]].rename(columns={cn_col: 'copy_number'})
-    merged = pd.merge(base_df, df_cn2, how='left', left_on='ENSGene', right_on='EnsemblID')
-    return merged
+def _read_gdc_manifest(mod_dir: Path, basename: str) -> Optional[pd.DataFrame]:
+    m = mod_dir / basename
+    if not m.exists(): return None
+    df = _read_any_table(m, sep="\t")
+    cols = {c.lower(): c for c in df.columns}
+    if "case id" in cols and "file id" in cols:
+        keep = [cols["case id"], cols["file id"]]
+        if "file name" in cols: keep.append(cols["file name"])
+        return df[keep].rename(columns={cols["case id"]:"Case ID", cols["file id"]:"File ID"})
+    return None
 
-def merge_layers(layers: List[pd.DataFrame]) -> pd.DataFrame:
-    # Simplistic column-wise outer merge on shared keys if any; otherwise concat with keys
-    if not layers:
-        return pd.DataFrame()
-    if len(layers) == 1:
-        return layers[0]
-    # If all have a 'gene' column, merge on that; otherwise outer-join on index
-    if all('gene' in df.columns for df in layers):
-        from functools import reduce
-        def rename(df, tag):
-            other_cols = [c for c in df.columns if c != 'gene']
-            return df.rename(columns={c: f"{c}_{tag}" for c in other_cols})
-        tagged = [rename(df, i) for i, df in enumerate(layers)]
-        base = tagged[0]
-        for nxt in tagged[1:]:
-            base = base.merge(nxt, on='gene', how='outer')
-        return base
+def _find_in_subdir_by_patterns(root: Path, patterns: List[str]) -> Optional[Path]:
+    if not root.exists(): return None
+    for p in root.rglob("*"):
+        if p.is_file():
+            name = p.name.lower()
+            if all(pat in name for pat in patterns):
+                return p
+    return None
+
+def _read_first_two_col_table(path: Path, gz_ok: bool = True) -> pd.DataFrame:
+    if path.suffix == ".gz" and gz_ok:
+        with gzip.open(path, "rt") as fh:
+            return pd.read_csv(fh, sep="\t", header=None, names=["col1","col2"], dtype=str)
     else:
-        return pd.concat(layers, axis=1)
+        return pd.read_csv(path, sep="\t", header=None, names=["col1","col2"], dtype=str)
 
-# -------------------------
-# Core per-case runner
-# -------------------------
+# -------------------------- reference maps --------------------------
 
-def process_case(case_id: str, folder: Path, out_dir: Path, step: str,
-                 input_dna_dir: Optional[str], skip_rna: bool, skip_ch3: bool, skip_protein: bool, skip_cn: bool,
-                 ref_dir: Optional[Path], rna_manifest_name: str, ch3_manifest_name: str, cn_manifest_name: str) -> Path:
-    log(f"Processing {case_id} [step={step}]" )
-    outputs_dir = out_dir / case_id
-    ensure_dir(outputs_dir)
+def _find_ref_file(ref_dir: Optional[Path], basename: str) -> Optional[Path]:
+    if ref_dir is None: return None
+    direct = ref_dir / basename
+    if direct.exists(): return direct
+    for p in ref_dir.rglob(basename):
+        if "__MACOSX" in p.parts: continue
+        return p
+    return None
 
-    # Start with DNA
-    base = pd.DataFrame()
-    if step in ("all", "dna"):
-        base = load_dna(folder, case_id, input_dna_dir)
-        base = integrate_dna(base)
-
-    # Chain RNA
-    if step in ("all", "rna") and not skip_rna and not base.empty:
-        base = integrate_rna(case_id, folder, ref_dir, rna_manifest_name, base)
-
-    # Chain CH3
-    if step in ("all", "ch3") and not skip_ch3 and not base.empty:
-        base = integrate_ch3(case_id, folder, ref_dir, ch3_manifest_name, base)
-
-    # Chain Protein
-    if step in ("all", "protein") and not skip_protein and not base.empty:
-        base = integrate_protein(case_id, folder, base)
-
-    # Chain CNV
-    if step in ("all", "cnv") and not skip_cn and not base.empty:
-        base = integrate_cnv(case_id, folder, ref_dir, cn_manifest_name, base)
-
-    out_file = outputs_dir / f"{case_id}_integrated.csv"
-    base.to_csv(out_file, index=False)
-    log(f"Wrote {out_file}")
-    return out_file
-
-# -------------------------
-# CLI
-# -------------------------
-
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Merged multiomic integration (manifest or single-case)")
-    p.add_argument("--folder", required=True, help="Project root directory (contains dna/, rna/, ch3/, cnv/, protein/)")
-    p.add_argument("--out_dir", required=True, help="Output directory for integrated results")
-    p.add_argument("--step", default="all", choices=["all", "dna", "rna", "ch3", "cnv", "protein"], help="Which step(s) to run")
-
-    # Multi-case via manifest OR single-case via --case-id
-    p.add_argument("--manifest", help="Case list file: plain text (one per line) or CSV/TSV (case-id in first column)")
-    p.add_argument("--case-id", help="Single case identifier (enables single-case mode)")
-
-    # Single-case convenience for DNA
-    p.add_argument("--input_dna_dir", default=None, help="Path to DNA CSV for single-case; defaults to dna/{case-id}.csv under --folder if not provided")
-
-    # Reference options
-    p.add_argument("--ref_dir", default=None, help="Directory with reference manifests (alternative to --ref_zip)")
-    p.add_argument("--ref_zip", default=None, help="Zip containing reference manifests to extract")
-    p.add_argument("--rna_manifest", default="rna_manifest.tsv", help="RNA manifest filename inside reference dir")
-    p.add_argument("--ch3_manifest", default="ch3_manifest.tsv", help="CH3 manifest filename inside reference dir")
-    p.add_argument("--cn_manifest", default="cn_manifest.tsv", help="CNV manifest filename inside reference dir")
-
-    # Skip flags
-    p.add_argument("--skip-rna", action="store_true", help="Skip RNA integration")
-    p.add_argument("--skip-ch3", action="store_true", help="Skip CH3 integration")
-    p.add_argument("--skip-protein", action="store_true", help="Skip Protein integration")
-    p.add_argument("--skip-cn", action="store_true", help="Skip CNV integration")
-
-    # Parallelism
-    p.add_argument("--jobs", type=int, default=8, help="Parallel workers for multi-case mode (default: 8)")
-
-    return p
-
-def main():
-    args = build_parser().parse_args()
-
-    folder = Path(args.folder).resolve()
-    out_dir = Path(args.out_dir).resolve()
-    ensure_dir(out_dir)
-
-    # Determine case set
-    cases: List[str] = []
-    if args.case_id:
-        cases = [args.case_id]
-    elif args.manifest:
-        cases = read_case_list(Path(args.manifest).resolve())
-        if not cases:
-            raise SystemExit("No case IDs found in manifest")
+def integrate_gene_annotations(base_df: pd.DataFrame, ref_dir: Optional[Path], case_id: str) -> pd.DataFrame:
+    if ref_dir is None: return base_df
+    df = base_df.copy()
+    sym_fp = _find_ref_file(ref_dir, "esng_gene-sym.txt")
+    name_fp = _find_ref_file(ref_dir, "gene-sym_name.txt")
+    if sym_fp:
+        m = _read_any_table(sym_fp, sep="\t", names=["Gene","Ensembl"]).drop_duplicates()
+        m["Ensembl_core"] = _norm_ensg_ser(m["Ensembl"])
+        m = m.drop_duplicates(subset=["Ensembl_core"], keep="first")
+        df = df.merge(m[["Gene","Ensembl_core"]], how="left",
+                      left_on="ENSGene_core", right_on="Ensembl_core")
     else:
-        raise SystemExit("Provide --case-id for single-case mode or --manifest for multi-case mode.")
+        logging.warning(f"[DNA] {case_id}: Gene symbol map not found in reference")
+    if name_fp and "Gene" in df.columns:
+        n = _read_any_table(name_fp, sep="\t", names=["symbol","name"]).drop_duplicates()
+        n = n.drop_duplicates(subset=["symbol"], keep="first")
+        df = df.merge(n, how="left", left_on="Gene", right_on="symbol")
+    return df
 
-    # Resolve reference directory (if any)
-    ref_dir = resolve_reference_dir(args.ref_dir, args.ref_zip)
-
-    # Single-thread for single-case; parallel for multi-case
-    if len(cases) == 1:
-        process_case(
-            cases[0], folder, out_dir, args.step,
-            args.input_dna_dir,
-            args.skip_rna, args.skip_ch3, args.skip_protein, args.skip_cn,
-            ref_dir, args.rna_manifest, args.ch3_manifest, args.cn_manifest
-        )
+def integrate_uniprot_np(base_df: pd.DataFrame, ref_dir: Optional[Path], case_id: str) -> pd.DataFrame:
+    if ref_dir is None: return base_df
+    df = base_df.copy()
+    ue_fp = _find_ref_file(ref_dir, "uni-ensg_all.txt")
+    unp_fp = _find_ref_file(ref_dir, "uni-np_all.txt")
+    if ue_fp:
+        ue = _read_any_table(ue_fp, sep="\t", names=["From","To"]).drop_duplicates()
+        ue["To_core"] = _norm_ensg_ser(ue["To"])
+        ue = ue.drop_duplicates(subset=["To_core"], keep="first")
+        df = df.merge(ue[["From","To_core"]], how="left",
+                      left_on="ENSGene_core", right_on="To_core")
     else:
-        jobs = max(1, int(args.jobs))
-        with ProcessPoolExecutor(max_workers=jobs) as ex:
-            futs = {
-                ex.submit(
-                    process_case, cid, folder, out_dir, args.step,
-                    args.input_dna_dir,
-                    args.skip_rna, args.skip_ch3, args.skip_protein, args.skip_cn,
-                    ref_dir, args.rna_manifest, args.ch3_manifest, args.cn_manifest
-                ): cid for cid in cases
+        logging.warning(f"[DNA] {case_id}: UniProt→ENSG map not found")
+    if unp_fp and "From" in df.columns:
+        unp = _read_any_table(unp_fp, sep="\t", names=["From","NP"]).drop_duplicates()
+        unp = unp.drop_duplicates(subset=["From"], keep="first")
+        df["From"] = df["From"].astype(str).str.strip()
+        unp["From"] = unp["From"].astype(str).str.strip()
+        df = df.merge(unp, how="left", on="From")
+    elif not unp_fp:
+        logging.warning(f"[DNA] {case_id}: UniProt→NP map not found")
+    return df
+
+# ----------------------- modality merges ----------------------------
+
+def _rna_from_gdc(folder: Path, case_id: str) -> Optional[pd.DataFrame]:
+    mod_dir = folder / "rna"
+    man = _read_gdc_manifest(mod_dir, "gdc-rna.tsv")
+    if man is None: return None
+    rows = man[man["Case ID"] == case_id]
+    if rows.empty: return None
+    file_id = rows.iloc[0]["File ID"]
+    f = _find_in_subdir_by_patterns(mod_dir / file_id, ["htseq_counts"])
+    if f is None:
+        logging.warning(f"[RNA] {case_id}: no htseq_counts under {mod_dir/file_id}")
+        return None
+    df = _read_first_two_col_table(f, gz_ok=True).rename(columns={"col1":"Ensembl_full","col2":"Count"})
+    df["Ensembl_core"] = _norm_ensg_ser(df["Ensembl_full"])
+    df = df.dropna(subset=["Ensembl_full"]).drop_duplicates(subset=["Ensembl_full"], keep="first")
+    df["Count"] = _safe_to_numeric(df["Count"])
+    return df
+
+def _cn_from_gdc(folder: Path, case_id: str) -> Optional[pd.DataFrame]:
+    mod_dir = _mod_dir(folder, "cnv", alt="cn")
+    man = _read_gdc_manifest(mod_dir, "gdc-cn.tsv")
+    if man is None:
+        return None
+    rows = man[man["Case ID"] == case_id]
+    if rows.empty:
+        return None
+    file_id = rows.iloc[0]["File ID"]
+    f = _find_in_subdir_by_patterns(mod_dir / file_id, ["gene_level", "copy_number_variation"])
+    if f is None:
+        logging.warning(f"[CNV] {case_id}: no gene_level.copy_number_variation under {mod_dir / file_id}")
+        return None
+    df = _read_any_table(f, sep="\t")
+    lc = {c.lower().replace("-", " ").replace("_", " "): c for c in df.columns}
+    gid = lc.get("gene id"); cn = lc.get("copy number")
+    if gid is None or cn is None:
+        logging.warning(f"[CNV] {case_id}: expected gene_id and copy_number in {f.name}")
+        return None
+    out = df[[gid, cn]].rename(columns={gid: "Ensembl_full", cn: "copy_number"})
+    out["Ensembl_core"] = _norm_ensg_ser(out["Ensembl_full"])
+    out = out.dropna(subset=["Ensembl_full"]).drop_duplicates(subset=["Ensembl_full"], keep="first")
+    out["copy_number"] = _safe_to_numeric(out["copy_number"])
+    return out
+
+def _ch3_from_gdc(folder: Path, case_id: str) -> Optional[pd.DataFrame]:
+    mod_dir = folder / "ch3"
+    man = _read_gdc_manifest(mod_dir, "gdc-ch3.tsv")
+    if man is None: return None
+    rows = man[man["Case ID"] == case_id]
+    if rows.empty: return None
+    file_id = rows.iloc[0]["File ID"]
+    root = mod_dir / file_id
+    candidate = None
+    for p in root.rglob("*.tsv"):
+        try:
+            df = pd.read_csv(p, sep="\t", dtype=str, nrows=16)
+            lc = {c.lower(): c for c in df.columns}
+            probe_col = lc.get("cg") or lc.get("ilmnid") or lc.get("composite element ref")
+            beta_col  = lc.get("beta") or lc.get("beta_value") or lc.get("beta value")
+            if probe_col and beta_col:
+                candidate = p; break
+        except Exception:
+            continue
+    if candidate is None:
+        logging.warning(f"[CH3] {case_id}: could not locate cg/beta table under {root}")
+        return None
+    full = pd.read_csv(candidate, sep="\t", dtype=str)
+    lc = {c.lower(): c for c in full.columns}
+    probe_col = lc.get("cg") or lc.get("ilmnid") or lc.get("composite element ref")
+    beta_col  = lc.get("beta") or lc.get("beta_value") or lc.get("beta value")
+    out = full[[probe_col, beta_col]].rename(columns={probe_col:"probe", beta_col:"beta"})
+    out["beta"] = _safe_to_numeric(out["beta"])
+    out = out.dropna(subset=["probe"])
+    return out
+
+def _load_ch3_map(ch3_map: Optional[str], ref_dir: Optional[Path],
+                  ch3_probe_col: Optional[str], ch3_ensg_col: Optional[str], ch3_symbol_col: Optional[str]) -> Optional[pd.DataFrame]:
+    path: Optional[Path] = None
+    if ch3_map:
+        path = Path(ch3_map)
+    else:
+        for name in ["probe-ensg.tsv","probe_ensg.tsv","illumina_probes_ensg.tsv","ch3_probe_map.tsv","ch3_map.tsv"]:
+            guess = _find_ref_file(ref_dir, name) if ref_dir else None
+            if guess and guess.exists(): path = guess; break
+    if path is None or not path.exists():
+        return None
+    df = _read_any_table(path)
+    lc = {c.lower(): c for c in df.columns}
+    probe_c = ch3_probe_col or lc.get("probe") or lc.get("cg") or lc.get("ilmnid") or lc.get("composite element ref")
+    ensg_c  = ch3_ensg_col  or lc.get("ensg") or lc.get("ensembl") or lc.get("ensembl_gene_id") or lc.get("gene_id")
+    sym_c   = ch3_symbol_col or lc.get("gene") or lc.get("symbol") or lc.get("gene_symbol")
+    if not probe_c or not (ensg_c or sym_c):
+        logging.warning(f"[CH3] Map {path} missing probe+gene columns; specify --ch3_probe_col/--ch3_ensg_col/--ch3_symbol_col.")
+        return None
+    m = df.rename(columns={probe_c:"probe"}).copy()
+    if ensg_c:
+        m["ENSGene_core"] = _norm_ensg_ser(m[ensg_c])
+    else:
+        sym_fp = _find_ref_file(ref_dir, "esng_gene-sym.txt") if ref_dir else None
+        if sym_fp is None:
+            logging.warning("[CH3] No symbol map (esng_gene-sym.txt) in reference; cannot derive ENSG from symbol.")
+            return None
+        sym = _read_any_table(sym_fp, sep="\t", names=["Gene","Ensembl"]).drop_duplicates()
+        sym["Ensembl_core"] = _norm_ensg_ser(sym["Ensembl"])
+        sym = sym.drop_duplicates(subset=["Gene"], keep="first")
+        m = m.rename(columns={sym_c:"Gene"}).merge(
+            sym[["Gene","Ensembl_core"]], how="left", on="Gene"
+        ).rename(columns={"Ensembl_core":"ENSGene_core"})
+    m = m.dropna(subset=["probe","ENSGene_core"]).drop_duplicates(subset=["probe"], keep="first")
+    return m[["probe","ENSGene_core"]]
+
+def integrate_rna(base_df: pd.DataFrame, folder: Path, case_id: str,
+                  ensg_join_mode: str, synth_overlap: bool) -> pd.DataFrame:
+    df = base_df.copy()
+    rna = _rna_from_gdc(folder, case_id)
+    if rna is None or rna.empty: return df
+    left_key  = "ENSGene_core" if ensg_join_mode == "core" else "ENSGene"
+    right_key = "Ensembl_core" if ensg_join_mode == "core" else "Ensembl_full"
+    if synth_overlap:
+        need = set(df[left_key].dropna().unique()) - set(rna[right_key].dropna().unique())
+        if need:
+            add = pd.DataFrame({
+                "Ensembl_full": [x if ensg_join_mode=="exact" else (f"{x}.1" if not re.search(r'\.\d+$', str(x)) else str(x)) for x in need],
+                "Ensembl_core": list(need), "Count": 100
+            })
+            rna = pd.concat([rna, add], ignore_index=True)
+    df = df.merge(rna[[right_key,"Count"]], how="left", left_on=left_key, right_on=right_key)
+    logging.info(f"[RNA] {case_id}: matched Count for {int(df['Count'].notna().sum())} rows (join={ensg_join_mode})")
+    return df
+
+def integrate_cnv(base_df: pd.DataFrame, folder: Path, case_id: str,
+                  ensg_join_mode: str, synth_overlap: bool) -> pd.DataFrame:
+    df = base_df.copy()
+    cn = _cn_from_gdc(folder, case_id)
+    if cn is None or cn.empty: return df
+    left_key  = "ENSGene_core" if ensg_join_mode == "core" else "ENSGene"
+    right_key = "Ensembl_core" if ensg_join_mode == "core" else "Ensembl_full"
+    if synth_overlap:
+        need = set(df[left_key].dropna().unique()) - set(cn[right_key].dropna().unique())
+        if need:
+            add = pd.DataFrame({
+                "Ensembl_full": [x if ensg_join_mode=="exact" else (f"{x}.1" if not re.search(r'\.\d+$', str(x)) else str(x)) for x in need],
+                "Ensembl_core": list(need), "copy_number": 2
+            })
+            cn = pd.concat([cn, add], ignore_index=True)
+    df = df.merge(cn[[right_key,"copy_number"]], how="left", left_on=left_key, right_on=right_key)
+    logging.info(f"[CNV] {case_id}: matched copy_number for {int(df['copy_number'].notna().sum())} rows (join={ensg_join_mode})")
+    return df
+
+def integrate_ch3(base_df: pd.DataFrame, folder: Path, case_id: str, ensg_join_mode: str,
+                  ch3_map: Optional[str], ref_dir: Optional[Path], ch3_probe_col: Optional[str],
+                  ch3_ensg_col: Optional[str], ch3_symbol_col: Optional[str], ch3_agg: str) -> pd.DataFrame:
+    df = base_df.copy()
+    ch3 = _ch3_from_gdc(folder, case_id)
+    if ch3 is None or ch3.empty: return df
+    m = _load_ch3_map(ch3_map, ref_dir, ch3_probe_col, ch3_ensg_col, ch3_symbol_col)
+    if m is None or m.empty:
+        logging.warning(f"[CH3] {case_id}: No usable probe→ENSG map; skipping CH3.")
+        return df
+    ch3m = ch3.merge(m, how="left", on="probe").dropna(subset=["ENSGene_core"])
+    if ch3m.empty:
+        logging.warning(f"[CH3] {case_id}: probe map didn’t cover this case’s probes; skipping.")
+        return df
+    agg = (ch3m.groupby("ENSGene_core", as_index=False)["beta"].median() if ch3_agg=="median"
+           else ch3m.groupby("ENSGene_core", as_index=False)["beta"].mean())
+    agg = agg.rename(columns={"beta":"beta_val"})
+    left_key = "ENSGene_core" if ensg_join_mode == "core" else "ENSGene"
+    df = df.merge(agg, how="left", left_on=left_key, right_on="ENSGene_core")
+    logging.info(f"[CH3] {case_id}: matched beta_val for {int(df['beta_val'].notna().sum())} rows (join={ensg_join_mode})")
+    return df
+
+def integrate_protein(base_df: pd.DataFrame, folder: Path, case_id: str, synth_overlap: bool) -> pd.DataFrame:
+    p = _try_per_case_file(folder, "protein", case_id)
+    if p is None: return base_df
+    prot = _read_any_table(p, sep=",").drop_duplicates()
+    if "NP" not in prot.columns:
+        logging.warning(f"[PROTEIN] {case_id}: protein file lacks NP; skipping.")
+        return base_df
+    df = base_df.copy()
+    base_np = set(df.get("NP", pd.Series([], dtype=str)).dropna().astype(str).str.strip().unique().tolist())
+    prot_np = set(prot["NP"].dropna().astype(str).str.strip().unique().tolist())
+    need = base_np - prot_np
+    if synth_overlap and need:
+        logging.info(f"[PROTEIN] {case_id}: synthesizing {len(need)} NP rows")
+        prot = pd.concat([prot, pd.DataFrame({"NP": list(need), "SEQ":"TESTPEPTIDE","EV":"1e-5","INT":"1000/0.0"})], ignore_index=True)
+    prot = prot.drop_duplicates(subset=["NP"], keep="first")
+    df["NP"] = df.get("NP", pd.Series(index=df.index, dtype=object)).astype(str).str.strip()
+    prot["NP"] = prot["NP"].astype(str).str.strip()
+    df = df.merge(prot, how="left", on="NP", suffixes=("", "_protein"))
+    logging.info(f"[PROTEIN] {case_id}: matched NP for {int(df['SEQ'].notna().sum()) if 'SEQ' in df.columns else 0} rows")
+    return df
+
+# -------------------------- dedup & QC -------------------------------
+
+def _final_dedup(df: pd.DataFrame, level: str, key_cols: Optional[List[str]]) -> pd.DataFrame:
+    if level == "none": return df
+    if level == "row":  return df.drop_duplicates()
+    if level == "key" and key_cols:
+        cols = [c for c in key_cols if c in df.columns]
+        if cols: return df.drop_duplicates(subset=cols, keep="first")
+    return df
+
+# -------------------------- per-case worker -------------------------
+
+def process_one_case(case_id: str, folder: str, out_dir: str, ref_dir: Optional[str],
+                     step: str, dna_rows: str, dedup_level: str, dedup_key_cols: Optional[List[str]],
+                     emit_qc: bool, ensg_join_mode: str, synth_overlap: bool,
+                     ch3_map: Optional[str], ch3_probe_col: Optional[str], ch3_ensg_col: Optional[str],
+                     ch3_symbol_col: Optional[str], ch3_agg: str) -> Tuple[str, Optional[str]]:
+    try:
+        folder_p = Path(folder); out_dir_p = Path(out_dir); ref_p = Path(ref_dir) if ref_dir else None
+        if step in ("dna","all"):
+            load_and_enhance_dna(case_id, folder_p, out_dir_p, ref_p, dna_rows)
+        base = _read_any_table(out_dir_p / "dna" / f"{case_id}.csv")
+        if step in ("rna","all"):
+            base = integrate_rna(base, folder_p, case_id, ensg_join_mode, synth_overlap)
+        if step in ("cnv","all"):
+            base = integrate_cnv(base, folder_p, case_id, ensg_join_mode, synth_overlap)
+        if step in ("ch3","all"):
+            base = integrate_ch3(base, folder_p, case_id, ensg_join_mode, ch3_map, ref_p,
+                                 ch3_probe_col, ch3_ensg_col, ch3_symbol_col, ch3_agg)
+        if step in ("protein","all"):
+            base = integrate_protein(base, folder_p, case_id, synth_overlap)
+        base = _final_dedup(base, dedup_level, dedup_key_cols)
+        out_fp = Path(out_dir) / f"{case_id}_integrated.csv"
+        base.to_csv(out_fp, index=False)
+        if emit_qc:
+            qc = {
+                "case_id": case_id,
+                "n_rows_out": len(base),
+                "rna_nonnull": int(base["Count"].notna().sum()) if "Count" in base.columns else 0,
+                "cnv_nonnull": int(base["copy_number"].notna().sum()) if "copy_number" in base.columns else 0,
+                "ch3_nonnull": int(base["beta_val"].notna().sum()) if "beta_val" in base.columns else 0,
+                "prot_nonnull": int(base["SEQ"].notna().sum()) if "SEQ" in base.columns else 0,
             }
-            for fut in as_completed(futs):
-                cid = futs[fut]
-                try:
-                    fut.result()
-                except Exception as e:
-                    log(f"ERROR [{cid}]: {e}")
+            qcd = Path(out_dir) / "qc"; _ensure_dir(qcd)
+            pd.DataFrame([qc]).to_csv(qcd / f"{case_id}_qc.tsv", sep="\t", index=False)
+        return (case_id, None)
+    except Exception as e:
+        return (case_id, str(e))
+
+# ------------------------------- main -------------------------------
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Multiomic integration (11k3 fixed): core ENSG join, maps, CH3, synthesis.")
+    p.add_argument("--folder", required=True)
+    p.add_argument("--manifest", required=True)
+    p.add_argument("--out_dir", required=True)
+    p.add_argument("--ref_dir", default=None)
+    p.add_argument("--ref_zip", default=None)
+    p.add_argument("--step", default="all", choices=["all","dna","rna","ch3","cnv","protein"])
+    p.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
+    p.add_argument("--dna_rows", default="ensg_only", choices=["ensg_only","all"])
+    p.add_argument("--dedup_level", default="row", choices=["none","row","key"])
+    p.add_argument("--dedup_key", default="CHROM,POS,REF,ALT,ENSGene,ENSGene_core")
+    p.add_argument("--emit_qc", action="store_true")
+    p.add_argument("--ensg_join_mode", default="core", choices=["core","exact"])
+    p.add_argument("--synthesize_overlap_for_tests", action="store_true")
+    # CH3 options
+    p.add_argument("--ch3_map", default=None)
+    p.add_argument("--ch3_probe_col", default=None)
+    p.add_argument("--ch3_ensg_col", default=None)
+    p.add_argument("--ch3_symbol_col", default=None)
+    p.add_argument("--ch3_agg", default="mean", choices=["mean","median"])
+    return p.parse_args()
+
+def main() -> None:
+    args = parse_args()
+    out_dir = Path(args.out_dir); _ensure_dir(out_dir)
+    ref_dir_p = resolve_reference_dir(args.ref_dir, args.ref_zip)
+    if ref_dir_p is not None:
+        logging.info(f"Using reference dir for maps: {ref_dir_p}")
+    case_ids = load_case_ids(args.manifest)
+    dedup_key_cols = [c.strip() for c in args.dedup_key.split(",") if c.strip()] if args.dedup_level == "key" else None
+
+    logging.info(f"N = {len(case_ids)} samples")
+    logging.info(f"Running step(s): {args.step}")
+    with ProcessPoolExecutor(max_workers=args.jobs) as ex:
+        futs = [ex.submit(process_one_case, cid, args.folder, args.out_dir,
+                          str(ref_dir_p) if ref_dir_p else None,
+                          args.step, args.dna_rows, args.dedup_level, dedup_key_cols, args.emit_qc,
+                          args.ensg_join_mode, args.synthesize_overlap_for_tests,
+                          args.ch3_map, args.ch3_probe_col, args.ch3_ensg_col, args.ch3_symbol_col, args.ch3_agg)
+                for cid in case_ids]
+        for cid in case_ids:
+            logging.info(f"Processing {cid} [step={args.step}]")
+        for f in as_completed(futs):
+            cid, err = f.result()
+            if err:
+                logging.error(f"[{cid}]: {err}")
+    logging.info("Done.")
 
 if __name__ == "__main__":
     main()
