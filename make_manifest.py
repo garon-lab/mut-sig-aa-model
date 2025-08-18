@@ -27,7 +27,7 @@ Usage
 
 (Using existing unified manifest):
    python make_manifest.py \
-        --emit_ref \
+        --emit-ref \
         --main-manifest <main-manifest.tsv>
         --project_root <project directory> \
         --out_dir <output directory>
@@ -45,7 +45,7 @@ Arguments:
 (Recommended Use)
    --build-main        Flag that creates unified manifest with paths constructed like {PROJECT_ROOT}/{modality}/{File ID}/{File Name}
    --project_root      Directory that has all project-related files (dna, rna, ch3, cn, protein)
-   --main_out          Directory that will contain all output files
+   --out_dir          Directory that will contain all output files
 
 (General)
    --log-level L       Default: INFO, can be set to DEBUG for more verbose logging
@@ -60,6 +60,7 @@ Arguments:
 """
 
 from __future__ import annotations
+import sys
 import argparse
 import logging
 from pathlib import Path
@@ -223,8 +224,19 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
 
     Protein files are picked by filename from: protein/{Case-ID}.csv (or any *.csv containing the Case-ID).
     """
+   
     project_root = Path(project_root).expanduser().resolve()
     logger.info("Building main manifest from root: %s", project_root)
+
+    def _scan_case_csvs(modality_dir: Path) -> dict[str, str]:
+        """Return {case_id: absolute_path} for *.csv under modality_dir using filename stem as case ID."""
+        out = {}
+        if modality_dir.exists():
+            for p in modality_dir.rglob("*.csv"):
+                cid = p.stem.strip().strip('"')
+                if cid and cid.lower() != "nan":
+                    out[cid] = str(p.resolve())
+        return out
 
     def _scan_case_csvs(modality_dir: Path) -> dict[str, str]:
     """Return {case_id: absolute_path} for *.csv under modality_dir using filename stem as case ID."""
@@ -376,7 +388,7 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
 
     out_df = pd.DataFrame(rows, columns=["Case-ID", "DNA", "RNA", "CH3", "CN", "Protein"])
     _write_tsv(out_df, out_path)
-    logger.info("Manifest written to %s", out_path)
+    logger.info("Manifest written to %s (rows=%d)", out_path, len(out_df))
     return out_path
 
 
@@ -450,8 +462,12 @@ def emit_gdc_like_from_main(main_manifest: Path, project_root: Path, out_dir: Pa
                              "Transcriptome Profiling", "Gene Expression Quantification")
     wrote["ch3"] = write_mod("ch3", "ch3", "ch3_manifest.tsv",
                              "DNA Methylation", "Methylation Beta Value")
-    wrote["cn"]  = write_mod("cnv", "cn",  "cn_manifest.tsv",
-                             "Copy Number Variation", "Gene Level Copy Number")
+    wrote["cn"]  = (write_mod("cn",  "cn", "cn_manifest.tsv",
+                         "Copy Number Variation", "Gene Level Copy Number")
+               or
+               write_mod("cnv", "cn", "cn_manifest.tsv",
+                         "Copy Number Variation", "Gene Level Copy Number"))
+
     # DNA: prefer VEP; fallback to dna/
     dna_written = write_mod("vep", "dna", "dna_manifest.tsv",
                             "Simple Nucleotide Variation", "Annotated Somatic Variants")
@@ -462,14 +478,15 @@ def emit_gdc_like_from_main(main_manifest: Path, project_root: Path, out_dir: Pa
     return wrote
 
     def _write_simple_manifest(paths: dict[str, str], out_file: Path):
-       import pandas as _pd
-       rows = [{"Case ID": cid, "File Name": Path(path).name, "Path": path} for cid, path in sorted(paths.items())]
-       if not rows:
-           return None
-       df = _pd.DataFrame(rows, columns=["Case ID","Path"])
-       out_file.parent.mkdir(parents=True, exist_ok=True)
-       df.to_csv(out_file, sep="\t", index=False)
-       return out_file
+        import pandas as _pd
+        rows = [{"Case ID": cid, "Path": path} for cid, path in sorted(paths.items())]
+        if not rows:
+            return None
+        df = _pd.DataFrame(rows, columns=["Case ID", "Path"])
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(out_file, sep="\t", index=False)
+        return out_file
+
 
 # ---------- Legacy: emit single-type manifest from one GDC TSV ----------
 
@@ -582,7 +599,7 @@ def main():
         logger.warning(
             "Nothing to do. Try one of:\n"
             "  --build-main --project_root <ROOT> --out_dir <DIR>\n"
-            "  --emit-ref --main-manifest manifest.tsv --project_root <ROOT> --out_ref_dir <DIR>\n"
+            "  --emit-ref --main-manifest manifest.tsv --project_root <ROOT> --out_dir <DIR>\n"
             "  --gdc-manifest <GDC.tsv> --out_dir <DIR> --type <rna|ch3|cn|dna>"
         )
 
