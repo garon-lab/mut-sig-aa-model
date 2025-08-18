@@ -273,6 +273,7 @@ def preprocess_mutect(folder: Path, manifest_file: Path, out_dir: Path):
     out_dir = Path(out_dir)
     prep_dir = out_dir / "prep"
     prep_dir.mkdir(parents=True, exist_ok=True)
+
     # Read manifest (dna_manifest.tsv) and get a first-column list if no header
     try:
         df = _pd.read_csv(manifest_file, sep=None, engine="python")
@@ -285,7 +286,7 @@ def preprocess_mutect(folder: Path, manifest_file: Path, out_dir: Path):
             ids = df[cols["caseid"]].astype(str)
         else:
             # headerless fallback: take column 0 or 5 if looks like GDC export
-            pick_col = 0 if 0 < df.shape[1] else None
+            pick_col = 0 if df.shape[1] > 0 else None
             if df.shape[1] > 5:
                 pick_col = 5
             ids = df.iloc[:, pick_col].astype(str)
@@ -296,23 +297,25 @@ def preprocess_mutect(folder: Path, manifest_file: Path, out_dir: Path):
     for case_id in ids:
         case_id = str(case_id).split(",")[0].strip().strip('"')
         vcf_path = _find_vcf_for_case(folder, case_id)
-        target = (Path(out_dir) / "prep" / f"{case_id}.txt")
+        target = Path(out_dir) / "prep" / f"{case_id}.txt"
         try:
-              if vcf_path is None:
-              logging.warning(f"{case_id}: VCF not found under {folder}")
-              continue
-          if vcf_path.suffix == ".gz":
-              with _gzip.open(vcf_path, "rt", encoding="utf-8", errors="replace") as fin, open(target, "w") as fout:
-                  for line in fin:
-                      if not line.startswith("##"):
-                          fout.write(line)
-          else:
-              with open(vcf_path, "rt", encoding="utf-8", errors="replace") as fin, open(target, "w") as fout:
-                  for line in fin:
-                      if not line.startswith("##"):
-                          fout.write(line)
-      except Exception as e:
-          logging.warning(f"{case_id}: failed to preprocess VCF: {e}")
+            if vcf_path is None:
+                logging.warning(f"{case_id}: VCF not found under {folder}")
+                continue
+
+            if vcf_path.suffix == ".gz":
+                with _gzip.open(vcf_path, "rt", encoding="utf-8", errors="replace") as fin, open(target, "w") as fout:
+                    for line in fin:
+                        if not line.startswith("##"):
+                            fout.write(line)
+            else:
+                with open(vcf_path, "rt", encoding="utf-8", errors="replace") as fin, open(target, "w") as fout:
+                    for line in fin:
+                        if not line.startswith("##"):
+                            fout.write(line)
+        except Exception as e:
+            logging.warning(f"{case_id}: failed to preprocess VCF: {e}")
+
 
 
 # ---- Helpers ----
