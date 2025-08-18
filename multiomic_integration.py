@@ -265,17 +265,6 @@ def load_and_enhance_dna(case_id: str, folder: Path, out_dir: Path, ref_dir: Opt
 
 # ----------------------- modality I/O (GDC-style) -------------------
 
-def _read_gdc_manifest(mod_dir: Path, basename: str) -> Optional[pd.DataFrame]:
-    m = mod_dir / basename
-    if not m.exists(): return None
-    df = _read_any_table(m, sep="\t")
-    cols = {c.lower(): c for c in df.columns}
-    if "case id" in cols and "file id" in cols:
-        keep = [cols["case id"], cols["file id"]]
-        if "file name" in cols: keep.append(cols["file name"])
-        return df[keep].rename(columns={cols["case id"]:"Case ID", cols["file id"]:"File ID"})
-    return None
-
 def _find_in_subdir_by_patterns(root: Path, patterns: List[str]) -> Optional[Path]:
     if not root.exists(): return None
     for p in root.rglob("*"):
@@ -553,24 +542,40 @@ def process_one_case(case_id: str, folder: str, out_dir: str, ref_dir: Optional[
                      step: str, dna_rows: str, dedup_level: str, dedup_key_cols: Optional[List[str]],
                      emit_qc: bool, ensg_join_mode: str, synth_overlap: bool,
                      ch3_map: Optional[str], ch3_probe_col: Optional[str], ch3_ensg_col: Optional[str],
-                     ch3_symbol_col: Optional[str], ch3_agg: str) -> Tuple[str, Optional[str]]:
+                     ch3_symbol_col: Optional[str], ch3_agg: str,
+                     skip_rna: bool, skip_ch3: bool, skip_protein: bool, skip_cn: bool) -> Tuple[str, Optional[str]]:
     try:
         folder_p = Path(folder); out_dir_p = Path(out_dir); ref_p = Path(ref_dir) if ref_dir else None
+
+        # Prepare DNA if requested
         if step in ("dna","all"):
             load_and_enhance_dna(case_id, folder_p, out_dir_p, ref_p, dna_rows)
+
+        # Always start merges from the DNA output table
         base = _read_any_table(out_dir_p / "dna" / f"{case_id}.csv")
-        if step in ("rna","all"):
+
+        # Decide which integrations to run
+        chain = (step == "dna")
+        do_rna = ((step in ("rna","all")) or chain) and (not skip_rna)
+        do_ch3 = ((step in ("ch3","all")) or chain) and (not skip_ch3)
+        do_cnv = ((step in ("cnv","all")) or chain) and (not skip_cn)
+        do_pro = ((step in ("protein","all")) or chain) and (not skip_protein)
+
+        if do_rna:
             base = integrate_rna(base, folder_p, case_id, ensg_join_mode, synth_overlap)
-        if step in ("cnv","all"):
+        if do_cnv:
             base = integrate_cnv(base, folder_p, case_id, ensg_join_mode, synth_overlap)
-        if step in ("ch3","all"):
+        if do_ch3:
             base = integrate_ch3(base, folder_p, case_id, ensg_join_mode, ch3_map, ref_p,
                                  ch3_probe_col, ch3_ensg_col, ch3_symbol_col, ch3_agg)
-        if step in ("protein","all"):
+        if do_pro:
             base = integrate_protein(base, folder_p, case_id, synth_overlap)
+
         base = _final_dedup(base, dedup_level, dedup_key_cols)
+
         out_fp = Path(out_dir) / f"{case_id}_integrated.csv"
         base.to_csv(out_fp, index=False)
+
         if emit_qc:
             qc = {
                 "case_id": case_id,
@@ -582,9 +587,11 @@ def process_one_case(case_id: str, folder: str, out_dir: str, ref_dir: Optional[
             }
             qcd = Path(out_dir) / "qc"; _ensure_dir(qcd)
             pd.DataFrame([qc]).to_csv(qcd / f"{case_id}_qc.tsv", sep="\t", index=False)
+
         return (case_id, None)
     except Exception as e:
         return (case_id, str(e))
+
 
 # ------------------------------- main -------------------------------
 
@@ -597,19 +604,32 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ref_zip", default=None)
     p.add_argument("--step", default="all", choices=["all","dna","rna","ch3","cnv","protein"])
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
+
+    # DNA handling / output controls
     p.add_argument("--dna_rows", default="ensg_only", choices=["ensg_only","all"])
     p.add_argument("--dedup_level", default="row", choices=["none","row","key"])
     p.add_argument("--dedup_key", default="CHROM,POS,REF,ALT,ENSGene,ENSGene_core")
     p.add_argument("--emit_qc", action="store_true")
+
+    # Join behavior
     p.add_argument("--ensg_join_mode", default="core", choices=["core","exact"])
     p.add_argument("--synthesize_overlap_for_tests", action="store_true")
+
     # CH3 options
     p.add_argument("--ch3_map", default=None)
     p.add_argument("--ch3_probe_col", default=None)
     p.add_argument("--ch3_ensg_col", default=None)
     p.add_argument("--ch3_symbol_col", default=None)
     p.add_argument("--ch3_agg", default="mean", choices=["mean","median"])
+
+    # NEW: skip flags
+    p.add_argument("--skip-rna", action="store_true", help="Skip RNA integration when chaining from --step dna or all.")
+    p.add_argument("--skip-ch3", action="store_true", help="Skip CH3 integration when chaining from --step dna or all.")
+    p.add_argument("--skip-protein", action="store_true", help="Skip protein integration when chaining from --step dna or all.")
+    p.add_argument("--skip-cn", action="store_true", help="Skip CNV integration when chaining from --step dna or all.")
+
     return p.parse_args()
+
 
 def main() -> None:
     args = parse_args()
@@ -623,12 +643,16 @@ def main() -> None:
     logging.info(f"N = {len(case_ids)} samples")
     logging.info(f"Running step(s): {args.step}")
     with ProcessPoolExecutor(max_workers=args.jobs) as ex:
-        futs = [ex.submit(process_one_case, cid, args.folder, args.out_dir,
-                          str(ref_dir_p) if ref_dir_p else None,
-                          args.step, args.dna_rows, args.dedup_level, dedup_key_cols, args.emit_qc,
-                          args.ensg_join_mode, args.synthesize_overlap_for_tests,
-                          args.ch3_map, args.ch3_probe_col, args.ch3_ensg_col, args.ch3_symbol_col, args.ch3_agg)
-                for cid in case_ids]
+        futs = [ex.submit(
+            process_one_case, cid, args.folder, args.out_dir,
+            str(ref_dir_p) if ref_dir_p else None,
+            args.step, args.dna_rows, args.dedup_level, dedup_key_cols, args.emit_qc,
+            args.ensg_join_mode, args.synthesize_overlap_for_tests,
+            args.ch3_map, args.ch3_probe_col, args.ch3_ensg_col, args.ch3_symbol_col, args.ch3_agg,
+            args.skip_rna, args.skip_ch3, args.skip_protein, args.skip_cn
+        )
+        for cid in case_ids]
+
         for cid in case_ids:
             logging.info(f"Processing {cid} [step={args.step}]")
         for f in as_completed(futs):
