@@ -77,6 +77,7 @@ import zipfile
 import shutil
 import tempfile
 from contextlib import contextmanager
+from contextlib import nullcontext
 from typing import Optional, List, Tuple
 from pathlib import Path
 import pandas as pd
@@ -539,22 +540,26 @@ def parse_args():
     return p.parse_args()
 
 
+from contextlib import nullcontext  # at top of file
+
 def main():
     args = parse_args()
     project_root = Path(args.folder).resolve()
     out_root = Path(args.out_dir).resolve()
     ensure_dir(out_root / "dna")
 
-    # Read the dna_manifest.tsv (GDC-like; expects Case ID, File ID, File Name columns)
+    # Read manifest
     df = read_table_guess(Path(args.manifest))
-    # If requested, emit a simplified Case-ID list early (does not require File Name column)
+
+    # Optional simplified list
     if args.make_simplified:
         simp_out = Path(args.simplified) if args.simplified else (out_root / "case_ids.txt")
         outp = emit_simplified_case_list(Path(args.manifest), simp_out)
         logging.info(f"Wrote simplified Case-ID list: {outp}")
-    # Normalize column names in a case-insensitive way
+
+    # Normalize headers (case-insensitive lookup)
     cols = {c.lower().strip(): c for c in df.columns}
-    # Map common variants for case id
+
     case_col = None
     for key in ["case id", "case-id", "caseid"]:
         if key in cols:
@@ -568,6 +573,7 @@ def main():
         if key in cols:
             file_id_col = cols[key]
             break
+
     file_name_col = None
     for key in ["file name", "file-name", "filename"]:
         if key in cols:
@@ -579,95 +585,56 @@ def main():
     produced = 0
     seen = set()
 
-    # Iterate rows and produce per-case CSV
-    for _, row in df.iterrows():
-        case_id = str(row[case_col]).strip()
-        if case_id in seen:
-            continue
-        seen.add(case_id)
-        # sanitize case id to avoid path issues
-        safe_case = case_id.replace("/", "_")
-        file_id = str(row[file_id_col]).strip() if file_id_col and pd.notna(row[file_id_col]) else ""
-        file_name = str(row[file_name_col]).strip()
+    # Scratch context (only if --unzip-inputs enabled)
+    scratch_mgr = _scratch(args) if getattr(args, "unzip_inputs", False) else nullcontext(Path())
+    with scratch_mgr as scratch_dir:
+        globals()['_SCRATCH_DIR'] = scratch_dir
 
-        if not file_name:
-            logging.warning(f"[{case_id}] Missing 'File Name' in manifest; skipping")
-            continue
+        for _, row in df.iterrows():
+            # Case-ID (strip anything after a comma)
+            case_id = str(row[case_col]).split(",")[0].strip().strip('"')
+            if case_id in seen:
+                continue
+            seen.add(case_id)
+            safe_case = case_id.replace("/", "_")
 
-        try:
-            src = resolve_dna_file(project_root, file_id, file_name)
-        except FileNotFoundError as e:
-            logging.warning(f"[{case_id}] {e}")
-            continue
+            # Resolve file_id/file_name (file_id may be absent in some manifests)
+            file_id = str(row[file_id_col]).strip() if file_id_col and pd.notna(row[file_id_col]) else ""
+            file_name = str(row[file_name_col]).strip()
+            if not file_name:
+                logging.warning(f"[{case_id}] Missing 'File Name' in manifest; skipping")
+                continue
 
-        # create one scratch dir per run, not per file
-        if 'SCRATCH_ENTERED' not in globals():
-            SCRATCH_ENTERED = True
-            _scratch_cm = _scratch(args)   # contextmanager you added earlier
-            _scratch_ctx = _scratch_cm.__enter__()  # enter once
-            globals()['_SCRATCH_DIR'] = _scratch_ctx
-        
-        src = resolve_dna_file(project_root, file_id, file_name)
-        
-        # If requested, materialize compressed inputs to scratch and use THAT path downstream
-        eff_src = src
-        if getattr(args, "unzip_inputs", False):
-            eff_src = materialize_input(src, globals()['_SCRATCH_DIR'])
-        
-        # Accept .vcf or .vcf.gz (after materialization, eff_src will typically be .vcf)
-        suffs = "".join(eff_src.suffixes[-2:])  # handles .vcf.gz nicely
-        if not (eff_src.suffix == ".vcf" or suffs == ".vcf.gz"):
-            logging.warning(f"[{case_id}] Source is not a VCF (.vcf or .vcf.gz): {eff_src.name}; skipping")
-            continue
-        
-        try:
-            vdf = parse_vcf_to_df(eff_src, max_records=args.max_records)
-        except Exception as e:
-            logging.warning(f"[{case_id}] Failed to parse VCF '{eff_src.name}': {e}")
-            continue
+            # Locate the source file under project_root
+            try:
+                src = resolve_dna_file(project_root, file_id, file_name)
+            except FileNotFoundError as e:
+                logging.warning(f"[{case_id}] {e}")
+                continue
 
-        # Prepend Case-ID column and write out
-        vdf.insert(0, "Case-ID", case_id)
-        out_path = out_root / "dna" / f"{case_id}.csv"
-        ensure_dir(out_path.parent)
-        vdf.to_csv(out_path, index=False)
-        produced += 1
-        logging.info(f"[{case_id}] Wrote {out_path} ({len(vdf)} rows)")
+            # If requested, materialize compressed inputs to scratch
+            eff_src = materialize_input(src, scratch_dir) if getattr(args, "unzip_inputs", False) else src
 
-    # ----- Optional utilities -----
-    # Preprocess MuTect-style VCFs: strips '##' and writes out_dir/prep/{Case-ID}.txt
-    if args.preprocess_mutect:
-        vcf_folder = Path(args.vcf_folder).resolve() if args.vcf_folder else (project_root / "dna")
-        preprocess_mutect(vcf_folder, Path(args.manifest), out_root)
+            # Parse VCF → DataFrame
+            try:
+                vdf = parse_vcf_to_df(eff_src, max_records=args.max_records)
+            except Exception as e:
+                logging.warning(f"[{case_id}] Failed to parse VCF '{eff_src}': {e}")
+                continue
 
-    # Calls preprocess_mutect before downstream steps
-    if getattr(args, "preprocess_mutect", False):
-      vcf_root = Path(args.vcf_folder) if args.vcf_folder else Path(args.folder)
-      logging.info(f"[DNA] Preprocessing Mutect VCFs from {vcf_root} -> {Path(args.out_dir) / 'prep'}")
-      preprocess_mutect(folder=vcf_root, manifest_file=Path(args.manifest), out_dir=Path(args.out_dir))
-
-    # These steps require a --simplified file listing Case-IDs (one per line; no header)
-    if args.simplified:
-        simp = Path(args.simplified)
-        if args.summarize_variants:
-            summarize_variants(simp, out_root)
-        if args.write_signatures:
-            write_signatures(out_root / "prep", simp, out_root, args.signature_label)
-        if args.extract_mutations:
-            extract_mutations(out_root / "prep", out_root, simp, args.extract_mutations)
-        if args.write_matrices:
-            write_matrices(out_root, simp)
+            # Write per-case CSV (filename = case only)
+            vdf.insert(0, "Case-ID", case_id)
+            out_path = out_root / "dna" / f"{safe_case}.csv"
+            ensure_dir(out_path.parent)
+            vdf.to_csv(out_path, index=False)
+            produced += 1
+            logging.info(f"[{case_id}] Wrote {out_path} ({len(vdf)} rows)")
 
     if produced == 0:
         logging.warning("No per-case DNA CSVs were produced. Check your dna_manifest.tsv and input files.")
     else:
-      # close the scratch context if we opened it
-        if '_scratch_cm' in globals():
-            try:
-                _scratch_cm.__exit__(None, None, None)
-            except Exception:
-                pass
         logging.info(f"Done. Wrote {produced} case CSVs under {out_root/'dna'}.")
+
 
 if __name__ == "__main__":
     main()
