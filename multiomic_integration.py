@@ -81,13 +81,13 @@ Reference Options
     --ref_zip             Path to a reference.zip archive. By default, script looks for one in current directory --ref_dir <path>
 
 Optional
-    --input_dna_dir       Directory of VEP annotated mutect CSVs named {case-ID}.csv #If not provided, --input_dna_dir defaults to dna/{case-id}.csv
-    --input_rna_dir       Directory of RNA expression files
+    --input_dna_dir       Override DNA VEP-annotated mutect file directory (default: <folder>/dna/{case-id}.csv)
+    --input_rna_dir       Override RNA expression file directory (default: <folder>/rna)
+    --input_ch3_dir       Override CH3 (methylation) file directory (default: <folder>/ch3)
+    --input_cn_dir        Override CNV file directory (default: <folder>/cnv or <folder>/cn)
+    --input_protein_dir   Override protein annotation directory (default: <folder>/protein)
     --rna_manifest        Table linking case-IDs to RNA file paths
-    --input_ch3_dir       Directory of methylation (CH3) files
     --ch3_manifest        Table linking case-IDs to CH3 file paths
-    --input_protein_dir   Directory of protein annotation files
-    --input_cn_dir        Directory of CNV files
     --cn_manifest         Table linking case-IDs to CNV file paths
     --skip_*              Flags to skip specific integration steps
     --emit_qc             per-case QC to out_dir/qc/{case-id}_qc.tsv
@@ -204,6 +204,14 @@ def _resolve_data_root(mod_dir: Path, row: pd.Series) -> Optional[Path]:
             return hit  # file path
     return None
 
+    def _try_case_file_in_dir(mod_dir: Path, case_id: str) -> Optional[Path]:
+    for ext in (".csv", ".tsv", ".txt"):
+        p = mod_dir / f"{case_id}{ext}"
+        if p.exists():
+            return p
+    return None
+
+
 
 # ---------------------- reference (maps only) -----------------------
 
@@ -293,8 +301,8 @@ def _try_per_case_file(folder: Path, modality: str, case_id: str) -> Optional[Pa
             return p
     return None
 
-def load_and_enhance_dna(case_id: str, folder: Path, out_dir: Path, ref_dir: Optional[Path], dna_rows: str) -> Path:
-    inp = _try_per_case_file(folder, "dna", case_id)
+def load_and_enhance_dna(case_id: str, folder: Path, dna_dir: Path, out_dir: Path, ref_dir: Optional[Path], dna_rows: str) -> Path:
+    inp = _try_per_case_file(folder, "dna", dna_dir, case_id)
     if inp is None:
         tried = [str(folder / "dna" / f"{case_id}{ext}") for ext in (".csv",".tsv",".txt")]
         raise FileNotFoundError(f"DNA file not found for {case_id}. Tried: {', '.join(tried)}")
@@ -388,8 +396,9 @@ def integrate_uniprot_np(base_df: pd.DataFrame, ref_dir: Optional[Path], case_id
 
 # ----------------------- modality merges ----------------------------
 
-def _rna_from_gdc(folder: Path, case_id: str, rna_manifest: Optional[str]) -> Optional[pd.DataFrame]:
+def _rna_from_gdc(folder: Path, rna_dir: Path, case_id: str, rna_manifest: Optional[str]) -> Optional[pd.DataFrame]:
     mod_dir = folder / "rna"
+    mod_dir = Path (rna_dir)
     man = _load_manifest_df(mod_dir, rna_manifest, "gdc-rna.tsv")
     if man is None: return None
     rows = man[man["Case ID"] == case_id]
@@ -412,8 +421,9 @@ def _rna_from_gdc(folder: Path, case_id: str, rna_manifest: Optional[str]) -> Op
     return df
 
 
-def _cn_from_gdc(folder: Path, case_id: str, cn_manifest: Optional[str]) -> Optional[pd.DataFrame]:
+def _cn_from_gdc(folder: Path, cn_dir: Path, case_id: str, cn_manifest: Optional[str]) -> Optional[pd.DataFrame]:
     mod_dir = _mod_dir(folder, "cnv", alt="cn")
+    mod_dir = Path(cn_dir)
     man = _load_manifest_df(mod_dir, cn_manifest, "gdc-cn.tsv")
     if man is None: return None
     rows = man[man["Case ID"] == case_id]
@@ -441,8 +451,9 @@ def _cn_from_gdc(folder: Path, case_id: str, cn_manifest: Optional[str]) -> Opti
     out["copy_number"] = _safe_to_numeric(out["copy_number"])
     return out
 
-def _ch3_from_gdc(folder: Path, case_id: str, ch3_manifest: Optional[str]) -> Optional[pd.DataFrame]:
+def _ch3_from_gdc(folder: Path, ch3_dir: Path, case_id: str, ch3_manifest: Optional[str]) -> Optional[pd.DataFrame]:
     mod_dir = folder / "ch3"
+    mod_dir = Path (ch3_dir)
     man = _load_manifest_df(mod_dir, ch3_manifest, "gdc-ch3.tsv")
     if man is None: return None
     rows = man[man["Case ID"] == case_id]
@@ -516,10 +527,10 @@ def _load_ch3_map(ch3_map: Optional[str], ref_dir: Optional[Path],
     m = m.dropna(subset=["probe","ENSGene_core"]).drop_duplicates(subset=["probe"], keep="first")
     return m[["probe","ENSGene_core"]]
 
-def integrate_rna(base_df: pd.DataFrame, folder: Path, case_id: str,
+def integrate_rna(base_df: pd.DataFrame, folder: Path, rna_dir: Path, case_id: str,
                   ensg_join_mode: str, synth_overlap: bool, rna_manifest: Optional[str]) -> pd.DataFrame:
     df = base_df.copy()
-    rna = _rna_from_gdc(folder, case_id, rna_manifest)
+    rna = _rna_from_gdc(folder, rna_dir, case_id, rna_manifest)
     if rna is None or rna.empty: return df
     left_key  = "ENSGene_core" if ensg_join_mode == "core" else "ENSGene"
     right_key = "Ensembl_core" if ensg_join_mode == "core" else "Ensembl_full"
@@ -535,10 +546,10 @@ def integrate_rna(base_df: pd.DataFrame, folder: Path, case_id: str,
     logging.info(f"[RNA] {case_id}: matched Count for {int(df['Count'].notna().sum())} rows (join={ensg_join_mode})")
     return df
 
-def integrate_cnv(base_df: pd.DataFrame, folder: Path, case_id: str,
+def integrate_cnv(base_df: pd.DataFrame, folder: Path, cn_dir: Path, case_id: str,
                   ensg_join_mode: str, synth_overlap: bool, cn_manifest: Optional[str]) -> pd.DataFrame:
     df = base_df.copy()
-    cn = _cn_from_gdc(folder, case_id, cn_manifest)
+    cn = _cn_from_gdc(folder, cn_dir, case_id, cn_manifest)
     if cn is None or cn.empty: return df
     left_key  = "ENSGene_core" if ensg_join_mode == "core" else "ENSGene"
     right_key = "Ensembl_core" if ensg_join_mode == "core" else "Ensembl_full"
@@ -554,11 +565,11 @@ def integrate_cnv(base_df: pd.DataFrame, folder: Path, case_id: str,
     logging.info(f"[CNV] {case_id}: matched copy_number for {int(df['copy_number'].notna().sum())} rows (join={ensg_join_mode})")
     return df
 
-def integrate_ch3(base_df: pd.DataFrame, folder: Path, case_id: str, ensg_join_mode: str,
+def integrate_ch3(base_df: pd.DataFrame, folder: Path, ch3_dir: Path, case_id: str, ensg_join_mode: str,
                   ch3_map: Optional[str], ref_dir: Optional[Path], ch3_probe_col: Optional[str],
                   ch3_ensg_col: Optional[str], ch3_symbol_col: Optional[str], ch3_agg: str, ch3_manifest: Optional[str]) -> pd.DataFrame:
     df = base_df.copy()
-    ch3 = _ch3_from_gdc(folder, case_id, ch3_manifest)
+    ch3 = _ch3_from_gdc(folder, ch3_dir, case_id, ch3_manifest)
     if ch3 is None or ch3.empty: return df
     m = _load_ch3_map(ch3_map, ref_dir, ch3_probe_col, ch3_ensg_col, ch3_symbol_col)
     if m is None or m.empty:
@@ -577,7 +588,7 @@ def integrate_ch3(base_df: pd.DataFrame, folder: Path, case_id: str, ensg_join_m
     return df
 
 def integrate_protein(base_df: pd.DataFrame, folder: Path, case_id: str, synth_overlap: bool) -> pd.DataFrame:
-    p = _try_per_case_file(folder, "protein", case_id)
+    p = _try_per_case_file(folder, "protein", protein_dir, case_id)
     if p is None: return base_df
     prot = _read_any_table(p, sep=",").drop_duplicates()
     if "NP" not in prot.columns:
@@ -609,7 +620,9 @@ def _final_dedup(df: pd.DataFrame, level: str, key_cols: Optional[List[str]]) ->
 
 # -------------------------- per-case worker -------------------------
 
-def process_one_case(case_id: str, folder: str, out_dir: str, ref_dir: Optional[str],
+def process_one_case(case_id: str,
+                     dna_dir: str, rna_dir: str, ch3_dir: str, cn_dir: str, protein_dir: str,
+                     out_dir: str, ref_dir: Optional[str],
                      step: str, dna_rows: str, dedup_level: str, dedup_key_cols: Optional[List[str]],
                      emit_qc: bool, ensg_join_mode: str, synth_overlap: bool,
                      ch3_map: Optional[str], ch3_probe_col: Optional[str], ch3_ensg_col: Optional[str],
@@ -618,14 +631,17 @@ def process_one_case(case_id: str, folder: str, out_dir: str, ref_dir: Optional[
                      rna_manifest: Optional[str], ch3_manifest: Optional[str], cn_manifest: Optional[str]
                      ) -> Tuple[str, Optional[str]]:
     try:
-        folder_p = Path(folder); out_dir_p = Path(out_dir); ref_p = Path(ref_dir) if ref_dir else None
+        out_dir_p = Path(out_dir)
+        ref_p = Path(ref_dir) if ref_dir else None
+        dna_dir_p = Path(dna_dir); rna_dir_p = Path(rna_dir)
+        ch3_dir_p = Path(ch3_dir); cn_dir_p = Path(cn_dir); protein_dir_p = Path(protein_dir)
 
-        # Prepare DNA if requested
-        if step in ("dna","all"):
-            load_and_enhance_dna(case_id, folder_p, out_dir_p, ref_p, dna_rows)
+        # Build DNA if requested or if base file is missing
+        base_fp = out_dir_p / "dna" / f"{case_id}.csv"
+        if step in ("dna","all") or not base_fp.exists():
+            load_and_enhance_dna(case_id, dna_dir_p, out_dir_p, ref_p, dna_rows)
 
-        # Always start merges from the DNA output table
-        base = _read_any_table(out_dir_p / "dna" / f"{case_id}.csv")
+        base = _read_any_table(base_fp)
 
         # Decide which integrations to run
         chain = (step == "dna")
@@ -635,17 +651,14 @@ def process_one_case(case_id: str, folder: str, out_dir: str, ref_dir: Optional[
         do_cnv = ((step in ("cnv","all")) or chain) and (not skip_cn)
 
         if do_rna:
-            base = integrate_rna(base, folder_p, case_id, ensg_join_mode, synth_overlap, rna_manifest)
-          
+            base = integrate_rna(base, rna_dir_p, case_id, ensg_join_mode, synth_overlap, rna_manifest)
         if do_ch3:
-            base = integrate_ch3(base, folder_p, case_id, ensg_join_mode, ch3_map, ref_p,
+            base = integrate_ch3(base, ch3_dir_p, case_id, ensg_join_mode, ch3_map, ref_p,
                                  ch3_probe_col, ch3_ensg_col, ch3_symbol_col, ch3_agg, ch3_manifest)
         if do_pro:
-            base = integrate_protein(base, folder_p, case_id, synth_overlap)
-          
+            base = integrate_protein(base, protein_dir_p, case_id, synth_overlap)
         if do_cnv:
-            base = integrate_cnv(base, folder_p, case_id, ensg_join_mode, synth_overlap, cn_manifest)
-
+            base = integrate_cnv(base, cn_dir_p, case_id, ensg_join_mode, synth_overlap, cn_manifest)
 
         base = _final_dedup(base, dedup_level, dedup_key_cols)
 
@@ -713,6 +726,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cn-manifest",  dest="cn_manifest",  default=None,
                    help="Path to CNV manifest (case→file). Defaults to <folder>/(cnv|cn)/gdc-cn.tsv")
 
+    # Inputs for raw data
+    # --- add these in parse_args(), near other options ---
+    p.add_argument("--input_dna_dir", default=None,
+                   help="Directory containing DNA per-case files (default: <folder>/dna)")
+    p.add_argument("--input_rna_dir", default=None,
+                   help="Directory containing RNA files/folders (default: <folder>/rna)")
+    p.add_argument("--input_ch3_dir", default=None,
+                   help="Directory containing methylation files/folders (default: <folder>/ch3)")
+    p.add_argument("--input_cn_dir", default=None,
+                   help="Directory containing CNV files/folders (default: <folder>/cnv or <folder>/cn)")
+    p.add_argument("--input_protein_dir", default=None,
+                   help="Directory containing protein per-case files (default: <folder>/protein)")
+
 
     return p.parse_args()
 
@@ -729,10 +755,26 @@ def main() -> None:
     logging.info(f"[{mod_dir.name}] using manifest: {man_path}")
     logging.info(f"N = {len(case_ids)} samples")
     logging.info(f"Running step(s): {args.step}")
-  
+    folder_p = Path(args.folder)
+
+    dna_dir = Path(args.input_dna_dir) if args.input_dna_dir else (folder_p / "dna")
+    rna_dir = Path(args.input_rna_dir) if args.input_rna_dir else (folder_p / "rna")
+    ch3_dir = Path(args.input_ch3_dir) if args.input_ch3_dir else (folder_p / "ch3")
+    protein_dir = Path(args.input_protein_dir) if args.input_protein_dir else (folder_p / "protein")
+    
+    if args.input_cn_dir:
+        cn_dir = Path(args.input_cn_dir)
+    else:
+        cn_dir = folder_p / "cnv"
+        if not cn_dir.exists():
+            cn_dir = folder_p / "cn"
+    
+    logging.info(f"Dirs: dna={dna_dir} rna={rna_dir} ch3={ch3_dir} cn={cn_dir} protein={protein_dir}")
+      
     with ProcessPoolExecutor(max_workers=args.jobs) as ex:
         futs = [ex.submit(
-            process_one_case, cid, args.folder, args.out_dir,
+            process_one_case, cid, str(dna_dir), str(rna_dir), str(ch3_dir), str(cn_dir), str(protein_dir),
+            args.out_dir, args.folder, args.out_dir,
             str(ref_dir_p) if ref_dir_p else None,
             args.step, args.dna_rows, args.dedup_level, dedup_key_cols, args.emit_qc,
             args.ensg_join_mode, args.synthesize_overlap_for_tests,
