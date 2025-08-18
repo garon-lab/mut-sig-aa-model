@@ -8,17 +8,17 @@ This script organizes metafiles (manifests) that will be used to integrate multi
 
 Dependencies: pandas
 
-Project layout expected (for --build main)
+Project layout expected (for --build-main)
 
 PROJECT_ROOT/
-   dna/        (optional)         case-id.csv                       #VEP-annotated mutect files
+   dna/        (optional)         case-id.csv                       # VEP-derived per-case DNA CSVs
                gdc-dna.tsv        + dna/{File ID}/{File Name}
-   rna/        gdc-rna.tsv        + rna/{File ID}/{File Name}       #RNA-seq count data
-   ch3/        gdc-ch3.tsv        + ch3/{File ID}/{File Name}       #Methylation data in GDC format
-   cn/         gdc-cn.tsv         + cn/{File ID}/{File Name}        #Copy Number data in GDC format
-   protein/    (optional)         case-id.csv                       #PSM reads (NP, SEQ, EV, INT)
+   rna/        gdc-rna.tsv        + rna/{File ID}/{File Name}       # RNA-seq count data
+   ch3/        gdc-ch3.tsv        + ch3/{File ID}/{File Name}       # Methylation data in GDC format
+   cn/         gdc-cn.tsv         + cn/{File ID}/{File Name}        # Copy Number data in GDC format
+   protein/    (optional)         case-id.csv                       # PSM/peptide-level per-case CSVs
 
-Usage 
+Usage
 (Recommended):
    python make_manifest.py \
         --build-main \
@@ -32,31 +32,31 @@ Usage
         --project_root <project directory> \
         --out_dir <output directory>
 
-(To make single manifest from gdc-manifest):
+(To make single manifest from a GDC-like manifest):
    python make_manifest.py \
         --gdc-manifest <manifest file> \
         --out_dir <output directory> \
-        --type <rna|ch3|cn> \
+        --type <rna|ch3|cn|dna> \
         --folder-id-col <# (e.g., 0)> \
         --file-name-col <# (e.g., 1)> \
-        --case-id-col <# (e.g, 5)> 
+        --case-id-col <# (e.g., 5)>
 
 Arguments:
 (Recommended Use)
-   --build-main        Flag that creates unified manifest with paths constructed like {PROJECT_ROOT}/{modality}/{File ID}/{File Name}
-   --project_root      Directory that has all project-related files (dna, rna, ch3, cn, protein)
+   --build-main        Create unified manifest with paths like {PROJECT_ROOT}/{modality}/{File ID}/{File Name}
+   --project_root      Directory with subfolders (dna, rna, ch3, cn, protein)
    --out_dir           Directory that will contain all output files
 
 (General)
-   --log-level L       Default: INFO, can be set to DEBUG for more verbose logging
-   
-(Single Use)   
-   --gdc-manifest      Flag to use if opting for creation of single manifest as opposed to build-main
-   --out_dir           Directory that will contain output file
-   --type              Used for naming output manifest (e.g., rna_manifest.tsv)
-   --folder-id-column  Column number that identifies path (downloaded code path; e.g, 123abc)
-   --file-name-col     Column number that identifies file name (downloaded code + file name; e.g., 987zyx.wxs.MuTect2.somatic_annotation.vcf.gz)
-   --case-id-col       Column number that identifies case-id (e.g., C3N-001)
+   --log-level L       Default: INFO (use DEBUG for more verbosity)
+
+(Single Use)
+   --gdc-manifest      Use a single GDC-like manifest to emit one modality’s manifest
+   --out_dir           Output directory for the single manifest
+   --type              Modality name (rna, ch3, cn, dna)
+   --folder-id-col     Column index for folder/file-id in the GDC manifest
+   --file-name-col     Column index for file name in the GDC manifest
+   --case-id-col       Column index for case id in the GDC manifest
 """
 
 from __future__ import annotations
@@ -110,16 +110,18 @@ def _infer_case_column(cols) -> str | None:
         if lc in ("case-id", "case_id", "caseid", "case id"):
             return c
     return None
-   
+
 def _write_simple_manifest(paths: dict[str, str], out_file: Path):
-        import pandas as _pd
-        rows = [{"Case ID": cid, "Path": path} for cid, path in sorted(paths.items())]
-        if not rows:
-            return None
-        df = _pd.DataFrame(rows, columns=["Case ID", "Path"])
-        out_file.parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(out_file, sep="\t", index=False)
-        return out_file
+    """Write a simple two-column manifest: Case ID | Path."""
+    import pandas as _pd
+    rows = [{"Case ID": cid, "Path": path} for cid, path in sorted(paths.items())]
+    if not rows:
+        return None
+    df = _pd.DataFrame(rows, columns=["Case ID", "Path"])
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_file, sep="\t", index=False)
+    return out_file
+
 # -------------------- RNA --------------------
 
 def _infer_rna_path_column(cols) -> str | None:
@@ -387,7 +389,6 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
     logger.info("Manifest written to %s (rows=%d)", out_path, len(out_df))
     return out_path
 
-
 # ---------- Emit per-modality GDC-like manifests from a unified main manifest ----------
 
 def emit_gdc_like_from_main(main_manifest: Path, project_root: Path, out_dir: Path) -> dict:
@@ -459,10 +460,10 @@ def emit_gdc_like_from_main(main_manifest: Path, project_root: Path, out_dir: Pa
     wrote["ch3"] = write_mod("ch3", "ch3", "ch3_manifest.tsv",
                              "DNA Methylation", "Methylation Beta Value")
     wrote["cn"]  = (write_mod("cn",  "cn", "cn_manifest.tsv",
-                         "Copy Number Variation", "Gene Level Copy Number")
-               or
-               write_mod("cnv", "cn", "cn_manifest.tsv",
-                         "Copy Number Variation", "Gene Level Copy Number"))
+                              "Copy Number Variation", "Gene Level Copy Number")
+                    or
+                    write_mod("cnv", "cn", "cn_manifest.tsv",
+                              "Copy Number Variation", "Gene Level Copy Number"))
 
     # DNA: prefer VEP; fallback to dna/
     dna_written = write_mod("vep", "dna", "dna_manifest.tsv",
@@ -528,8 +529,8 @@ def main():
     args = parse_args()
 
     logging.basicConfig(
-       level=getattr(logging, args.log_level.upper(), logging.INFO),
-       format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
     )
     logger.info("Starting make_manifest.")
 
@@ -566,11 +567,16 @@ def main():
             logger.info("Wrote CN manifest (%d rows): %s", n_cn, cn_manifest_path)
 
     if args.emit_ref:
-       if not (args.main_manifest and args.out_dir and args.project_root):
-           raise SystemExit("--emit-ref requires --main-manifest, --out_dir, and --project_root")
-       out_dir = Path(args.out_dir).expanduser().resolve()
-       out_dir.mkdir(parents=True, exist_ok=True)
-       wrote = emit_gdc_like_from_main(Path(args.main_manifest), project_root, out_dir)
+        if not (args.main_manifest and args.out_dir and args.project_root):
+            raise SystemExit("--emit-ref requires --main-manifest, --out_dir, and --project_root")
+        out_dir = Path(args.out_dir).expanduser().resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        wrote = emit_gdc_like_from_main(Path(args.main_manifest), project_root, out_dir)
+        for k, v in wrote.items():
+            if v:
+                logger.info("Wrote %s manifest: %s", k, v)
+            else:
+                logger.info("Skipped %s (no column or no rows)", k)
 
     # Legacy single-type path
     if args.gdc_manifest and not (args.emit_ref or args.build_main):
