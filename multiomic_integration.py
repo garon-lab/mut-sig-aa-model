@@ -257,7 +257,7 @@ def integrate_cnv(case_id: str, folder: Path, ref_dir: Optional[Path], cn_manife
     if not cn_manifest_path.exists():
         logging.warning(f"CNV manifest not found: {cn_manifest_path}; skipping CNV.")
         return base_df
-    df_cn = pd.read_table(cn_manifest_path), sep='\t')
+    df_cn = pd.read_table(cn_manifest_path, sep='\t')
     if 'copy_number' in df_cn.columns:
         df_cn['copy_number'].replace('', np.nan, inplace=True)
         df_cn.dropna(subset=['copy_number'], inplace=True)
