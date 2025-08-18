@@ -322,7 +322,7 @@ def process_case(case_id: str, folder: Path, out_dir: Path, step: str,
 
     out_file = outputs_dir / f"{case_id}_integrated.csv"
     base.to_csv(out_file, index=False)
-    log(f\"Wrote {out_file}\")
+    log(f"Wrote {out_file}")
     return out_file
 
 # -------------------------
