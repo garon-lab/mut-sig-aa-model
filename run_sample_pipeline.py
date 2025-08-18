@@ -158,7 +158,7 @@ def main():
         sys.executable, str(HERE / "make_manifest.py"),
         "--build-main",
         "--project_root", str(extracted_root),
-        "--main_out", str(main_manifest),
+        "--out_dir", str(mani_out_dir),
     ]
     run(cmd_manifest, dry_run)
 
