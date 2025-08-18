@@ -490,11 +490,11 @@ def main():
             logger.info("Wrote CN manifest (%d rows): %s", n_cn, cn_manifest_path)
 
     if args.emit_ref:
-    if not (args.main_manifest and args.out_dir and args.project_root):
-        raise SystemExit("--emit-ref requires --main-manifest, --out_dir, and --project_root")
-    out_dir = Path(args.out_dir).expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    wrote = emit_gdc_like_from_main(Path(args.main_manifest), project_root, out_dir)
+       if not (args.main_manifest and args.out_dir and args.project_root):
+           raise SystemExit("--emit-ref requires --main-manifest, --out_dir, and --project_root")
+       out_dir = Path(args.out_dir).expanduser().resolve()
+       out_dir.mkdir(parents=True, exist_ok=True)
+       wrote = emit_gdc_like_from_main(Path(args.main_manifest), project_root, out_dir)
 
     # Legacy single-type path
     if args.gdc_manifest and not (args.emit_ref or args.build_main):
