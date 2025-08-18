@@ -2,14 +2,17 @@
 """
 MULTIOMIC INTEGRATION
 
-This pipeline integrates multiple omics layers (DNA, RNA, methylation, protein, and copy number)
-for each case-id listed in a manifest. Can be used with an existing unifed manifest built with make_manifest.py or separate manifests. Only the final protein files (with copy number added) are retained in the output directory. Note protein files must be preprocessed and in the format {Case-ID}.csv (see protein_preprocessor.py). DNA files similarly can be modified with the dna_preprocessor.py.
+This pipeline uses a manifest TSV to integrate multiple omics layers (DNA required; RNA, methylation, protein, and copy number optional)
+for each case-id listed in a manifest. Can be used with an existing unifed manifest built with make_manifest.py or separate manifests. 
+Only the final protein files (with copy number added) are retained in the output directory. 
+Note protein files must be preprocessed and in the format {Case-ID}.csv (see protein_preprocessor.py). 
+DNA files similarly can be modified with the dna_preprocessor.py.
 
 Dependencies: csv, argparse, shutil, pandas, numpy
 
-Project layout (root = --folder / {project}):
+Project layout (root = --folder {project}):
   {project}/
-    dna/      {case_id}.*
+    dna/      {case_id}.csv (or similarly named)
     rna/      (subfolders per reference manifest) / files referenced by manifest
     ch3/      (subfolders per reference manifest) / files referenced by manifest
     cnv/      (subfolders per reference manifest) / files referenced by manifest
@@ -207,12 +210,59 @@ def write_case_output(out_dir: Path, case_id: str, df: pd.DataFrame, suffix: str
     return out_file
 
 # -------------------------
-# Placeholders for modality processors
-# (Replace with your real logic if available in your project)
+# Modality processer
 # -------------------------
+# 1) Gene symbol/name mapping in one pass
+def integrate_gene_annotations(base_df: pd.DataFrame, ref_dir: Path) -> pd.DataFrame:
+    sym_map = (ref_dir / "esng_gene-sym.txt")        # columns: Gene,Ensembl
+    name_map = (ref_dir / "gene-sym_name.txt")       # columns: symbol,name
+    if sym_map.exists():
+        m_sym = pd.read_csv(sym_map, sep="\t", names=["Gene","Ensembl"])
+        base_df = pd.merge(base_df, m_sym, how="left", left_on="ENSGene", right_on="Ensembl")
+        # keep a clean set of cols if you like:
+        # base_df = base_df.drop(columns=["Ensembl"])
+    else:
+        logging.warning(f"Gene symbol map not found: {sym_map}")
+
+    if name_map.exists():
+        m_name = pd.read_csv(name_map, sep="\t", names=["symbol","name"])
+        base_df = pd.merge(base_df, m_name, how="left", left_on="Gene", right_on="symbol")
+        # optional tidy:
+        # base_df.rename(columns={"name":"GeneName"}, inplace=True)
+    else:
+        logging.warning(f"Gene name map not found: {name_map}")
+    return base_df
+
+# 2) UniProt / NP mapping 
+def integrate_uniprot_np(base_df: pd.DataFrame, ref_dir: Path) -> pd.DataFrame:
+    # uni-ensg*.txt were previously per-chrom; now accept a single union file too
+    # Expected columns: From, To  (where To is ENSG; From is UniProt)
+    union_uni_ensg = ref_dir / "uni-ensg_all.txt"
+    if union_uni_ensg.exists():
+        m_ue = pd.read_csv(union_uni_ensg, sep="\t", names=["From","To"])
+        base_df = pd.merge(base_df, m_ue, how="left", left_on="ENSGene", right_on="To")
+    else:
+        logging.warning(f"UniProt-ENSG map not found: {union_uni_ensg}")
+
+    # NP mapping file (From=UniProt, To=NP)
+    uni_np = ref_dir / "uni-np_all.txt"
+    if uni_np.exists():
+        m_unp = pd.read_csv(uni_np, sep="\t", names=["From","NP"])
+        # if previous step added 'From' (UniProt), we can map NP directly
+        if "From" in base_df.columns:
+            base_df = pd.merge(base_df, m_unp, how="left", on="From")
+        else:
+            logging.warning("No UniProt 'From' column in base table; skipping NP map.")
+    else:
+        logging.warning(f"UniProt→NP map not found: {uni_np}")
+    return base_df
 
 def integrate_dna(df: pd.DataFrame) -> pd.DataFrame:
     # identity pass-through; hook for real integration
+    # inside process_case() after you’ve built base_df from DNA:
+    if ref_dir is not None:
+        base_df = integrate_gene_annotations(base_df, ref_dir)
+        base_df = integrate_uniprot_np(base_df, ref_dir)
     return df
 
 def integrate_rna(case_id: str, folder: Path, ref_dir: Optional[Path], rna_manifest_name: str, base_df: pd.DataFrame) -> Optional[pd.DataFrame]:
