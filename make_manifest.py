@@ -360,10 +360,9 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
         row["CN"] = path_cn
 
         # DNA from VEP or dna via GDC tables, with fallback to per-case CSV
+        # Prefer processed per-case CSVs; then fall back to VEP/dna GDC tables
         dna_df = tables.get("dna")
-        path_dna = pick_path(dna_df, "vep") or pick_path(dna_df, "dna")
-        if not path_dna and cid in disk_dna:
-            path_dna = disk_dna[cid]
+        path_dna = disk_dna.get(cid) or pick_path(dna_df, "vep") or pick_path(dna_df, "dna")
         row["DNA"] = path_dna
 
         # Protein via filename match or per-case CSV
