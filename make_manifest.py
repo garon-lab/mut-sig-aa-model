@@ -225,21 +225,61 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
     """
     project_root = Path(project_root).resolve()
     logger.info("Building main manifest from root: %s", project_root)
-    gdc_candidates = {
-        "rna": [project_root / "rna" / "gdc-rna.tsv"],
-        "ch3": [project_root / "ch3" / "gdc-ch3.tsv"],
-        "cn":  [project_root / "cn"  / "gdc-cn.tsv", project_root / "cnv" / "gdc-cn.tsv"],
-        "dna": [project_root / "vep" / "gdc-vep.tsv", project_root / "dna" / "gdc-dna.tsv"],
-    }
-    tables = {}
-    for mod, candidates in gdc_candidates.items():
-        for g in candidates:
-            if g.exists():
-                try:
-                    tables[mod] = _read_gdc(g)
-                    break
-                except Exception:
-                    pass
+   # inside build_main_manifest(...)
+def _first_existing(paths):
+    for p in paths:
+        if p and Path(p).exists():
+            return Path(p)
+    return None
+
+def _rglob_first(root: Path, pattern: str):
+    hits = list(root.rglob(pattern))
+    return hits[0] if hits else None
+
+logger.info("Looking for modality GDC tables under %s", project_root)
+
+candidates_map = {
+    "rna": [
+        project_root / "rna" / "gdc-rna.tsv",
+        _rglob_first(project_root, "rna/gdc-rna.tsv"),
+        _rglob_first(project_root, "gdc-rna.tsv"),
+    ],
+    "ch3": [
+        project_root / "ch3" / "gdc-ch3.tsv",
+        _rglob_first(project_root, "ch3/gdc-ch3.tsv"),
+        _rglob_first(project_root, "gdc-ch3.tsv"),
+    ],
+    "cn": [
+        project_root / "cn" / "gdc-cn.tsv",
+        project_root / "cnv" / "gdc-cn.tsv",
+        _rglob_first(project_root, "cn/gdc-cn.tsv"),
+        _rglob_first(project_root, "cnv/gdc-cn.tsv"),
+        _rglob_first(project_root, "gdc-cn.tsv"),
+    ],
+    "dna": [
+        project_root / "vep" / "gdc-vep.tsv",   # preferred
+        project_root / "dna" / "gdc-vep.tsv",   # <-- accept dna/gdc-vep.tsv too
+        project_root / "dna" / "gdc-dna.tsv",
+        _rglob_first(project_root, "vep/gdc-vep.tsv"),
+        _rglob_first(project_root, "dna/gdc-vep.tsv"),
+        _rglob_first(project_root, "dna/gdc-dna.tsv"),
+        _rglob_first(project_root, "gdc-vep.tsv"),
+        _rglob_first(project_root, "gdc-dna.tsv"),
+    ],
+}
+
+tables = {}
+for mod, plist in candidates_map.items():
+    pick = _first_existing(plist)
+    if pick:
+        try:
+            tables[mod] = _read_gdc(pick)
+            logger.info("Loaded %s table: %s (rows=%d, cols=%d)",
+                        mod, pick, *tables[mod].shape)
+        except Exception as e:
+            logger.warning("Failed reading %s: %s", pick, e)
+    else:
+        logger.info("No %s GDC table found", mod)
 
     # Collect union of normalized Case IDs across available tables
     case_ids = set()
