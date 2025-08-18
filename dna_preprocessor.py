@@ -383,6 +383,7 @@ def is_compressed(p: Path) -> bool:
 def is_zip(p: Path) -> bool:
     return p.suffix.lower() == ".zip"
 
+@contextmanager
 def _scratch(args) -> Path:
     """
     Yields a scratch directory Path. If --scratch-dir is provided, re-use it.
