@@ -223,119 +223,142 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
 
     Protein files are picked by filename from: protein/{Case-ID}.csv (or any *.csv containing the Case-ID).
     """
-    project_root = Path(project_root).resolve()
+    def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: str = "Primary Tumor") -> Path:
+    """
+    Build a combined manifest with columns: Case-ID, DNA, RNA, CH3, CN, Protein (if available).
+
+    Looks for per-modality GDC TSVs at (relative to project_root, but also tries recursive fallbacks):
+      rna/gdc-rna.tsv
+      ch3/gdc-ch3.tsv
+      cn/gdc-cn.tsv   (or cnv/gdc-cn.tsv)
+      vep/gdc-vep.tsv (preferred for DNA) or dna/gdc-dna.tsv
+
+    Paths in the unified file look like:
+      {project_root}/{modality}/{File ID}/{File Name}
+
+    Protein files are picked by filename from: protein/{Case-ID}.csv (or any *.csv containing the Case-ID).
+    """
+    project_root = Path(project_root).expanduser().resolve()
     logger.info("Building main manifest from root: %s", project_root)
-   # inside build_main_manifest(...)
-def _first_existing(paths):
-    for p in paths:
-        if p and Path(p).exists():
-            return Path(p)
-    return None
 
-def _rglob_first(root: Path, pattern: str):
-    hits = list(root.rglob(pattern))
-    return hits[0] if hits else None
+    # ---- local helpers ----
+    def _first_existing(paths):
+        for p in paths:
+            if p and Path(p).exists():
+                return Path(p)
+        return None
 
-logger.info("Looking for modality GDC tables under %s", project_root)
+    def _rglob_first(root: Path, pattern: str):
+        hits = list(root.rglob(pattern))
+        return hits[0] if hits else None
 
-candidates_map = {
-    "rna": [
-        project_root / "rna" / "gdc-rna.tsv",
-        _rglob_first(project_root, "rna/gdc-rna.tsv"),
-        _rglob_first(project_root, "gdc-rna.tsv"),
-    ],
-    "ch3": [
-        project_root / "ch3" / "gdc-ch3.tsv",
-        _rglob_first(project_root, "ch3/gdc-ch3.tsv"),
-        _rglob_first(project_root, "gdc-ch3.tsv"),
-    ],
-    "cn": [
-        project_root / "cn" / "gdc-cn.tsv",
-        project_root / "cnv" / "gdc-cn.tsv",
-        _rglob_first(project_root, "cn/gdc-cn.tsv"),
-        _rglob_first(project_root, "cnv/gdc-cn.tsv"),
-        _rglob_first(project_root, "gdc-cn.tsv"),
-    ],
-    "dna": [
-        project_root / "vep" / "gdc-vep.tsv",   # preferred
-        project_root / "dna" / "gdc-vep.tsv",   # <-- accept dna/gdc-vep.tsv too
-        project_root / "dna" / "gdc-dna.tsv",
-        _rglob_first(project_root, "vep/gdc-vep.tsv"),
-        _rglob_first(project_root, "dna/gdc-vep.tsv"),
-        _rglob_first(project_root, "dna/gdc-dna.tsv"),
-        _rglob_first(project_root, "gdc-vep.tsv"),
-        _rglob_first(project_root, "gdc-dna.tsv"),
-    ],
-}
+    # ---- discover modality tables ----
+    logger.info("Looking for modality GDC tables under %s", project_root)
+    candidates_map = {
+        "rna": [
+            project_root / "rna" / "gdc-rna.tsv",
+            _rglob_first(project_root, "rna/gdc-rna.tsv"),
+            _rglob_first(project_root, "gdc-rna.tsv"),
+        ],
+        "ch3": [
+            project_root / "ch3" / "gdc-ch3.tsv",
+            _rglob_first(project_root, "ch3/gdc-ch3.tsv"),
+            _rglob_first(project_root, "gdc-ch3.tsv"),
+        ],
+        "cn": [
+            project_root / "cn" / "gdc-cn.tsv",
+            project_root / "cnv" / "gdc-cn.tsv",
+            _rglob_first(project_root, "cn/gdc-cn.tsv"),
+            _rglob_first(project_root, "cnv/gdc-cn.tsv"),
+            _rglob_first(project_root, "gdc-cn.tsv"),
+        ],
+        "dna": [
+            project_root / "vep" / "gdc-vep.tsv",   # preferred
+            project_root / "dna" / "gdc-vep.tsv",   # accept dna/gdc-vep.tsv too
+            project_root / "dna" / "gdc-dna.tsv",
+            _rglob_first(project_root, "vep/gdc-vep.tsv"),
+            _rglob_first(project_root, "dna/gdc-vep.tsv"),
+            _rglob_first(project_root, "dna/gdc-dna.tsv"),
+            _rglob_first(project_root, "gdc-vep.tsv"),
+            _rglob_first(project_root, "gdc-dna.tsv"),
+        ],
+    }
 
-tables = {}
-for mod, plist in candidates_map.items():
-    pick = _first_existing(plist)
-    if pick:
-        try:
-            tables[mod] = _read_gdc(pick)
-            logger.info("Loaded %s table: %s (rows=%d, cols=%d)",
-                        mod, pick, *tables[mod].shape)
-        except Exception as e:
-            logger.warning("Failed reading %s: %s", pick, e)
-    else:
-        logger.info("No %s GDC table found", mod)
+    tables: dict[str, pd.DataFrame] = {}
+    for mod, plist in candidates_map.items():
+        pick = _first_existing(plist)
+        if pick:
+            try:
+                tables[mod] = _read_gdc(pick)
+                logger.info("Loaded %s table: %s (rows=%d, cols=%d)", mod, pick, *tables[mod].shape)
+            except Exception as e:
+                logger.warning("Failed reading %s: %s", pick, e)
+        else:
+            logger.info("No %s GDC table found", mod)
 
-    # Collect union of normalized Case IDs across available tables
-    case_ids = set()
+    # ---- collect all Case-IDs across available tables ----
+    case_ids: set[str] = set()
     for df in tables.values():
+        # Prefer an explicit "Case ID" header; otherwise assume first column holds IDs
         case_col = "Case ID" if "Case ID" in df.columns else df.columns[0]
-        for v in df[case_col].astype(str).tolist():
+        for v in df[case_col].astype(str):
             v2 = _norm_case_id(v)
             if v2 and v2.lower() != "nan":
                 case_ids.add(v2)
 
+    if not case_ids:
+        logger.warning("No cases discovered; writing empty manifest to %s", out_path)
+        out_df = pd.DataFrame(columns=["Case-ID", "DNA", "RNA", "CH3", "CN", "Protein"])
+        _write_tsv(out_df, out_path)
+        return out_path
+
+    # ---- build rows ----
     rows = []
+
+    def pick_path(df: pd.DataFrame | None, modality: str, cid: str) -> str | None:
+        if df is None or df.empty:
+            return None
+        # Normalize Case IDs in a temp column and select
+        if "Case ID" in df.columns:
+            tmp = df.copy()
+            tmp["__CID__"] = tmp["Case ID"].astype(str).map(_norm_case_id)
+            df_cid = tmp[tmp["__CID__"] == cid]
+        else:
+            df_cid = pd.DataFrame()
+        if df_cid.empty:
+            return None
+        # Prefer requested sample type if present
+        pick = df_cid
+        if "Sample Type" in df_cid.columns:
+            pref = df_cid[df_cid["Sample Type"].astype(str).str.contains(prefer_sample_type, na=False)]
+            if not pref.empty:
+                pick = pref
+        r = pick.iloc[0]
+        fid, fname = r.get("File ID"), r.get("File Name")
+        if pd.isna(fid) or pd.isna(fname):
+            return None
+        return str(project_root / modality / str(fid) / str(fname))
+
     for cid in sorted(case_ids):
         row = {"Case-ID": cid, "DNA": None, "RNA": None, "CH3": None, "CN": None, "Protein": None}
-
-        def pick_path(df, modality):
-            if df is None or df.empty:
-                return None
-            # Normalize Case IDs in a temp column and select
-            if "Case ID" in df.columns:
-                tmp = df.copy()
-                tmp["__CID__"] = tmp["Case ID"].astype(str).map(_norm_case_id)
-                df_cid = tmp[tmp["__CID__"] == cid]
-            else:
-                df_cid = pd.DataFrame()
-
-            if df_cid.empty:
-                return None
-            pick = df_cid
-            if "Sample Type" in df_cid.columns:
-                pref = df_cid[df_cid["Sample Type"].astype(str).str.contains(prefer_sample_type, na=False)]
-                if not pref.empty:
-                    pick = pref
-            r = pick.iloc[0]
-            fid, fname = r["File ID"], r["File Name"]
-            return str(project_root / modality / str(fid) / str(fname))
-
-        row["RNA"] = pick_path(tables.get("rna"), "rna")
-        row["CH3"] = pick_path(tables.get("ch3"), "ch3")
+        row["RNA"] = pick_path(tables.get("rna"), "rna", cid)
+        row["CH3"] = pick_path(tables.get("ch3"), "ch3", cid)
 
         # CN: accept source under cn/ or cnv/; prefer cnv path if it exists, else cn
         cn_df = tables.get("cn")
-        if cn_df is not None:
-            path_cn = pick_path(cn_df, "cnv")
-            if path_cn and not Path(path_cn).exists():
-                alt = pick_path(cn_df, "cn")
-                path_cn = alt if alt else path_cn
-            row["CN"] = path_cn
+        path_cn = pick_path(cn_df, "cnv", cid)
+        if path_cn and not Path(path_cn).exists():
+            alt = pick_path(cn_df, "cn", cid)
+            path_cn = alt if alt else path_cn
+        row["CN"] = path_cn
 
         # DNA from VEP (preferred) or dna/
         dna_df = tables.get("dna")
-        if dna_df is not None:
-            path_dna = pick_path(dna_df, "vep")
-            if path_dna and not Path(path_dna).exists():
-                alt = pick_path(dna_df, "dna")
-                path_dna = alt if alt else path_dna
-            row["DNA"] = path_dna
+        path_dna = pick_path(dna_df, "vep", cid)
+        if path_dna and not Path(path_dna).exists():
+            alt = pick_path(dna_df, "dna", cid)
+            path_dna = alt if alt else path_dna
+        row["DNA"] = path_dna
 
         # Protein by filename match
         prot_root = project_root / "protein"
@@ -351,10 +374,11 @@ for mod, plist in candidates_map.items():
 
         rows.append(row)
 
-        out_df = pd.DataFrame(rows, columns=["Case-ID", "DNA", "RNA", "CH3", "CN", "Protein"])
-        _write_tsv(out_df, out_path)
-        logger.info("Manifest written to %s", out_path)
-        return out_path
+    # ---- write manifest ----
+    out_df = pd.DataFrame(rows, columns=["Case-ID", "DNA", "RNA", "CH3", "CN", "Protein"])
+    _write_tsv(out_df, out_path)
+    logger.info("Manifest written to %s", out_path)
+    return out_path
 
 # ---------- Emit per-modality GDC-like manifests from a unified main manifest ----------
 
