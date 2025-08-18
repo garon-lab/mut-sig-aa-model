@@ -212,21 +212,6 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
     """
     Build a combined manifest with columns: Case-ID, DNA, RNA, CH3, CN, Protein (if available).
 
-    Looks for per-modality GDC TSVs at:
-      rna/gdc-rna.tsv
-      ch3/gdc-ch3.tsv
-      cn/gdc-cn.tsv  (or cnv/gdc-cn.tsv)
-      vep/gdc-vep.tsv  (preferred for DNA) or dna/gdc-dna.tsv
-
-    Paths in the unified file look like:
-      {project_root}/{modality}/{File ID}/{File Name}
-
-    Protein files are picked by filename from: protein/{Case-ID}.csv (or any *.csv containing the Case-ID).
-    """
-    def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: str = "Primary Tumor") -> Path:
-    """
-    Build a combined manifest with columns: Case-ID, DNA, RNA, CH3, CN, Protein (if available).
-
     Looks for per-modality GDC TSVs at (relative to project_root, but also tries recursive fallbacks):
       rna/gdc-rna.tsv
       ch3/gdc-ch3.tsv
@@ -238,8 +223,8 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
 
     Protein files are picked by filename from: protein/{Case-ID}.csv (or any *.csv containing the Case-ID).
     """
-       project_root = Path(project_root).expanduser().resolve()
-       logger.info("Building main manifest from root: %s", project_root)
+    project_root = Path(project_root).expanduser().resolve()
+    logger.info("Building main manifest from root: %s", project_root)
 
     # ---- local helpers ----
     def _first_existing(paths):
@@ -299,7 +284,6 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
     # ---- collect all Case-IDs across available tables ----
     case_ids: set[str] = set()
     for df in tables.values():
-        # Prefer an explicit "Case ID" header; otherwise assume first column holds IDs
         case_col = "Case ID" if "Case ID" in df.columns else df.columns[0]
         for v in df[case_col].astype(str):
             v2 = _norm_case_id(v)
@@ -314,53 +298,45 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
 
     # ---- build rows ----
     rows = []
-
-    def pick_path(df: pd.DataFrame | None, modality: str, cid: str) -> str | None:
-        if df is None or df.empty:
-            return None
-        # Normalize Case IDs in a temp column and select
-        if "Case ID" in df.columns:
-            tmp = df.copy()
-            tmp["__CID__"] = tmp["Case ID"].astype(str).map(_norm_case_id)
-            df_cid = tmp[tmp["__CID__"] == cid]
-        else:
-            df_cid = pd.DataFrame()
-        if df_cid.empty:
-            return None
-        # Prefer requested sample type if present
-        pick = df_cid
-        if "Sample Type" in df_cid.columns:
-            pref = df_cid[df_cid["Sample Type"].astype(str).str.contains(prefer_sample_type, na=False)]
-            if not pref.empty:
-                pick = pref
-        r = pick.iloc[0]
-        fid, fname = r.get("File ID"), r.get("File Name")
-        if pd.isna(fid) or pd.isna(fname):
-            return None
-        return str(project_root / modality / str(fid) / str(fname))
-
     for cid in sorted(case_ids):
         row = {"Case-ID": cid, "DNA": None, "RNA": None, "CH3": None, "CN": None, "Protein": None}
-        row["RNA"] = pick_path(tables.get("rna"), "rna", cid)
-        row["CH3"] = pick_path(tables.get("ch3"), "ch3", cid)
 
-        # CN: accept source under cn/ or cnv/; prefer cnv path if it exists, else cn
+        def pick_path(df: pd.DataFrame | None, modality: str) -> str | None:
+            if df is None or df.empty:
+                return None
+            if "Case ID" in df.columns:
+                tmp = df.copy()
+                tmp["__CID__"] = tmp["Case ID"].astype(str).map(_norm_case_id)
+                df_cid = tmp[tmp["__CID__"] == cid]
+            else:
+                df_cid = pd.DataFrame()
+            if df_cid.empty:
+                return None
+            pick = df_cid
+            if "Sample Type" in df_cid.columns:
+                pref = df_cid[df_cid["Sample Type"].astype(str).str.contains(prefer_sample_type, na=False)]
+                if not pref.empty:
+                    pick = pref
+            r = pick.iloc[0]
+            fid, fname = r.get("File ID"), r.get("File Name")
+            if pd.isna(fid) or pd.isna(fname):
+                return None
+            return str(project_root / modality / str(fid) / str(fname))
+
+        row["RNA"] = pick_path(tables.get("rna"), "rna")
+        row["CH3"] = pick_path(tables.get("ch3"), "ch3")
+
+        # CN
         cn_df = tables.get("cn")
-        path_cn = pick_path(cn_df, "cnv", cid)
-        if path_cn and not Path(path_cn).exists():
-            alt = pick_path(cn_df, "cn", cid)
-            path_cn = alt if alt else path_cn
+        path_cn = pick_path(cn_df, "cnv") or pick_path(cn_df, "cn")
         row["CN"] = path_cn
 
-        # DNA from VEP (preferred) or dna/
+        # DNA
         dna_df = tables.get("dna")
-        path_dna = pick_path(dna_df, "vep", cid)
-        if path_dna and not Path(path_dna).exists():
-            alt = pick_path(dna_df, "dna", cid)
-            path_dna = alt if alt else path_dna
+        path_dna = pick_path(dna_df, "vep") or pick_path(dna_df, "dna")
         row["DNA"] = path_dna
 
-        # Protein by filename match
+        # Protein
         prot_root = project_root / "protein"
         if prot_root.exists():
             exact = prot_root / f"{cid}.csv"
@@ -374,11 +350,11 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
 
         rows.append(row)
 
-    # ---- write manifest ----
     out_df = pd.DataFrame(rows, columns=["Case-ID", "DNA", "RNA", "CH3", "CN", "Protein"])
     _write_tsv(out_df, out_path)
     logger.info("Manifest written to %s", out_path)
     return out_path
+
 
 # ---------- Emit per-modality GDC-like manifests from a unified main manifest ----------
 
