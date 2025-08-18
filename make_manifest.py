@@ -226,6 +226,16 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
     project_root = Path(project_root).expanduser().resolve()
     logger.info("Building main manifest from root: %s", project_root)
 
+    def _scan_case_csvs(modality_dir: Path) -> dict[str, str]:
+    """Return {case_id: absolute_path} for *.csv under modality_dir using filename stem as case ID."""
+    out = {}
+    if modality_dir.exists():
+        for p in modality_dir.rglob("*.csv"):
+            cid = p.stem.strip().strip('"')
+            if cid and cid.lower() != "nan":
+                out[cid] = str(p.resolve())
+    return out
+
     # ---- local helpers ----
     def _first_existing(paths):
         for p in paths:
@@ -290,6 +300,12 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
             if v2 and v2.lower() != "nan":
                 case_ids.add(v2)
 
+    # Also discover per-case files on disk (no GDC needed)
+    disk_dna = _scan_case_csvs(project_root / "dna")
+    disk_prot = _scan_case_csvs(project_root / "protein")
+    case_ids.update(disk_dna.keys())
+    case_ids.update(disk_prot.keys())
+
     if not case_ids:
         logger.warning("No cases discovered; writing empty manifest to %s", out_path)
         out_df = pd.DataFrame(columns=["Case-ID", "DNA", "RNA", "CH3", "CN", "Protein"])
@@ -331,22 +347,30 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
         path_cn = pick_path(cn_df, "cnv") or pick_path(cn_df, "cn")
         row["CN"] = path_cn
 
-        # DNA
+        # DNA from VEP or dna via GDC tables
         dna_df = tables.get("dna")
         path_dna = pick_path(dna_df, "vep") or pick_path(dna_df, "dna")
+      
+        # Fallback: per-case CSV at project_root/dna/<Case-ID>.csv
+        if not path_dna and cid in disk_dna:
+            path_dna = disk_dna[cid]
         row["DNA"] = path_dna
-
-        # Protein
+      
+        # Protein via filename match (existing logic) OR direct per-case CSV
         prot_root = project_root / "protein"
-        if prot_root.exists():
+        path_prot = None
+        if cid in disk_prot:
+            path_prot = disk_prot[cid]
+        elif prot_root.exists():
             exact = prot_root / f"{cid}.csv"
             if exact.exists():
-                row["Protein"] = str(exact)
+                path_prot = str(exact.resolve())
             else:
                 for p in prot_root.glob("*.csv"):
                     if cid in p.stem:
-                        row["Protein"] = str(p)
+                        path_prot = str(p.resolve())
                         break
+        row["Protein"] = path_prot
 
         rows.append(row)
 
