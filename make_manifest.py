@@ -29,6 +29,8 @@ Usage
    python make_manifest.py \
         --emit_ref \
         --main-manifest <main-manifest.tsv>
+        --project_root <project directory> \
+        --out_dir <output directory>
 
 (To make single manifest from gdc-manifest):
    python make_manifest.py \
@@ -435,9 +437,8 @@ def parse_args():
 
     # Mode B: emit per-modality manifests from a unified manifest
     p.add_argument("--emit-ref", action="store_true",
-                   help="Emit rna/ch3/cn/dna manifests from --main-manifest into --out_ref_dir")
+                   help="Emit rna/ch3/cn/dna manifests from --main-manifest into --out_dir")
     p.add_argument("--main-manifest", help="Unified TSV/CSV with columns: Case-ID, RNA, CH3, CN, DNA, Protein (paths)")
-    p.add_argument("--out_ref_dir", help="Directory to write rna/ch3/cn/dna manifest TSVs")
 
     # Mode C: legacy single-type manifest emission
     p.add_argument("--gdc-manifest", help="Path to a GDC manifest TSV (for single-type emit)")
@@ -489,15 +490,11 @@ def main():
             logger.info("Wrote CN manifest (%d rows): %s", n_cn, cn_manifest_path)
 
     if args.emit_ref:
-        if not (args.main_manifest and args.out_ref_dir and args.project_root):
-            raise SystemExit("--emit-ref requires --main-manifest, --out_ref_dir, and --project_root")
-        out_ref_dir = Path(args.out_ref_dir).expanduser().resolve()
-        out_ref_dir.mkdir(parents=True, exist_ok=True)
-        wrote = emit_gdc_like_from_main(Path(args.main_manifest), project_root, out_ref_dir)
-        logger.info("Wrote per-modality manifests:")
-        for k, v in wrote.items():
-            if v:
-                logger.info(" - %s: %s", k, v)
+    if not (args.main_manifest and args.out_dir and args.project_root):
+        raise SystemExit("--emit-ref requires --main-manifest, --out_dir, and --project_root")
+    out_dir = Path(args.out_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    wrote = emit_gdc_like_from_main(Path(args.main_manifest), project_root, out_dir)
 
     # Legacy single-type path
     if args.gdc_manifest and not (args.emit_ref or args.build_main):
