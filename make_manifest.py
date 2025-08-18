@@ -49,11 +49,14 @@ Arguments:
    --case-id-col       Column number that identifies case-id (e.g., C3N-001)
 """
 
+from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
 import re
 import pandas as pd
+
+logger = logging.getLogger("make_manifest")
 
 # ---------- Helpers ----------
 
@@ -73,8 +76,10 @@ def _read_gdc(path: Path) -> pd.DataFrame:
 
 def _write_tsv(df: pd.DataFrame, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    logger.info("Writing TSF to %s")
+    rows, cols = getattr(df, "shape", (0, 0))
+    logger.info("Writing TSV to %s (rows=%d, cols=%d)", out_path, rows, cols)
     df.to_csv(out_path, sep="\t", index=False)
+    logger.info("Wrote: %s", out_path)
 
 def _norm_case_id(val: str) -> str:
     """Return the first token before a comma; strip quotes/spaces."""
@@ -83,11 +88,119 @@ def _norm_case_id(val: str) -> str:
         s = s.split(",")[0].strip()
     return s
 
+def _infer_case_column(cols) -> str | None:
+    """Infer a Case ID column name using common variants."""
+    norm = {c.lower().replace("_", " ").replace("-", " ").strip(): c for c in cols}
+    for k in ("case id", "caseid"):
+        if k in norm:
+            return norm[k]
+    for c in cols:
+        lc = c.lower()
+        if lc in ("case-id", "case_id", "caseid", "case id"):
+            return c
+    return None
+
+# -------------------- RNA --------------------
+
+def _infer_rna_path_column(cols) -> str | None:
+    preferred = ("rna_path", "rna_file", "rna", "rna_csv")
+    for p in preferred:
+        for c in cols:
+            if c.lower() == p:
+                return c
+    for c in cols:
+        lc = c.lower()
+        if "rna" in lc and ("path" in lc or "file" in lc or "csv" in lc):
+            return c
+    return None
+
+def _write_rna_manifest_from_main(main_manifest_path: Path, rna_manifest_path: Path) -> int:
+    df = pd.read_csv(main_manifest_path, sep="\t")
+    case_col = _infer_case_column(df.columns)
+    if not case_col:
+        raise ValueError("Could not infer Case ID column for RNA manifest")
+    rna_col = _infer_rna_path_column(df.columns)
+    if not rna_col:
+        logger.info("No RNA path column found; skipping rna_manifest.tsv")
+        return 0
+    out = df[[case_col, rna_col]].copy()
+    out.columns = ["case-id", "path"]
+    out = out[out["path"].astype(str).str.strip() != ""]
+    if out.empty:
+        logger.info("RNA path column empty; skipping rna_manifest.tsv")
+        return 0
+    _write_tsv(out, rna_manifest_path)
+    return len(out)
+
+# -------------------- CH3 --------------------
+
+def _infer_ch3_path_column(cols) -> str | None:
+    preferred = ("ch3_path", "ch3_file", "ch3", "ch3_csv")
+    for p in preferred:
+        for c in cols:
+            if c.lower() == p:
+                return c
+    for c in cols:
+        lc = c.lower()
+        if "ch3" in lc and ("path" in lc or "file" in lc or "csv" in lc):
+            return c
+    return None
+
+def _write_ch3_manifest_from_main(main_manifest_path: Path, ch3_manifest_path: Path) -> int:
+    df = pd.read_csv(main_manifest_path, sep="\t")
+    case_col = _infer_case_column(df.columns)
+    if not case_col:
+        raise ValueError("Could not infer Case ID column for CH3 manifest")
+    ch3_col = _infer_ch3_path_column(df.columns)
+    if not ch3_col:
+        logger.info("No CH3 path column found; skipping ch3_manifest.tsv")
+        return 0
+    out = df[[case_col, ch3_col]].copy()
+    out.columns = ["case-id", "path"]
+    out = out[out["path"].astype(str).str.strip() != ""]
+    if out.empty:
+        logger.info("CH3 path column empty; skipping ch3_manifest.tsv")
+        return 0
+    _write_tsv(out, ch3_manifest_path)
+    return len(out)
+
+# -------------------- CN --------------------
+
+def _infer_cn_path_column(cols) -> str | None:
+    preferred = ("cn_path", "cn_file", "cn", "cn_csv", "copy_number")
+    for p in preferred:
+        for c in cols:
+            if c.lower() == p:
+                return c
+    for c in cols:
+        lc = c.lower()
+        if ("cn" in lc or "copy_number" in lc) and ("path" in lc or "file" in lc or "csv" in lc):
+            return c
+    return None
+
+def _write_cn_manifest_from_main(main_manifest_path: Path, cn_manifest_path: Path) -> int:
+    df = pd.read_csv(main_manifest_path, sep="\t")
+    case_col = _infer_case_column(df.columns)
+    if not case_col:
+        raise ValueError("Could not infer Case ID column for CN manifest")
+    cn_col = _infer_cn_path_column(df.columns)
+    if not cn_col:
+        logger.info("No CN path column found; skipping cn_manifest.tsv")
+        return 0
+    out = df[[case_col, cn_col]].copy()
+    out.columns = ["case-id", "path"]
+    out = out[out["path"].astype(str).str.strip() != ""]
+    if out.empty:
+        logger.info("CN path column empty; skipping cn_manifest.tsv")
+        return 0
+    _write_tsv(out, cn_manifest_path)
+    return len(out)
+
 # ---------- Build a unified main-manifest.tsv ----------
 
 def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: str = "Primary Tumor") -> Path:
     """
-    Build a combined manifest with columns: Case-ID, RNA, CH3, CN, DNA, Protein (if available).
+    Build a combined manifest with columns: Case-ID, DNA, RNA, CH3, CN, Protein (if available).
 
     Looks for per-modality GDC TSVs at:
       rna/gdc-rna.tsv
@@ -129,7 +242,7 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
 
     rows = []
     for cid in sorted(case_ids):
-        row = {"Case-ID": cid, "RNA": None, "CH3": None, "CN": None, "DNA": None, "Protein": None}
+        row = {"Case-ID": cid, "DNA": None, "RNA": None, "CH3": None, "CN": None, "Protein": None}
 
         def pick_path(df, modality):
             if df is None or df.empty:
@@ -190,7 +303,7 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
 
     out_df = pd.DataFrame(rows, columns=["Case-ID", "DNA", "RNA", "CH3", "CN", "Protein"])
     _write_tsv(out_df, out_path)
-    logger.info ("Manifest written to %s", out_path)
+    logger.info("Manifest written to %s", out_path)
     return out_path
 
 # ---------- Emit per-modality GDC-like manifests from a unified main manifest ----------
@@ -308,6 +421,9 @@ def parse_args():
     p.add_argument("--out_dir", help="Directory to write output manifests")
     p.add_argument("--prefer-sample-type", default="Primary Tumor",
                    help="Preferred Sample Type string when multiple rows per case (default: Primary Tumor)")
+    p.add_argument("--log-level", default="INFO",
+                   choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                   help="Logging verbosity (default: INFO)")
 
     # Mode B: emit per-modality manifests from a unified manifest
     p.add_argument("--emit-ref", action="store_true",
@@ -317,7 +433,6 @@ def parse_args():
 
     # Mode C: legacy single-type manifest emission
     p.add_argument("--gdc-manifest", help="Path to a GDC manifest TSV (for single-type emit)")
-    p.add_argument("--out_dir", help="Directory to write the single-type manifest")
     p.add_argument("--type", help="Modality type to emit (rna, ch3, cn, dna)")
     p.add_argument("--folder-id-col", type=int, default=0)
     p.add_argument("--file-name-col", type=int, default=1)
@@ -326,51 +441,80 @@ def parse_args():
 
 def main():
     args = parse_args()
+
     logging.basicConfig(
        level=getattr(logging, args.log_level.upper(), logging.INFO),
        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
     )
     logger.info("Starting make_manifest.")
-   
-    out_dir = Path(args.out_dir).expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    outp = out_dir / "manifest.tsv"
 
-    project_root = Path(args.project_root).expanduser().resolve()
-    built = build_main_manifest(
-    project_root,
-    outp,
-    prefer_sample_type=args.prefer_sample_type,
-    )
-    logger.info("Inputs resolved")
-   
+    # Resolve common paths up-front when available
+    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else None
+    project_root = Path(args.project_root).expanduser().resolve() if args.project_root else None
+
     if args.build_main:
-        if not args.project_root:
-            raise SystemExit("--project_root is required with --build-main")
-        outp = Path(args.main_out).resolve()
-        built = build_main_manifest(Path(args.project_root).resolve(), outp, prefer_sample_type=args.prefer_sample_type)
-        print(f"Wrote unified main manifest: {built}")
+        if not args.project_root or not args.out_dir:
+            raise SystemExit("--build-main requires --project_root and --out_dir")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = out_dir / "manifest.tsv"
+        rna_manifest_path = out_dir / "rna_manifest.tsv"
+        ch3_manifest_path = out_dir / "ch3_manifest.tsv"
+        cn_manifest_path = out_dir / "cn_manifest.tsv"
+
+        logger.info("  project_root = %s", project_root)
+        logger.info("  out_dir      = %s", out_dir)
+        logger.info("  manifest.tsv = %s", manifest_path)
+
+        # Build the canonical main manifest
+        built = build_main_manifest(project_root, manifest_path, prefer_sample_type=args.prefer_sample_type)
+        logger.info("Wrote unified main manifest: %s", built)
+
+        # Derive modality-specific manifests strictly from main manifest
+        n_rna = _write_rna_manifest_from_main(manifest_path, rna_manifest_path)
+        if n_rna:
+            logger.info("Wrote RNA manifest (%d rows): %s", n_rna, rna_manifest_path)
+        n_ch3 = _write_ch3_manifest_from_main(manifest_path, ch3_manifest_path)
+        if n_ch3:
+            logger.info("Wrote CH3 manifest (%d rows): %s", n_ch3, ch3_manifest_path)
+        n_cn = _write_cn_manifest_from_main(manifest_path, cn_manifest_path)
+        if n_cn:
+            logger.info("Wrote CN manifest (%d rows): %s", n_cn, cn_manifest_path)
 
     if args.emit_ref:
         if not (args.main_manifest and args.out_ref_dir and args.project_root):
             raise SystemExit("--emit-ref requires --main-manifest, --out_ref_dir, and --project_root")
-        wrote = emit_gdc_like_from_main(Path(args.main_manifest), Path(args.project_root).resolve(), Path(args.out_ref_dir).resolve())
-        print("Wrote per-modality manifests:")
+        out_ref_dir = Path(args.out_ref_dir).expanduser().resolve()
+        out_ref_dir.mkdir(parents=True, exist_ok=True)
+        wrote = emit_gdc_like_from_main(Path(args.main_manifest), project_root, out_ref_dir)
+        logger.info("Wrote per-modality manifests:")
         for k, v in wrote.items():
             if v:
-                print(f" - {k}: {v}")
+                logger.info(" - %s: %s", k, v)
 
     # Legacy single-type path
-    if args.gdc_manifest and args.out_dir and args.type and not args.emit_ref and not args.build_main:
-        outp = emit_single_type_manifest(Path(args.gdc_manifest), Path(args.out_dir),
+    if args.gdc_manifest and not (args.emit_ref or args.build_main):
+        if not (args.out_dir and args.type):
+            raise SystemExit("--gdc-manifest mode requires --out_dir and --type")
+        outp = emit_single_type_manifest(Path(args.gdc_manifest), out_dir,
                                          args.type, args.folder_id_col, args.file_name_col, args.case_id_col)
-        print(f"Wrote {outp}")
+        logger.info("Wrote %s", outp)
 
-    if not (args.build_main or args.emit_ref or (args.gdc_manifest and args.out_dir and args.type)):
-        print("Nothing to do. Try one of:\n"
-              "  --build-main --project_root <ROOT> [--main_out main-manifest.tsv]\n"
-              "  --emit-ref --main-manifest main-manifest.tsv --project_root <ROOT> --out_ref_dir <DIR>\n"
-              "  --gdc-manifest <GDC.tsv> --out_dir <DIR> --type <rna|ch3|cn|dna>")
+    if not (args.build_main or args.emit_ref or args.gdc_manifest):
+        logger.warning(
+            "Nothing to do. Try one of:\n"
+            "  --build-main --project_root <ROOT> --out_dir <DIR>\n"
+            "  --emit-ref --main-manifest manifest.tsv --project_root <ROOT> --out_ref_dir <DIR>\n"
+            "  --gdc-manifest <GDC.tsv> --out_dir <DIR> --type <rna|ch3|cn|dna>"
+        )
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.error("Interrupted by user")
+        sys.exit(130)
+    except SystemExit:
+        raise
+    except Exception as e:
+        logger.exception("Unhandled exception: %s", e)
+        sys.exit(1)
