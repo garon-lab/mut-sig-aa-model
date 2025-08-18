@@ -81,7 +81,6 @@ from contextlib import nullcontext
 from typing import Optional, List, Tuple
 from pathlib import Path
 import pandas as pd
-import gzip
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -224,7 +223,7 @@ def write_matrices(out_dir: Path, simplified: Path):
     import pandas as _pd
     out_dir = Path(out_dir)
     simplified = Path(simplified)
-    df = _pd.read_csv(simplified, header=None)
+    df = pd.read_csv(simplified, header=None)
     ids = df.iloc[:, 0]
     for case_id in ids:
         for mtype in ['snp', 'snv']:
@@ -295,11 +294,11 @@ def preprocess_mutect(folder: Path, manifest_file: Path, out_dir: Path):
         ids = [line.strip() for line in Path(manifest_file).read_text().splitlines() if line.strip()]
 
     for case_id in ids:
-      case_id = str(case_id).split(",")[0].strip().strip('"')
-      vcf_path = _find_vcf_for_case(folder, case_id)
-      target = (Path(out_dir) / "prep" / f"{case_id}.txt")
-      try:
-          if vcf_path is None:
+        case_id = str(case_id).split(",")[0].strip().strip('"')
+        vcf_path = _find_vcf_for_case(folder, case_id)
+        target = (Path(out_dir) / "prep" / f"{case_id}.txt")
+        try:
+              if vcf_path is None:
               logging.warning(f"{case_id}: VCF not found under {folder}")
               continue
           if vcf_path.suffix == ".gz":
@@ -537,10 +536,8 @@ def parse_args():
     p.add_argument("--simplified", help="Path to write the Case-ID list (default: <out_dir>/case_ids.txt)")
     p.add_argument("--preprocess-mutect", dest="preprocess_mutect", action="store_true", help="Preprocess Mutect VCFs prior to downstream steps.")
     p.add_argument("--vcf-folder", dest="vcf_folder", default=None, help="Optional directory containing VCFs (overrides manifest paths).")
+    p.add_argument("--jobs", type=int, default=None, help="Parallel workers (currently not used; accepted for compatibility)")
     return p.parse_args()
-
-
-from contextlib import nullcontext  # at top of file
 
 def main():
     args = parse_args()
