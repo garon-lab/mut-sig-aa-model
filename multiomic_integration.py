@@ -294,7 +294,7 @@ def merge_layers(layers: List[pd.DataFrame]) -> pd.DataFrame:
 def process_case(case_id: str, folder: Path, out_dir: Path, step: str,
                  input_dna_dir: Optional[str], skip_rna: bool, skip_ch3: bool, skip_protein: bool, skip_cn: bool,
                  ref_dir: Optional[Path], rna_manifest_name: str, ch3_manifest_name: str, cn_manifest_name: str) -> Path:
-    log(f\"Processing {case_id} [step={step}]\" )
+    log(f"Processing {case_id} [step={step}]" )
     outputs_dir = out_dir / case_id
     ensure_dir(outputs_dir)
 
