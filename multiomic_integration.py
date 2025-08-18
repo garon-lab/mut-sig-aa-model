@@ -242,7 +242,7 @@ def integrate_ch3(case_id: str, folder: Path, ref_dir: Optional[Path], ch3_manif
     return merged
 
 def integrate_protein(case_id: str, folder: Path, base_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-    p = folder / \"protein\" / f\"{case_id}.csv\"
+    p = folder / "protein" / f"{case_id}.csv"
     if p.exists():
         dfp = pd.read_csv(p)
         merged = merge_with_reference(base_df, dfp, 'To', 'NP')
