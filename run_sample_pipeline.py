@@ -149,6 +149,14 @@ def main():
     ]
     run(cmd_dna, dry_run)
 
+    # patch to ensure created dna files listed in manifest
+    produced = out_dir / "dna" / "dna"
+    dest = extracted_root / "dna"
+    dest.mkdir(parents=True, exist_ok=True)
+    for f in produced.glob("*.csv"):
+        shutil.copy2(f, dest / f.name)
+
+
     # 3) make_manifest.py
     mani_out_dir = out_dir / "manifests"
     mani_out_dir.mkdir(parents=True, exist_ok=True)
