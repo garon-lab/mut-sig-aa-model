@@ -238,8 +238,8 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
 
     Protein files are picked by filename from: protein/{Case-ID}.csv (or any *.csv containing the Case-ID).
     """
-    project_root = Path(project_root).expanduser().resolve()
-    logger.info("Building main manifest from root: %s", project_root)
+       project_root = Path(project_root).expanduser().resolve()
+       logger.info("Building main manifest from root: %s", project_root)
 
     # ---- local helpers ----
     def _first_existing(paths):
