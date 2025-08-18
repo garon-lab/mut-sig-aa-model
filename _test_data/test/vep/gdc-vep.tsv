@@ -1,4 +1,0 @@
-File ID	File Name	Data Category	Data Type	Project ID	Case ID	Sample ID	Sample Type
-6e7aa3a3-b05f-4299-b025-d85306afb978	9715a13b-dd6f-48e1-8bec-8cb671de7795.wxs.MuTect2.somatic_annotation.vcf.gz	Simple Nucleotide Variation	Annotated Somatic Mutation	CPTAC-3	"case-01, C3N-001"	"C3N-04155-71, C3N-04155-01"	"Blood Derived Normal, Primary Tumor"
-62bfc1f7-51f3-483e-9f75-7770fe1e78f4	9b223a82-9714-4c39-a5c1-6115fd320234.wxs.MuTect2.somatic_annotation.vcf.gz	Simple Nucleotide Variation	Annotated Somatic Mutation	CPTAC-3	"case-02, C3N-002"	"C3N-04124-01, C3N-04124-02, C3N-04124-31"	"Primary Tumor, Primary Tumor, Blood Derived Normal"
-f66f06af-3bc9-405e-900c-d006f8a66898	1d3a8cd0-dd00-42da-b22c-e041ab18e91b.wxs.MuTect2.somatic_annotation.vcf.gz	Simple Nucleotide Variation	Annotated Somatic Mutation	CPTAC-3	"case-03, C3L-003"	"C3L-00445-31, C3L-00445-01"	"Blood Derived Normal, Primary Tumor"

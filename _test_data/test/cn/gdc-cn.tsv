@@ -1,4 +1,0 @@
-File ID	File Name	Data Category	Data Type	Project ID	Case ID	Sample ID	Sample Type
-6eb3fd7c-7cc4-4aa3-88c6-d227f120ae2e	a178cb99-2253-4c55-af28-1aed49dd546b.wgs.ASCAT.gene_level.copy_number_variation.tsv	Copy Number Variation	Gene Level Copy Number	CPTAC-3	case-01	"C3L-00081-01, C3L-00081-31"	"Primary Tumor, Blood Derived Normal"
-319b30a8-8650-4515-8228-c49e3cfb813f	b89ad449-f0e8-41a4-a9e5-acc1eab2ca30.wgs.ASCAT.gene_level.copy_number_variation.tsv	Copy Number Variation	Gene Level Copy Number	CPTAC-3	case-02	"C3L-00415-31, C3L-00415-03"	"Blood Derived Normal, Primary Tumor"
-ad19f9fc-0c8b-4f81-ae19-1ad5c69c51f1	ce519e2c-290c-4cd0-9b7c-a15ec3308bb5.wgs.ASCAT.gene_level.copy_number_variation.tsv	Copy Number Variation	Gene Level Copy Number	CPTAC-3	case-03	"C3L-00568-31, C3L-00568-01"	"Blood Derived Normal, Primary Tumor"
