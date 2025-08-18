@@ -351,10 +351,10 @@ for mod, plist in candidates_map.items():
 
         rows.append(row)
 
-       out_df = pd.DataFrame(rows, columns=["Case-ID", "DNA", "RNA", "CH3", "CN", "Protein"])
-       _write_tsv(out_df, out_path)
-       logger.info("Manifest written to %s", out_path)
-       return out_path
+        out_df = pd.DataFrame(rows, columns=["Case-ID", "DNA", "RNA", "CH3", "CN", "Protein"])
+        _write_tsv(out_df, out_path)
+        logger.info("Manifest written to %s", out_path)
+        return out_path
 
 # ---------- Emit per-modality GDC-like manifests from a unified main manifest ----------
 
