@@ -300,27 +300,27 @@ def process_case(case_id: str, folder: Path, out_dir: Path, step: str,
 
     # Start with DNA
     base = pd.DataFrame()
-    if step in (\"all\", \"dna\"):
+    if step in ("all", "dna"):
         base = load_dna(folder, case_id, input_dna_dir)
         base = integrate_dna(base)
 
     # Chain RNA
-    if step in (\"all\", \"rna\") and not skip_rna and not base.empty:
+    if step in ("all", "rna") and not skip_rna and not base.empty:
         base = integrate_rna(case_id, folder, ref_dir, rna_manifest_name, base)
 
     # Chain CH3
-    if step in (\"all\", \"ch3\") and not skip_ch3 and not base.empty:
+    if step in ("all", "ch3") and not skip_ch3 and not base.empty:
         base = integrate_ch3(case_id, folder, ref_dir, ch3_manifest_name, base)
 
     # Chain Protein
-    if step in (\"all\", \"protein\") and not skip_protein and not base.empty:
+    if step in ("all", "protein") and not skip_protein and not base.empty:
         base = integrate_protein(case_id, folder, base)
 
     # Chain CNV
-    if step in (\"all\", \"cnv\") and not skip_cn and not base.empty:
+    if step in ("all", "cnv") and not skip_cn and not base.empty:
         base = integrate_cnv(case_id, folder, ref_dir, cn_manifest_name, base)
 
-    out_file = outputs_dir / f\"{case_id}_integrated.csv\"
+    out_file = outputs_dir / f"{case_id}_integrated.csv"
     base.to_csv(out_file, index=False)
     log(f\"Wrote {out_file}\")
     return out_file
