@@ -25,7 +25,12 @@ Usage
         --project_root <project directory> \
         --out_dir <output directory>
 
-(Single-file):
+(Using existing unified manifest):
+   python make_manifest.py \
+        --emit_ref \
+        --main-manifest <main-manifest.tsv>
+
+(To make single manifest from gdc-manifest):
    python make_manifest.py \
         --gdc-manifest <manifest file> \
         --out_dir <output directory> \
@@ -39,6 +44,9 @@ Arguments:
    --build-main        Flag that creates unified manifest with paths constructed like {PROJECT_ROOT}/{modality}/{File ID}/{File Name}
    --project_root      Directory that has all project-related files (dna, rna, ch3, cn, protein)
    --main_out          Directory that will contain all output files
+
+(General)
+   --log-level L       Default: INFO, can be set to DEBUG for more verbose logging
    
 (Single Use)   
    --gdc-manifest      Flag to use if opting for creation of single manifest as opposed to build-main
