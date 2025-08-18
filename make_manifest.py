@@ -28,7 +28,7 @@ Usage
 (Using existing unified manifest):
    python make_manifest.py \
         --emit-ref \
-        --main-manifest <main-manifest.tsv>
+        --main-manifest <main-manifest.tsv> \
         --project_root <project directory> \
         --out_dir <output directory>
 
@@ -45,7 +45,7 @@ Arguments:
 (Recommended Use)
    --build-main        Flag that creates unified manifest with paths constructed like {PROJECT_ROOT}/{modality}/{File ID}/{File Name}
    --project_root      Directory that has all project-related files (dna, rna, ch3, cn, protein)
-   --out_dir          Directory that will contain all output files
+   --out_dir           Directory that will contain all output files
 
 (General)
    --log-level L       Default: INFO, can be set to DEBUG for more verbose logging
@@ -110,7 +110,16 @@ def _infer_case_column(cols) -> str | None:
         if lc in ("case-id", "case_id", "caseid", "case id"):
             return c
     return None
-
+   
+def _write_simple_manifest(paths: dict[str, str], out_file: Path):
+        import pandas as _pd
+        rows = [{"Case ID": cid, "Path": path} for cid, path in sorted(paths.items())]
+        if not rows:
+            return None
+        df = _pd.DataFrame(rows, columns=["Case ID", "Path"])
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(out_file, sep="\t", index=False)
+        return out_file
 # -------------------- RNA --------------------
 
 def _infer_rna_path_column(cols) -> str | None:
@@ -224,7 +233,6 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
 
     Protein files are picked by filename from: protein/{Case-ID}.csv (or any *.csv containing the Case-ID).
     """
-   
     project_root = Path(project_root).expanduser().resolve()
     logger.info("Building main manifest from root: %s", project_root)
 
@@ -237,16 +245,6 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
                 if cid and cid.lower() != "nan":
                     out[cid] = str(p.resolve())
         return out
-
-    def _scan_case_csvs(modality_dir: Path) -> dict[str, str]:
-    """Return {case_id: absolute_path} for *.csv under modality_dir using filename stem as case ID."""
-    out = {}
-    if modality_dir.exists():
-        for p in modality_dir.rglob("*.csv"):
-            cid = p.stem.strip().strip('"')
-            if cid and cid.lower() != "nan":
-                out[cid] = str(p.resolve())
-    return out
 
     # ---- local helpers ----
     def _first_existing(paths):
@@ -273,7 +271,7 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
             _rglob_first(project_root, "gdc-ch3.tsv"),
         ],
         "cn": [
-            project_root / "cn" / "gdc-cn.tsv",
+            project_root / "cn"  / "gdc-cn.tsv",
             project_root / "cnv" / "gdc-cn.tsv",
             _rglob_first(project_root, "cn/gdc-cn.tsv"),
             _rglob_first(project_root, "cnv/gdc-cn.tsv"),
@@ -313,7 +311,7 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
                 case_ids.add(v2)
 
     # Also discover per-case files on disk (no GDC needed)
-    disk_dna = _scan_case_csvs(project_root / "dna")
+    disk_dna  = _scan_case_csvs(project_root / "dna")
     disk_prot = _scan_case_csvs(project_root / "protein")
     case_ids.update(disk_dna.keys())
     case_ids.update(disk_prot.keys())
@@ -359,16 +357,14 @@ def build_main_manifest(project_root: Path, out_path: Path, prefer_sample_type: 
         path_cn = pick_path(cn_df, "cnv") or pick_path(cn_df, "cn")
         row["CN"] = path_cn
 
-        # DNA from VEP or dna via GDC tables
+        # DNA from VEP or dna via GDC tables, with fallback to per-case CSV
         dna_df = tables.get("dna")
         path_dna = pick_path(dna_df, "vep") or pick_path(dna_df, "dna")
-      
-        # Fallback: per-case CSV at project_root/dna/<Case-ID>.csv
         if not path_dna and cid in disk_dna:
             path_dna = disk_dna[cid]
         row["DNA"] = path_dna
-      
-        # Protein via filename match (existing logic) OR direct per-case CSV
+
+        # Protein via filename match or per-case CSV
         prot_root = project_root / "protein"
         path_prot = None
         if cid in disk_prot:
@@ -476,17 +472,6 @@ def emit_gdc_like_from_main(main_manifest: Path, project_root: Path, out_dir: Pa
                                 "Simple Nucleotide Variation", "Annotated Somatic Variants")
     wrote["dna"] = dna_written
     return wrote
-
-    def _write_simple_manifest(paths: dict[str, str], out_file: Path):
-        import pandas as _pd
-        rows = [{"Case ID": cid, "Path": path} for cid, path in sorted(paths.items())]
-        if not rows:
-            return None
-        df = _pd.DataFrame(rows, columns=["Case ID", "Path"])
-        out_file.parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(out_file, sep="\t", index=False)
-        return out_file
-
 
 # ---------- Legacy: emit single-type manifest from one GDC TSV ----------
 
