@@ -90,11 +90,12 @@ Optional
     --input_cn_dir        Directory of CNV files
     --cn_manifest         Table linking case-IDs to CNV file paths
     --skip_*              Flags to skip specific integration steps
-    --emit_qc             Saves
+    --emit_qc             per-case QC to out_dir/qc/{case-id}_qc.tsv
 
 
-Notes
-Only the final protein files (with SNV/SNP, RNA, CH3, protein, and CNV) are written to: OUTPUT_DIR/{case-ID}.csv
+Outputs:
+    - out_dir/dna/{case-id}.csv          (DNA with annotations)
+    - out_dir/{case-id}_integrated.csv   (DNA + optional RNA/CH3/CNV/Protein)
 
 """
 import argparse
@@ -253,22 +254,11 @@ def load_case_ids(manifest_path: str) -> List[str]:
     s = s[~s.str.lower().isin({x.lower() for x in header_like})]
     return [x for x in s.unique() if x]
 
-def _read_gdc_manifest(mod_dir: Path, basename: str) -> Optional[pd.DataFrame]:
-    m = mod_dir / basename
-    if not m.exists():
-        return None
-    df = _read_any_table(m, sep="\t")
-    lc = {c.lower().replace("-", " ").replace("_", " "): c for c in df.columns}
-    case_col = lc.get("case id")
-    file_col = lc.get("file id")
-    name_col = lc.get("file name")
-    if case_col and file_col:
-        keep = [case_col, file_col] + ([name_col] if name_col else [])
-        return df[keep].rename(columns={case_col: "Case ID", file_col: "File ID"})
-    return None
-
-
 # ----------------------------- DNA ---------------------------------
+base_fp = out_dir_p / "dna" / f"{case_id}.csv"
+    if not base_fp.exists():
+        load_and_enhance_dna(case_id, folder_p, out_dir_p, ref_p, dna_rows)
+    base = _read_any_table(base_fp)
 
 def _add_ENSG_columns(df: pd.DataFrame, case_id: str) -> pd.DataFrame:
     """Ensure both ENSGene (full) and ENSGene_core exist; insert ENSGene right after INFO if INFO exists."""
@@ -324,7 +314,7 @@ def load_and_enhance_dna(case_id: str, folder: Path, out_dir: Path, ref_dir: Opt
     out_fp = out_dna / f"{case_id}.csv"
     df.to_csv(out_fp, index=False)
     return out_fp
-
+    
 # ----------------------- modality I/O (GDC-style) -------------------
 
 def _find_in_subdir_by_patterns(root: Path, patterns: List[str]) -> Optional[Path]:
@@ -733,16 +723,13 @@ def main() -> None:
     ref_dir_p = resolve_reference_dir(args.ref_dir, args.ref_zip)
     if ref_dir_p is not None:
         logging.info(f"Using reference dir for maps: {ref_dir_p}")
-    case_ids = load_case_ids(args.manifest)
+    case_ids = [args.case_id] if args.case_id else load_case_ids(args.manifest)
     dedup_key_cols = [c.strip() for c in args.dedup_key.split(",") if c.strip()] if args.dedup_level == "key" else None
-
-    if args.case_id:
-        case_ids = [args.case_id]
-    else:
-        case_ids = load_case_ids(args.manifest)
-
+    
+    logging.info(f"[{mod_dir.name}] using manifest: {man_path}")
     logging.info(f"N = {len(case_ids)} samples")
     logging.info(f"Running step(s): {args.step}")
+  
     with ProcessPoolExecutor(max_workers=args.jobs) as ex:
         futs = [ex.submit(
             process_one_case, cid, args.folder, args.out_dir,
