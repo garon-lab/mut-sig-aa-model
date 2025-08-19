@@ -54,6 +54,49 @@ def init_logging(level_str):
         raise ValueError(f"Invalid log level: {level_str}")
     logging.basicConfig(level=level, format='%(asctime)s %(levelname)s: %(message)s')
 
+# Helpers
+
+AA_ORDER = ["A","R","N","D","C","Q","E","G","H","I",
+            "L","K","M","F","P","S","T","W","Y","V","*"]
+
+def _validate_and_coerce(name, M):
+    # Ensure list-of-lists and coerce each cell to float
+    if not isinstance(M, (list, tuple)):
+        raise ValueError(f"{name} must be a list of rows, got {type(M)}")
+
+    # Strip strings, handle ints/floats, and check row lengths
+    coerced = []
+    row_lengths = []
+    for r_idx, row in enumerate(M):
+        if not isinstance(row, (list, tuple)):
+            raise ValueError(f"{name} row {r_idx} is not a list/tuple (type {type(row)})")
+        new_row = []
+        for c_idx, val in enumerate(row):
+            try:
+                # common issue: embedded strings like ' 0 ' or '0.0'
+                new_row.append(float(str(val).strip()))
+            except Exception as e:
+                raise ValueError(
+                    f"{name} has a non-numeric cell at row {r_idx}, col {c_idx}: {val!r}"
+                ) from e
+        row_lengths.append(len(new_row))
+        coerced.append(new_row)
+
+    # Check 21 rows
+    if len(coerced) != 21:
+        raise ValueError(f"{name} must have 21 rows (one per AA in {AA_ORDER}), found {len(coerced)}")
+
+    # Check every row has 21 columns
+    bad = [(i, L) for i, L in enumerate(row_lengths) if L != 21]
+    if bad:
+        sample = ", ".join([f"row{i}={L}" for i, L in bad[:5]])
+        raise ValueError(
+            f"{name} must be 21×21; mismatched row lengths found ({sample}{' ...' if len(bad)>5 else ''})."
+        )
+
+    import numpy as np
+    return np.array(coerced, dtype=float)
+
 # Amino-acid row targets
 ROW_TARGETS = np.array([
     1.444267, 0.459934, 1.009417, 1.503128, 0.754421,
@@ -401,48 +444,6 @@ def validate_context_df(df):
             msg.append(f"Unexpected: {', '.join(extra)}")
         raise ValueError("Signature validation error: " + "; ".join(msg))
     logging.info("Signature vector validated.")
-
-# --- add above where AC, AG, ... TG are converted to np.array ---
-AA_ORDER = ["A","R","N","D","C","Q","E","G","H","I",
-            "L","K","M","F","P","S","T","W","Y","V","*"]
-
-def _validate_and_coerce(name, M):
-    # Ensure list-of-lists and coerce each cell to float
-    if not isinstance(M, (list, tuple)):
-        raise ValueError(f"{name} must be a list of rows, got {type(M)}")
-
-    # Strip strings, handle ints/floats, and check row lengths
-    coerced = []
-    row_lengths = []
-    for r_idx, row in enumerate(M):
-        if not isinstance(row, (list, tuple)):
-            raise ValueError(f"{name} row {r_idx} is not a list/tuple (type {type(row)})")
-        new_row = []
-        for c_idx, val in enumerate(row):
-            try:
-                # common issue: embedded strings like ' 0 ' or '0.0'
-                new_row.append(float(str(val).strip()))
-            except Exception as e:
-                raise ValueError(
-                    f"{name} has a non-numeric cell at row {r_idx}, col {c_idx}: {val!r}"
-                ) from e
-        row_lengths.append(len(new_row))
-        coerced.append(new_row)
-
-    # Check 21 rows
-    if len(coerced) != 21:
-        raise ValueError(f"{name} must have 21 rows (one per AA in {AA_ORDER}), found {len(coerced)}")
-
-    # Check every row has 21 columns
-    bad = [(i, L) for i, L in enumerate(row_lengths) if L != 21]
-    if bad:
-        sample = ", ".join([f"row{i}={L}" for i, L in bad[:5]])
-        raise ValueError(
-            f"{name} must be 21×21; mismatched row lengths found ({sample}{' ...' if len(bad)>5 else ''})."
-        )
-
-    import numpy as np
-    return np.array(coerced, dtype=float)
 
 def build_expected(df):
     """Vectorized expected matrix computation."""
