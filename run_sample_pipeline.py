@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 RUN SAMPLE PIPELINE
 ----------------------
@@ -29,6 +30,7 @@ import subprocess
 import shutil
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Optional
 
 HERE = Path(__file__).resolve().parent
 
