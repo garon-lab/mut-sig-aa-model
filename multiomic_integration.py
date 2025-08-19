@@ -288,63 +288,59 @@ def _load_manifest_df(mod_dir: Path, manifest: Optional[str], default_name: str)
         out["Path"] = df[path_c].astype(str).str.strip()
     return out.dropna(subset=["Case ID"])
 
+def _resolve_data_root(mod_dir: Path, row: pd.Series) -> Optional[Path]:
+    """
+    Given a manifest row, return either:
+      - a directory to search (e.g., <mod_dir>/<File ID>/),
+      - a direct file path if 'Path' or 'File Name' point to a file,
+      - or best-effort match by basename under mod_dir.
+    Handles absolute and relative paths, and 'File Name' that includes subdirectories.
+    """
+    def _norm_join(base: Path, p: str) -> Path:
+        q = Path(str(p).strip())
+        if not q.is_absolute():
+            q = (base / q).resolve()
+        return q
 
-    def _resolve_data_root(mod_dir: Path, row: pd.Series) -> Optional[Path]:
-        """
-        Given a manifest row, return either:
-          - a directory to search (e.g., <mod_dir>/<File ID>/),
-          - a direct file path if 'Path' or 'File Name' point to a file,
-          - or best-effort match by basename under mod_dir.
-        """
-        def _norm_join(base: Path, p: str) -> Path:
-            q = Path(str(p).strip())
-            if not q.is_absolute():
-                q = (base / q).resolve()
-            return q
-    
-        # 1) Explicit Path (absolute or relative to mod_dir)
-        path_val = row.get("Path")
-        if pd.notna(path_val):
-            p = _norm_join(mod_dir, str(path_val))
-            if p.exists():
-                return p
-            # If "Path" looks like a file path but doesn't exist, try basename search
-            if p.name:
-                hit = next((h for h in mod_dir.rglob(p.name)), None)
-                if hit:
-                    return hit
-            # If "Path" has subdirs, try joining its parts under mod_dir
-            try:
-                alt = mod_dir.joinpath(*Path(str(path_val)).parts)
-                if alt.exists():
-                    return alt
-            except Exception:
-                pass
-    
-        # 2) GDC-style File ID folder
-        fid = row.get("File ID")
-        if pd.notna(fid):
-            candidate = mod_dir / str(fid).strip()
-            if candidate.exists():
-                return candidate
-    
-        # 3) File Name (can be a subpath or a basename)
-        fname = row.get("File Name")
-        if pd.notna(fname):
-            fname = str(fname).strip()
-            # If file name contains a path separator, treat as a relative path
-            if "/" in fname or "\\" in fname:
-                p2 = _norm_join(mod_dir, fname)
-                if p2.exists():
-                    return p2
-            # Fallback: search by basename anywhere under mod_dir
-            hit = next((h for h in mod_dir.rglob(Path(fname).name)), None)
+    # 1) Explicit Path (absolute or relative to mod_dir)
+    path_val = row.get("Path")
+    if pd.notna(path_val):
+        p = _norm_join(mod_dir, str(path_val))
+        if p.exists():
+            return p
+        # If a file name is present, try basename search under mod_dir
+        if p.name:
+            hit = next((h for h in mod_dir.rglob(p.name)), None)
             if hit:
                 return hit
-    
-        return None
+        # If Path has subdirs, try joining its parts under mod_dir
+        try:
+            alt = mod_dir.joinpath(*Path(str(path_val)).parts)
+            if alt.exists():
+                return alt
+        except Exception:
+            pass
 
+    # 2) GDC-style File ID directory
+    fid = row.get("File ID")
+    if pd.notna(fid):
+        candidate = mod_dir / str(fid).strip()
+        if candidate.exists():
+            return candidate
 
+    # 3) File Name (may be a subpath or just a basename)
+    fname = row.get("File Name")
+    if pd.notna(fname):
+        fname = str(fname).strip()
+        if "/" in fname or "\\" in fname:
+            p2 = _norm_join(mod_dir, fname)
+            if p2.exists():
+                return p2
+        hit = next((h for h in mod_dir.rglob(Path(fname).name)), None)
+        if hit:
+            return hit
+
+    return None
 
 # ------------------------------ DNA ---------------------------------
 
