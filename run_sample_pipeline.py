@@ -115,6 +115,9 @@ def run_integration_for_case(case_id: str, extracted_root: Path, base_out: Path,
         "--rna-manifest", str(rna_manifest),
         "--ch3-manifest", str(ch3_manifest),
         "--cn-manifest",  str(cn_manifest),
+        "--ch3_map", str(ch3_map),
+        "--ch3_probe_col", "IllmnID",
+        "--ch3_symbol_col", "UCSC_RefGene_Name",
         "--ensg_join_mode", "core",
     ]
     run(cmd_integ, dry_run)
@@ -262,6 +265,9 @@ def main():
             "--rna-manifest", str(rna_manifest),
             "--ch3-manifest", str(ch3_manifest),
             "--cn-manifest",  str(cn_manifest),
+            "--ch3_map", str(ch3_map),
+            "--ch3_probe_col", "IllmnID",
+            "--ch3_symbol_col", "UCSC_RefGene_Name",
             "--ensg_join_mode", "core",
         ]
         run(cmd_integ, dry_run)
