@@ -218,16 +218,52 @@ def _find_ref_file(ref_dir: Optional[Path], basename: str) -> Optional[Path]:
 # --------------------------- Case manifest ---------------------------
 
 def load_case_ids(manifest_path: str) -> List[str]:
-    """Load case IDs from a simple manifest: first column contains case IDs (header allowed)."""
-    s = pd.read_table(manifest_path, usecols=[0], header=0, dtype=str,
-                      na_values=["", "NA", "NaN"]).iloc[:, 0]
-    s = s.dropna().astype(str).str.strip()
-    header_like = {
-        "case-id", "case_id", "id", "sample-id", "sample_id",
-        "Case-ID", "Case_ID", "ID", "Sample-ID", "Sample_ID"
-    }
-    s = s[~s.str.lower().isin({x.lower() for x in header_like})]
-    return [x for x in s.unique() if x]
+    """
+    Load case IDs from a manifest.
+
+    Supported formats:
+      - .txt: one case ID per line (ignores blank lines and lines starting with '#')
+      - .csv/.tsv: first column contains case IDs; header is optional
+    """
+    p = Path(manifest_path)
+    if not p.exists():
+        raise FileNotFoundError(f"Manifest not found: {p}")
+
+    def dedup_keep_order(seq):
+        seen, out = set(), []
+        for x in seq:
+            if x not in seen:
+                seen.add(x)
+                out.append(x)
+        return out
+
+    if p.suffix.lower() == ".txt":
+        ids = []
+        for ln in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            ln = ln.strip().lstrip("\ufeff")
+            if not ln or ln.startswith("#"):
+                continue
+            ids.append(ln)
+        ids = dedup_keep_order(ids)
+        if not ids:
+            raise ValueError(f"No case IDs found in {p}")
+        return ids
+
+    # CSV/TSV fallback: try without and with header
+    sepx = "\t" if p.suffix.lower() == ".tsv" else ","
+    for hdr in (None, 0):
+        try:
+            s = pd.read_csv(p, sep=sepx, dtype=str, usecols=[0], header=hdr).iloc[:, 0]
+            s = s.dropna().astype(str).str.strip().str.lstrip("\ufeff")
+            header_like = {"case-id","case_id","case id","sample-id","sample_id","sample id","id"}
+            s = s[~s.str.lower().isin(header_like)]
+            ids = [x for x in s.tolist() if x]
+            ids = dedup_keep_order(ids)
+            if ids:
+                return ids
+        except Exception:
+            continue
+    raise ValueError(f"Could not parse case IDs from {p}")
 
 # --------------- Per-modality manifests & path resolution ------------
 
@@ -642,9 +678,25 @@ def _load_ch3_map(ch3_map: Optional[str], ref_dir: Optional[Path],
     lc = {c.lower(): c for c in df.columns}
 
     # Preferred columns (probe & ensg OR probe & symbol)
-    probe_c = ch3_probe_col or lc.get("probe") or lc.get("illmnid") or lc.get("cg") or lc.get("composite element ref")
-    ensg_c = ch3_ensg_col or lc.get("ensg") or lc.get("ensembl") or lc.get("ensembl_gene_id") or lc.get("gene_id")
-    sym_c  = ch3_symbol_col or lc.get("ucsc_refgene_name") or lc.get("symbol") or lc.get("gene") or lc.get("gene_symbol")
+    # NOTE: 'IlmnID' lowercases to 'ilmnid' (ONE 'l')
+    probe_c = (ch3_probe_col
+               or lc.get("ilmnid")          # IlmnID
+               or lc.get("probe")
+               or lc.get("cg")
+               or lc.get("composite element ref")
+               or lc.get("illmnid"))        # tolerate misspelling if it occurs
+    
+    ensg_c  = (ch3_ensg_col
+               or lc.get("ensg")
+               or lc.get("ensembl")
+               or lc.get("ensembl_gene_id")
+               or lc.get("gene_id"))
+    
+    sym_c   = (ch3_symbol_col
+               or lc.get("ucsc_refgene_name")  # UCSC_RefGene_Name
+               or lc.get("symbol")
+               or lc.get("gene")
+               or lc.get("gene_symbol"))
 
     if not probe_c or not (ensg_c or sym_c):
         logging.warning(f"[CH3] Map {path} missing probe+gene columns; "
@@ -808,7 +860,7 @@ def process_one_case(case_id: str,
             # 1) Drop common linkers created during merges
             linker_exact = {
                 "ENSGene", "ENSGene_core", "Ensembl_core", "Ensembl_full",
-                "symbol", "probe", "To_core", "From", "Gene_Name", 
+                "symbol", "probe", "To_core", "From", "Gene_Name", "UniProt", 
             }
             # also drop any accidental suffixed variants like 'ENSGene_core_probe'
             linker_suffixes = tuple(["_core", "_probe"])
@@ -820,14 +872,6 @@ def process_one_case(case_id: str,
             if to_drop:
                 base = base.drop(columns=sorted(set(to_drop)), errors="ignore")
 
-            # Reorder so NP is immediately left of SEQ (if both exist)
-            if "NP" in base.columns and "SEQ" in base.columns:
-                cols = list(base.columns)
-                cols.remove("NP")
-                seq_idx = cols.index("SEQ")
-                cols.insert(seq_idx, "NP")
-                base = base[cols]
-
         out_fp = out_dir_p / f"{case_id}_integrated.csv"
         base.to_csv(out_fp, index=False)
 
@@ -837,7 +881,7 @@ def process_one_case(case_id: str,
                 "n_rows_out": len(base),
                 "rna_nonnull": int(base["RNA_Count"].notna().sum()) if "RNA_Count" in base.columns else
                                (int(base["Count"].notna().sum()) if "Count" in base.columns else 0),
-                "cnv_nonnull": int(base["CNV_CopyNumber"].notna().sum()) if "CNV_CopyNumber" in base.columns else
+                "cnv_nonnull": int(base["CNV_Count"].notna().sum()) if "CNV_Count" in base.columns else
                                (int(base["copy_number"].notna().sum()) if "copy_number" in base.columns else 0),
                 "ch3_nonnull": int(base["CH3_Beta"].notna().sum()) if "CH3_Beta" in base.columns else
                                (int(base["beta_val"].notna().sum()) if "beta_val" in base.columns else 0),
