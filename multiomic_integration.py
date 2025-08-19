@@ -667,28 +667,48 @@ def integrate_ch3(base_df: pd.DataFrame, ch3_dir: Path, case_id: str, ensg_join_
     ch3 = _ch3_from_manifest(ch3_dir, case_id, ch3_manifest)
     if ch3 is None or ch3.empty:
         return df
+
     m = _load_ch3_map(ch3_map, ref_dir, ch3_probe_col, ch3_ensg_col, ch3_symbol_col)
     if m is None or m.empty:
         logging.warning(f"[CH3] {case_id}: No usable probe→ENSG map; skipping CH3.")
         return df
+
     ch3m = ch3.merge(m, how="left", on="probe").dropna(subset=["ENSGene_core"])
     if ch3m.empty:
         logging.warning(f"[CH3] {case_id}: probe map didn’t cover this case’s probes; skipping.")
         return df
-    agg = (ch3m.groupby("ENSGene_core", as_index=False)["beta"].median() if ch3_agg == "median"
+
+    # Aggregate beta per gene
+    agg = (ch3m.groupby("ENSGene_core", as_index=False)["beta"].median()
+           if ch3_agg == "median"
            else ch3m.groupby("ENSGene_core", as_index=False)["beta"].mean())
     agg = agg.rename(columns={"beta": "beta_val"})
+
     # Also compute CpG probe list per ENSG_core
-    probes = (ch3m.groupby('ENSGene_core')['probe']
-               .apply(lambda s: ';'.join(sorted(set(map(str, s)))))
-               .reset_index(name='CpG_Probes'))
+    probes = (ch3m.groupby("ENSGene_core")["probe"]
+              .apply(lambda s: ";".join(sorted(set(map(str, s)))))
+              .reset_index(name="CpG_Probes"))
+
     left_key = "ENSGene_core" if ensg_join_mode == "core" else "ENSGene"
+
+    # Merge aggregated beta
     df = df.merge(agg, how="left", left_on=left_key, right_on="ENSGene_core")
-    df = df.merge(probes, how='left', left_on=left_key, right_on='ENSGene_core', suffixes=('', '_probe'))
-    if right_key in df.columns:
-        df = df.drop(columns=[right_key])
+    # If the left key isn't ENSGene_core, drop the right-side key column we merged on
+    if left_key != "ENSGene_core" and "ENSGene_core" in df.columns:
+        df = df.drop(columns=["ENSGene_core"])
+
+    # Merge probe list
+    df = df.merge(probes, how="left", left_on=left_key, right_on="ENSGene_core", suffixes=("", "_probe"))
+    if left_key != "ENSGene_core" and "ENSGene_core" in df.columns:
+        df = df.drop(columns=["ENSGene_core"])
+
+    # Defensive cleanup: if merges produced any suffixed key columns, keep only the left key
+    for col in [c for c in df.columns if c.startswith("ENSGene_core") and c != "ENSGene_core" and c != left_key]:
+        df = df.drop(columns=[col])
+
     logging.info(f"[CH3] {case_id}: matched beta_val for {int(df['beta_val'].notna().sum())} rows (join={ensg_join_mode})")
     return df
+
 
 def integrate_protein(base_df: pd.DataFrame, protein_dir: Path, case_id: str, synth_overlap: bool) -> pd.DataFrame:
     p = _try_case_file_in_dir(protein_dir, case_id)
