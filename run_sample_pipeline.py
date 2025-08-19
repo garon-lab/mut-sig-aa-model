@@ -152,7 +152,7 @@ def run_integration_for_case(case_id: str, extracted_root: Path, base_out: Path,
     if ch3_map_path:
         cmd_integ += [
             "--ch3_map", str(ch3_map_path),
-            "--ch3_probe_col", "IllmnID",
+            "--ch3_probe_col", "IlmnID",
             "--ch3_symbol_col", "UCSC_RefGene_Name",
         ]
 
