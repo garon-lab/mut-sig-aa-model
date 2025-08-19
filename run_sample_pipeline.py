@@ -7,6 +7,7 @@ Extracts a test dataset zip and runs the recommended usage of:
   1) dna_preprocessor.py
   2) make_manifest.py (build-main mode)
   3) multiomic_integration.py
+  4) validates results
 
 Defaults assume a `test.zip` laid out with subfolders like dna/, rna/, ch3/, cn/, protein/
 and GDC-style manifests.
@@ -21,7 +22,9 @@ What it does:
 - Writes a case list (<out_dir>/dna/case_ids.txt) via --make-simplified (used by integration).
 - Runs make_manifest.py --build-main to create a unified manifest set in <out_dir>/manifests.
 - Runs multiomic_integration.py with --folder <extracted_root>, --manifest <case_ids.txt>, --out_dir <out_dir>/integration, --step all.
+- Validates expected integrated outputs and raises AssertionError on failure.
 """
+
 import argparse
 import sys
 from pathlib import Path
@@ -31,6 +34,7 @@ import shutil
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
+import pandas as pd
 
 HERE = Path(__file__).resolve().parent
 
@@ -158,6 +162,70 @@ def run_integration_for_case(case_id: str, extracted_root: Path, base_out: Path,
 
     run(cmd_integ, dry_run)
     return case_id
+
+def _verify_results(integration_dir: Path, keep_join_cols: bool = False,
+                    cnv_name: str = "CNV_Count", ch3_name: str = "CH3_Beta",
+                    rna_name: str = "RNA_Count") -> None:
+
+
+    expected_cases = ["case-01", "case-02", "case-03"]
+    missing = []
+    paths = {}
+    for cid in expected_cases:
+        fp = integration_dir / f"{cid}_integrated.csv"
+        if not fp.exists():
+            missing.append(str(fp))
+        else:
+            paths[cid] = fp
+    assert not missing, f"Missing integrated outputs: {missing}"
+
+    # Linkers we expect to be removed in soft-cleanup
+    linker_exact = {
+        "ENSGene", "ENSGene_core", "Ensembl_core", "Ensembl_full",
+        "Gene", "Gene_Name", "symbol", "probe", "To_core", "From", "UniProt",
+    }
+    linker_suffixes = ("_core", "_probe")
+
+    # Validate each file
+    for cid, fp in paths.items():
+        df = pd.read_csv(fp)
+        cols = list(df.columns)
+
+        # Required columns
+        required = {"SEQ", ch3_name, cnv_name}
+        if rna_name in cols:
+            required_with_rna = required | {rna_name}
+        elif "Count" in cols:
+            required_with_rna = required | {"Count"}
+        else:
+            required_with_rna = required
+        missing_cols = [c for c in required_with_rna if c not in cols]
+        assert not missing_cols, f"[{cid}] Missing required columns: {missing_cols}"
+
+        # Linkers absent unless keep_join_cols=True
+        if not keep_join_cols:
+            leftover = [c for c in cols if c in linker_exact or any(c.endswith(s) for s in linker_suffixes)]
+            assert not leftover, f"[{cid}] Linker columns still present: {leftover}"
+
+        # Ordering: CNV immediately before SEQ
+        if all(c in cols for c in (cnv_name, "SEQ")):
+            seq_idx = cols.index("SEQ")
+            assert seq_idx >= 1, f"[{cid}] Not enough columns to position {cnv_name} before SEQ"
+            assert cols[seq_idx-1] == cnv_name, f"[{cid}] {cnv_name} is not immediately before SEQ"
+
+        # Non-null sanity checks
+        if "SEQ" in cols:
+            assert df["SEQ"].notna().sum() >= 1, f"[{cid}] Protein SEQ all null"
+        if cnv_name in cols:
+            assert df[cnv_name].notna().sum() >= 1, f"[{cid}] CNV values all null"
+        if ch3_name in cols:
+            assert df[ch3_name].notna().sum() >= 1, f"[{cid}] CH3 values all null"
+        if rna_name in cols:
+            assert df[rna_name].notna().sum() >= 1, f"[{cid}] RNA values all null"
+        elif "Count" in cols:
+            assert df["Count"].notna().sum() >= 1, f"[{cid}] RNA Count values all null"
+
+    log("Verification PASSED ✅")
 
 # ----- CLI / Main -----
 def main():
@@ -327,6 +395,16 @@ def main():
 
     log("Pipeline complete.")
     log(f"Outputs:\n- DNA: {dna_out}\n- Manifests: {mani_out_dir}\n- Integration: {integ_out}")
+
+    try:
+        _verify_results(integ_out,
+                        keep_join_cols=False,
+                        cnv_name="CNV_Count",   # adjust if renamed differently
+                        ch3_name="CH3_Beta",
+                        rna_name="RNA_Count")
+    except AssertionError as e:
+        log(f"[VERIFY FAIL] {e}")
+        raise SystemExit(2)
 
 if __name__ == "__main__":
     main()
