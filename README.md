@@ -50,10 +50,10 @@ Each script provides detailed help with the `--help` flag.
 
 To verify installation, the `run_sample_pipeline.py` script will:  
 - Download dependencies  
-- Use `test_data/` to ensure all components are functioning as expected  
+- Use test.zip to ensure all components are functioning as expected  
 
 ```bash
-python run_sample_pipeline.py
+python run_sample_pipeline.py -out_dir OUT_DIR
 ```
 
 ---
@@ -107,7 +107,7 @@ Builds project-wide or per-modality manifests.
 
 ### Usage
 ```bash
-python make_manifest.py   --build-main   --project_root <project root>   --main_out <output directory>
+python make_manifest.py   --build-main   --project_root <project root>   --out_dir <output directory>
 ```
 
 *Single-modality example:*  
@@ -126,12 +126,12 @@ Only final **protein-centered integrated files** are retained.
 
 ### Usage
 ```bash
-python multiomic_integration.py   --folder <project root>   --manifest <manifest file>   --out_dir <output directory>   --step <all|dna|rna|ch3|cnv|protein>
+python multiomic_integration.py   --folder <project root>   --manifest <manifest file>   --out_dir <output directory>   
 ```
 
 **Optional:**  
 ```bash
-  --input_dna_dir DNA_DIR   --input_rna_dir RNA_DIR --rna_manifest RNA_MANIFEST   --input_ch3_dir CH3_DIR --ch3_manifest CH3_MANIFEST   --input_protein_dir PROTEIN_DIR   --input_cn_dir CNV_DIR --cn_manifest CNV_MANIFEST   --skip_rna --skip_ch3 --skip_protein --skip_cn
+  --input_dna_dir DNA_DIR   --input_rna_dir RNA_DIR --rna_manifest RNA_MANIFEST   --input_ch3_dir CH3_DIR --ch3_manifest CH3_MANIFEST   --input_protein_dir PROTEIN_DIR   --input_cn_dir CNV_DIR --cn_manifest CNV_MANIFEST   --skip_rna --skip_ch3 --skip_protein --skip_cn --step <all|dna|rna|ch3|cnv|protein>
 ```
 
 ---
