@@ -228,18 +228,36 @@ def _find_ref_file(ref_dir: Optional[Path], basename: str) -> Optional[Path]:
 
 # --------------------------- Case manifest ---------------------------
 
-def load_case_ids(manifest_path: str) -> List[str]:
-    """Load case IDs from a simple manifest: first column contains case IDs (header allowed)."""
-    s = pd.read_table(manifest_path, usecols=[0], header=0, dtype=str,
-                      na_values=["", "NA", "NaN"]).iloc[:, 0]
-    s = s.dropna().astype(str).str.strip()
+def load_case_ids(manifest_path: str) -> list[str]:
+    """
+    Load case IDs from a simple manifest:
+      - plain text: one case ID per line (comments starting with '#')
+      - CSV/TSV: first column contains case IDs (header allowed or not)
+    """
+    import pandas as pd
+
+    # Try as a general table WITHOUT assuming a header (so we don't drop first row)
+    df = pd.read_table(
+        manifest_path,
+        usecols=[0],
+        header=None,          # <--- important: do not treat first row as header
+        dtype=str,
+        comment="#",          # allow comments in plain text
+        na_values=["", "NA", "NaN"],
+    )
+
+    s = df.iloc[:, 0].dropna().astype(str).str.strip()
+
+    # Drop likely header tokens if present anyway
     header_like = {
         "case-id", "case_id", "id", "sample-id", "sample_id",
-        "Case-ID", "Case_ID", "ID", "Sample-ID", "Sample_ID"
+        "Case-ID", "Case_ID", "ID", "Sample-ID", "Sample_ID",
+        "case id", "sample id"
     }
     s = s[~s.str.lower().isin({x.lower() for x in header_like})]
-    return [x for x in s.unique() if x]
 
+    # Keep unique, non-empty
+    return [x for x in s.unique() if x]
 
 # --------------- Per-modality manifests & path resolution ------------
 
