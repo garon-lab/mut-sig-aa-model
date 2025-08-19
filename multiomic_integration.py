@@ -795,30 +795,30 @@ def process_one_case(case_id: str,
 
         # ---------- Soft cleanup (default) ----------
         if not keep_join_cols:
-    # 1) Drop common linkers created during merges
-    linker_exact = {
-        "ENSGene_core", "Ensembl_core", "Ensembl_full",
-        "symbol", "probe", "To_core", "From",
-    }
-    # also drop any accidental suffixed variants like 'ENSGene_core_probe'
-    linker_suffixes = tuple(["_core", "_probe"])
-    to_drop = [c for c in base.columns
-               if c in linker_exact or c.endswith(linker_suffixes)]
-    # Keep ENSGene (pretty) and Gene/Gene_Name for readability
-    to_drop = [c for c in to_drop if c not in {"ENSGene", "Gene", "Gene_Name"}]
-    if args.drop_probe_list and "CpG_Probes" in base.columns:
-        to_drop.append("CpG_Probes")
-    if to_drop:
-        base = base.drop(columns=sorted(set(to_drop)))
-
-    # 2) Rename integrated columns (unless user says not to)
-    if not args.no_rename_integrations:
-        rename_map = {
-            "Count": "RNA_Count",
-            "beta_val": "CH3_Beta",
-            "copy_number": "CNV_Count",
-        }
-        base = base.rename(columns={k: v for k, v in rename_map.items()
+            # 1) Drop common linkers created during merges
+            linker_exact = {
+                "ENSGene_core", "Ensembl_core", "Ensembl_full",
+                "symbol", "probe", "To_core", "From",
+            }
+            # also drop any accidental suffixed variants like 'ENSGene_core_probe'
+            linker_suffixes = tuple(["_core", "_probe"])
+            to_drop = [c for c in base.columns
+                       if c in linker_exact or c.endswith(linker_suffixes)]
+            # Keep ENSGene (pretty) and Gene/Gene_Name for readability
+            to_drop = [c for c in to_drop if c not in {"ENSGene", "Gene", "Gene_Name"}]
+            if args.drop_probe_list and "CpG_Probes" in base.columns:
+                to_drop.append("CpG_Probes")
+            if to_drop:
+                base = base.drop(columns=sorted(set(to_drop)))
+        
+            # 2) Rename integrated columns (unless user says not to)
+            if not args.no_rename_integrations:
+                rename_map = {
+                    "Count": "RNA_Count",
+                    "beta_val": "CH3_Beta",
+                    "copy_number": "CNV_Count",
+                }
+                base = base.rename(columns={k: v for k, v in rename_map.items()
 
         out_fp = out_dir_p / f"{case_id}_integrated.csv"
         base.to_csv(out_fp, index=False)
