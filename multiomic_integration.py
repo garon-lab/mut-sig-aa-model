@@ -4,7 +4,7 @@ from __future__ import annotations
 MULTIOMIC INTEGRATION
 
 This pipeline uses a manifest TSV to integrate multiple omics layers (DNA required; RNA, methylation, protein, and copy number optional)
-for each case-id listed in a manifest. Can be used with an existing unifed manifest built with make_manifest.py or separate manifests. 
+for each case-id listed in a manifest. Can be used with an existing unified manifest built with make_manifest.py or separate manifests. 
 Output directory contains {case-id}_integrated.csv and out_dir/dna/{case-id}.csv. 
 Note protein files must be preprocessed and in the format {case-id}.csv (see protein_preprocessor.py). 
 DNA files similarly can be modified with the dna_preprocessor.py.
@@ -43,9 +43,8 @@ python multiomic_integration.py \
     --folder <project root directory> \
     --manifest <manifest file> \
     --out_dir <output directory> \
-    --ref_zip <reference directory> \
-    --step <all|dna|rna|ch3|cnv|protein>
-
+    --ref_zip <reference.zip> \
+    
 Optional Single File
 python multiomic_integration.py \
     --folder <project root directory> \
@@ -67,20 +66,20 @@ python multiomic_integration.py \
         --input_cn_dir CNV_DIR \
         --cn_manifest CNV_MANIFEST \
         --out_dir OUTPUT_DIR [--skip_rna] [--skip_ch3] [--skip_protein] [--skip_cn]
-        
+        --step <all|dna|rna|ch3|cnv|protein>
 
 Arguments:
 Required
     --folder              Project root directory
     --manifest            Case list file - formats supported: plain text (one case-ID per line), CSV/TSV (case-IDs in first column)
     --out_dir             Directory to write final integrated files
-    --step                Step(s) to run [all|dna|rna|ch3|cnv|protein]
 
 Reference Options
-    --ref_dir             Directory with referrences for multiomic mapping
+    --ref_dir             Directory with references for multiomic mapping if not using included reference.zip
     --ref_zip             Path to a reference.zip archive. By default, script looks for one in current directory --ref_dir <path>
 
 Optional
+    --step                Step(s) to run [all|dna|rna|ch3|cnv|protein] (default: all)
     --input_dna_dir       Override DNA VEP-annotated mutect file directory (default: <folder>/dna/{case-id}.csv)
     --input_rna_dir       Override RNA expression file directory (default: <folder>/rna)
     --input_ch3_dir       Override CH3 (methylation) file directory (default: <folder>/ch3)
@@ -402,32 +401,50 @@ def integrate_gene_annotations(base_df: pd.DataFrame, ref_dir: Optional[Path], c
 
 
 def integrate_uniprot_np(base_df: pd.DataFrame, ref_dir: Optional[Path], case_id: str) -> pd.DataFrame:
-    """Attach UniProt accession (From) then NP via maps (uni-ensg_all.txt, uni-np_all.txt)."""
+    """Attach UniProt accession(s) and NP/XP RefSeq protein ID(s) to each ENSG row.
+    Uses uni-ensg_all.txt (UniProt, ENSG) and uni-np_all.txt (UniProt, NP_ID).
+    Aggregates many-to-one mappings with semicolon-joined strings.
+    """
     if ref_dir is None:
         return base_df
     df = base_df.copy()
     ue_fp = _find_ref_file(ref_dir, "uni-ensg_all.txt")
     unp_fp = _find_ref_file(ref_dir, "uni-np_all.txt")
-    if ue_fp:
-        ue = _read_any_table(ue_fp, sep="\t", names=["From", "To"]).drop_duplicates()
-        ue["To_core"] = _norm_ensg_ser(ue["To"])
-        ue = ue.drop_duplicates(subset=["To_core"], keep="first")
-        df = df.merge(ue[["From", "To_core"]], how="left",
-                      left_on="ENSGene_core", right_on="To_core")
-    else:
+    if not ue_fp:
         logging.warning(f"[DNA] {case_id}: UniProt→ENSG map not found")
-    if unp_fp and "From" in df.columns:
-        unp = _read_any_table(unp_fp, sep="\t", names=["From", "NP"]).drop_duplicates()
-        unp = unp.drop_duplicates(subset=["From"], keep="first")
-        df["From"] = df["From"].astype(str).str.strip()
-        unp["From"] = unp["From"].astype(str).str.strip()
-        df = df.merge(unp, how="left", on="From")
-    elif not unp_fp:
-        logging.warning(f"[DNA] {case_id}: UniProt→NP map not found")
+        return df
+
+    ue = _read_any_table(ue_fp, sep="\t", names=["UniProt", "ENSG"]).drop_duplicates()
+    ue["To_core"] = _norm_ensg_ser(ue["ENSG"])
+    ens_to_up = (ue.groupby("To_core")["UniProt"]
+                   .apply(lambda s: sorted(set(str(x).strip() for x in s if pd.notna(x))))
+                   .reset_index(name="UniProt_list"))
+    df = df.merge(ens_to_up, how="left", left_on="ENSGene_core", right_on="To_core").drop(columns=["To_core"])
+
+    if unp_fp and "UniProt_list" in df.columns:
+        unp = _read_any_table(unp_fp, sep="\t", names=["UniProt", "NP_ID"]).drop_duplicates()
+        unp["UniProt"] = unp["UniProt"].astype(str).str.strip()
+        up_to_nps = (unp.groupby("UniProt")["NP_ID"]
+                        .apply(lambda s: sorted(set(str(x).strip() for x in s if pd.notna(x))))
+                        .to_dict())
+
+        def _collect_nps(up_list):
+            if not isinstance(up_list, list):
+                return None
+            bag = []
+            for up in up_list:
+                bag.extend(up_to_nps.get(up, []))
+            bag = sorted(set(bag))
+            return bag if bag else None
+
+        df["NP_list"] = df["UniProt_list"].map(_collect_nps)
+        df["UniProt"] = df["UniProt_list"].map(lambda xs: ";".join(xs) if isinstance(xs, list) and xs else None)
+        df["NP"] = df["NP_list"].map(lambda xs: ";".join(xs) if isinstance(xs, list) and xs else None)
+        df = df.drop(columns=["UniProt_list", "NP_list"])
+    elif "UniProt_list" in df.columns:
+        df["UniProt"] = df["UniProt_list"].map(lambda xs: ";".join(xs) if isinstance(xs, list) and xs else None)
+        df = df.drop(columns=["UniProt_list"])
     return df
-
-
-# --------------------------- RNA / CNV / CH3 -------------------------
 
 def _rna_from_manifest(rna_dir: Path, case_id: str, rna_manifest: Optional[str]) -> Optional[pd.DataFrame]:
     man = _load_manifest_df(rna_dir, rna_manifest, "gdc-rna.tsv")
@@ -585,6 +602,9 @@ def integrate_rna(base_df: pd.DataFrame, rna_dir: Path, case_id: str,
             })
             rna = pd.concat([rna, add], ignore_index=True)
     df = df.merge(rna[[right_key, "Count"]], how="left", left_on=left_key, right_on=right_key)
+    if right_key in df.columns:
+        df = df.drop(columns=[right_key])
+
     logging.info(f"[RNA] {case_id}: matched Count for {int(df['Count'].notna().sum())} rows (join={ensg_join_mode})")
     return df
 
@@ -607,6 +627,8 @@ def integrate_cnv(base_df: pd.DataFrame, cn_dir: Path, case_id: str,
             })
             cn = pd.concat([cn, add], ignore_index=True)
     df = df.merge(cn[[right_key, "copy_number"]], how="left", left_on=left_key, right_on=right_key)
+    if right_key in df.columns:
+        df = df.drop(columns=[right_key])
     logging.info(f"[CNV] {case_id}: matched copy_number for {int(df['copy_number'].notna().sum())} rows (join={ensg_join_mode})")
     return df
 
@@ -630,11 +652,17 @@ def integrate_ch3(base_df: pd.DataFrame, ch3_dir: Path, case_id: str, ensg_join_
     agg = (ch3m.groupby("ENSGene_core", as_index=False)["beta"].median() if ch3_agg == "median"
            else ch3m.groupby("ENSGene_core", as_index=False)["beta"].mean())
     agg = agg.rename(columns={"beta": "beta_val"})
+    # Also compute CpG probe list per ENSG_core
+    probes = (ch3m.groupby('ENSGene_core')['probe']
+               .apply(lambda s: ';'.join(sorted(set(map(str, s)))))
+               .reset_index(name='CpG_Probes'))
     left_key = "ENSGene_core" if ensg_join_mode == "core" else "ENSGene"
     df = df.merge(agg, how="left", left_on=left_key, right_on="ENSGene_core")
+    df = df.merge(probes, how='left', left_on=left_key, right_on='ENSGene_core', suffixes=('', '_probe'))
+    if right_key in df.columns:
+        df = df.drop(columns=[right_key])
     logging.info(f"[CH3] {case_id}: matched beta_val for {int(df['beta_val'].notna().sum())} rows (join={ensg_join_mode})")
     return df
-
 
 def integrate_protein(base_df: pd.DataFrame, protein_dir: Path, case_id: str, synth_overlap: bool) -> pd.DataFrame:
     p = _try_case_file_in_dir(protein_dir, case_id)
@@ -861,9 +889,6 @@ def main() -> None:
                 logging.error(f"[{cid}]: {err}")
     logging.info("Done.")
 
-
-if __name__ == "__main__":
-    main()
 
 if __name__ == "__main__":
     main()
