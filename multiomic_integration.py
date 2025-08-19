@@ -621,42 +621,87 @@ def _ch3_from_manifest(ch3_dir: Path, case_id: str, ch3_manifest: Optional[str])
 
 def _load_ch3_map(ch3_map: Optional[str], ref_dir: Optional[Path],
                   ch3_probe_col: Optional[str], ch3_ensg_col: Optional[str], ch3_symbol_col: Optional[str]) -> Optional[pd.DataFrame]:
-    """Load a probe→ENSG map, by direct path or by searching the reference dir for common filenames."""
+    """
+    Load a probe→ENSG map.
+    - If ENSG column provided: normalize to versionless and return.
+    - Else if SYMBOL column provided: split multi-symbol cells (e.g., 'TP53;WRAP53'),
+      trim, dedupe, map SYMBOL→ENSG via esng_gene-sym.txt from reference, and return.
+    Output columns: ['probe', 'ENSGene_core'] (one row per probe–ENSG)
+    """
     path: Optional[Path] = None
     if ch3_map:
         path = Path(ch3_map)
     else:
-        for name in ["probe-ensg.tsv", "probe_ensg.tsv", "illumina_probes_ensg.tsv", "ch3_probe_map.tsv", "ch3_map.tsv"]:
+        for name in ["probe-ensg.tsv", "probe_ensg.tsv", "illumina_probes_ensg.tsv", "ch3_probe_map.tsv", "ch3_map.tsv", "ch3.csv"]:
             guess = _find_ref_file(ref_dir, name) if ref_dir else None
             if guess and guess.exists():
                 path = guess
                 break
     if path is None or not path.exists():
+        logging.warning("[CH3] No probe→gene map file found.")
         return None
+
     df = _read_any_table(path)
     lc = {c.lower(): c for c in df.columns}
-    probe_c = ch3_probe_col or lc.get("probe") or lc.get("cg") or lc.get("ilmnid") or lc.get("composite element ref")
-    ensg_c = ch3_ensg_col or lc.get("ensg") or lc.get("ensembl") or lc.get("ensembl_gene_id") or lc.get("gene_id")
-    sym_c = ch3_symbol_col or lc.get("gene") or lc.get("symbol") or lc.get("gene_symbol")
-    if not probe_c or not (ensg_c or sym_c):
-        logging.warning(f"[CH3] Map {path} missing probe+gene columns; specify --ch3_probe_col/--ch3_ensg_col/--ch3_symbol_col.")
+
+    probe_c = ch3_probe_col or lc.get("probe") or lc.get("cg") or lc.get("ilmnid") or lc.get("composite element ref") or lc.get("illmnid")
+    ensg_c  = ch3_ensg_col  or lc.get("ensg") or lc.get("ensembl") or lc.get("ensembl_gene_id") or lc.get("gene_id")
+    sym_c   = ch3_symbol_col or lc.get("gene") or lc.get("symbol") or lc.get("gene_symbol") or lc.get("ucsc_refgene_name")
+
+    if not probe_c:
+        logging.warning(f"[CH3] Map {path} missing a probe column.")
         return None
+
     m = df.rename(columns={probe_c: "probe"}).copy()
+    m["probe"] = m["probe"].astype(str).str.strip()
+    m = m.dropna(subset=["probe"]).drop_duplicates(subset=["probe"], keep="first")
+
     if ensg_c:
-        m["ENSGene_core"] = _norm_ensg_ser(m[ensg_c])
-    else:
-        sym_fp = _find_ref_file(ref_dir, "esng_gene-sym.txt") if ref_dir else None
-        if sym_fp is None:
-            logging.warning("[CH3] No symbol map (esng_gene-sym.txt) in reference; cannot derive ENSG from symbol.")
-            return None
-        sym = _read_any_table(sym_fp, sep="\t", names=["Gene", "Ensembl"]).drop_duplicates()
-        sym["Ensembl_core"] = _norm_ensg_ser(sym["Ensembl"])
-        sym = sym.drop_duplicates(subset=["Gene"], keep="first")
-        m = m.rename(columns={sym_c: "Gene"}).merge(
-            sym[["Gene", "Ensembl_core"]], how="left", on="Gene"
-        ).rename(columns={"Ensembl_core": "ENSGene_core"})
-    m = m.dropna(subset=["probe", "ENSGene_core"]).drop_duplicates(subset=["probe"], keep="first")
-    return m[["probe", "ENSGene_core"]]
+        # ENSG given directly
+        m["ENSGene_core"] = _norm_ensg_ser(df[ensg_c])
+        out = m.dropna(subset=["ENSGene_core"])[["probe", "ENSGene_core"]].drop_duplicates()
+        return out if not out.empty else None
+
+    # Need to go SYMBOL -> ENSG
+    if not sym_c:
+        logging.warning(f"[CH3] Map {path} missing ENSG column and symbol column; cannot build probe→ENSG.")
+        return None
+
+    # Split multi-symbol cells like 'TP53;WRAP53' or 'GENE1/GENE2'
+    sym_series = df[sym_c].astype(str).fillna("").str.strip()
+    # Accept separators: ; , / | whitespace
+    split_syms = (sym_series
+                  .str.replace(r"[|]", ";", regex=True)
+                  .str.replace(r"[,/]", ";", regex=True)
+                  .str.replace(r"\s+", "", regex=True)  # remove spaces within list
+                  .str.split(";"))
+    # Build exploded rows probe–symbol
+    tmp = pd.DataFrame({
+        "probe": df[probe_c].astype(str).str.strip(),
+        "symbol": split_syms
+    }).explode("symbol")
+    tmp = tmp[tmp["symbol"].notna() & (tmp["symbol"] != "")]
+    tmp["symbol"] = tmp["symbol"].astype(str).str.strip().str.upper()
+
+    # Map SYMBOL -> ENSG using reference esng_gene-sym.txt
+    sym_fp = _find_ref_file(ref_dir, "esng_gene-sym.txt") if ref_dir else None
+    if sym_fp is None:
+        logging.warning("[CH3] No symbol map (esng_gene-sym.txt) in reference; cannot derive ENSG from symbol.")
+        return None
+    sym_map = _read_any_table(sym_fp, sep="\t", names=["Gene", "Ensembl"]).drop_duplicates()
+    sym_map["Gene"] = sym_map["Gene"].astype(str).str.strip().str.upper()
+    sym_map["Ensembl_core"] = _norm_ensg_ser(sym_map["Ensembl"])
+    sym_map = sym_map.dropna(subset=["Gene", "Ensembl_core"]).drop_duplicates(subset=["Gene"], keep="first")
+
+    join = tmp.merge(sym_map[["Gene", "Ensembl_core"]], left_on="symbol", right_on="Gene", how="left")
+    join = join.dropna(subset=["Ensembl_core"]).rename(columns={"Ensembl_core": "ENSGene_core"})
+    out = join[["probe", "ENSGene_core"]].drop_duplicates()
+
+    if out.empty:
+        logging.warning(f"[CH3] After mapping symbols from {path}, no probe→ENSG rows remained.")
+        return None
+    return out
+
 
 
 # -------------------------- Integration steps ------------------------
