@@ -65,7 +65,8 @@ def read_case_ids(case_list_path: Path):
     case_list_path = case_list_path.expanduser().resolve()
     if not case_list_path.exists():
         raise FileNotFoundError(f"Case list not found: {case_list_path}")
-    ids = [ln.strip() for ln in case_list_path.read_text().splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    ids = [ln.strip() for ln in case_list_path.read_text().splitlines()
+           if ln.strip() and not ln.strip().startswith("#")]
     if not ids:
         raise ValueError(f"No case IDs in {case_list_path}")
     return ids
@@ -87,46 +88,33 @@ def _assert_reference_here(reference_zip: Path) -> None:
             "Place your reference.zip next to this script or pass a different path."
         )
 
-def _autodiscover_ch3_map(user_arg: str, extracted_root: Path) -> Path:
+def _autodiscover_ch3_map(ch3_arg: str) -> Path | None:
     """
-    Try, in order:
-      1) --ch3_map (if provided & exists)
-      2) <repo>/reference/ch3.csv
-      3) <repo>/ch3.csv
-      4) any <repo>/**/reference/ch3.csv (first hit)
-      5) <extracted_root>/test/ch3/ch3.csv (if you ever bundle it in the test zip)
+    If user provided --ch3_map and it exists, use it.
+    Otherwise return None so multiomic_integration.py will rely on --ref_zip (reference.zip).
     """
-    candidates = []
-    if user_arg:
-        candidates.append(Path(user_arg).expanduser().resolve())
-    candidates += [
-        HERE / "reference" / "ch3.csv",
-        HERE / "ch3.csv",
-    ]
-    # recursive fallback: any reference/ch3.csv under the repo tree
-    candidates += list(HERE.rglob("reference/ch3.csv"))
-    # rarely: within extracted test data
-    candidates.append(extracted_root / "test" / "ch3" / "ch3.csv")
+    if ch3_arg:
+        p = Path(ch3_arg).expanduser().resolve()
+        if p.exists():
+            log(f"Using external CH3 map: {p}")
+            return p
+        log(f"[WARN] CH3 map not found at {p}; will rely on reference.zip instead")
+    else:
+        log("No external CH3 map provided; will rely on reference.zip")
+    return None
 
-    for c in candidates:
-        if c and c.exists():
-            log(f"Using CH3 map: {c}")
-            return c
-
-    raise FileNotFoundError(
-        "CH3 map not found. Provide with --ch3_map or place ch3.csv under <repo>/reference/"
-    )
-
-def run_integration_for_case(case_id: str, extracted_root: Path, base_out: Path, ch3_map: Path, dry_run: bool):
+def run_integration_for_case(case_id: str, extracted_root: Path, base_out: Path,
+                             ch3_map_path: Path | None, dry_run: bool):
     """Per-sample integration helper (used when --per-sample-integration is on)."""
     single_out = base_out / case_id
     single_out.mkdir(parents=True, exist_ok=True)
     tmp_manifest = write_single_id_manifest(base_out / "_tmp_manifests", case_id)
 
     # reference + manifests based on outputs
-    mani_out_dir = base_out.parent / "manifests"
     reference_zip = (HERE / "reference.zip")
     _assert_reference_here(reference_zip)
+
+    mani_out_dir = base_out.parent / "manifests"
 
     # Raw modality roots under extracted test set
     raw_rna = extracted_root / "test" / "rna"
@@ -157,11 +145,15 @@ def run_integration_for_case(case_id: str, extracted_root: Path, base_out: Path,
         "--rna-manifest", str(rna_manifest),
         "--ch3-manifest", str(ch3_manifest),
         "--cn-manifest",  str(cn_manifest),
-        "--ch3_map", str(ch3_map),
-        "--ch3_probe_col", "IllmnID",
-        "--ch3_symbol_col", "UCSC_RefGene_Name",
         "--ensg_join_mode", "core",
     ]
+    if ch3_map_path:
+        cmd_integ += [
+            "--ch3_map", str(ch3_map_path),
+            "--ch3_probe_col", "IllmnID",
+            "--ch3_symbol_col", "UCSC_RefGene_Name",
+        ]
+
     run(cmd_integ, dry_run)
     return case_id
 
@@ -179,7 +171,8 @@ def main():
                     help="Only print commands, do not execute")
     ap.add_argument("--per-sample-integration", action="store_true",
                     help="Run multiomic integration per case in parallel using --jobs")
-    ap.add_argument("--ch3_map", default="", help="Path to CH3 probe→gene map (IllmnID,UCSC_RefGene_Name).")
+    ap.add_argument("--ch3_map", default="",
+                    help="Path to CH3 probe→gene map (IllmnID,UCSC_RefGene_Name). If omitted, the reference.zip will be used.")
     args = ap.parse_args()
 
     dry_run = args.dry_run
@@ -232,7 +225,7 @@ def main():
     for f in produced.glob("*.csv"):
         shutil.copy2(f, dest / f.name)
 
-    # If the case list missed any produced DNA CSVs, union them back in
+    # If the case list missed any produced DNA CSVs, union them back in (ensures case-01 isn't skipped)
     case_list = dna_out / "case_ids.txt"
     existing_ids = set()
     if case_list.exists():
@@ -266,10 +259,10 @@ def main():
     if not case_list.exists():
         raise FileNotFoundError("Case list not found after dna_preprocessor (expected results/dna/case_ids.txt).")
 
-    # Validate reference + CH3 map up-front
+    # Validate reference + (optional) CH3 map
     reference_zip = (HERE / "reference.zip")
     _assert_reference_here(reference_zip)
-    ch3_map_path = _autodiscover_ch3_map(args.ch3_map, extracted_root)
+    ch3_map_path = _autodiscover_ch3_map(args.ch3_map)
 
     # Build explicit refs and manifests based on outputs and test layout
     raw_rna = extracted_root / "test" / "rna"
@@ -320,11 +313,14 @@ def main():
             "--rna-manifest", str(rna_manifest),
             "--ch3-manifest", str(ch3_manifest),
             "--cn-manifest",  str(cn_manifest),
-            "--ch3_map", str(ch3_map_path),
-            "--ch3_probe_col", "IllmnID",
-            "--ch3_symbol_col", "UCSC_RefGene_Name",
             "--ensg_join_mode", "core",
         ]
+        if ch3_map_path:
+            cmd_integ += [
+                "--ch3_map", str(ch3_map_path),
+                "--ch3_probe_col", "IllmnID",
+                "--ch3_symbol_col", "UCSC_RefGene_Name",
+            ]
         run(cmd_integ, dry_run)
 
     log("Pipeline complete.")
