@@ -574,12 +574,49 @@ def _ch3_from_manifest(ch3_dir: Path, case_id: str, ch3_manifest: Optional[str])
         return None
 
     full = pd.read_csv(candidate, sep="\t", dtype=str)
-    lc = {c.lower(): c for c in full.columns}
-    probe_col = lc.get("cg") or lc.get("ilmnid") or lc.get("composite element ref")
-    beta_col = lc.get("beta") or lc.get("beta_value") or lc.get("beta value")
+
+    # --- robust column detection ---
+    cols = list(full.columns)
+    lowmap = {c.lower(): c for c in cols}
+
+    # Standard guesses first
+    probe_col = (lowmap.get("cg")
+                 or lowmap.get("ilmnid")
+                 or lowmap.get("composite element ref"))
+
+    beta_col = (lowmap.get("beta")
+                or lowmap.get("beta_value")
+                or lowmap.get("beta value"))
+
+    # If not found, try flexible heuristics
+    if probe_col is None:
+        # common alternates: 'probe', 'probe_id', 'cpg', 'composite element ref' variants
+        for c in cols:
+            cl = c.lower().replace("_", " ").strip()
+            if cl in {"probe", "probe id", "cpg"} or "composite element ref" in cl or cl.startswith("cg"):
+                probe_col = c
+                break
+
+    if beta_col is None:
+        for c in cols:
+            cl = c.lower().replace("_", " ").strip()
+            if cl.startswith("beta"):
+                beta_col = c
+                break
+
+    # Bail out safely if still missing
+    if probe_col is None or beta_col is None:
+        logging.warning(
+            f"[CH3] {case_id}: unable to identify probe/beta columns in {candidate.name}; "
+            f"found probe_col={probe_col}, beta_col={beta_col}. "
+            f"Available columns (first 10): {cols[:10]}"
+        )
+        return None
+
     out = full[[probe_col, beta_col]].rename(columns={probe_col: "probe", beta_col: "beta"})
     out["beta"] = _safe_to_numeric(out["beta"])
     return out.dropna(subset=["probe"])
+
 
 
 def _load_ch3_map(ch3_map: Optional[str], ref_dir: Optional[Path],
