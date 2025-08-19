@@ -167,7 +167,18 @@ def main():
 
     # 1) Extract test data
     extracted_root = extract_zip(zip_path, HERE, keep_extracted=args.keep_extracted)
-
+    if not args.ch3_map or args.ch3_map == str(HERE / "ch3.csv"):
+        candidates = [
+            HERE / "ch3.csv",
+            extracted_root / "test" / "ch3" / "ch3.csv",
+            extracted_root / "ch3" / "ch3.csv",
+            HERE / "reference" / "ch3.csv",
+        ]
+        for c in candidates:
+            if c.exists():
+                args.ch3_map = str(c)
+                log(f"Auto-selected CH3 map: {args.ch3_map}")
+                break
     # 2) dna_preprocessor.py
     dna_out = out_dir / "dna"
     dna_out.mkdir(parents=True, exist_ok=True)
