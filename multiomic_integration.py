@@ -797,20 +797,26 @@ def process_one_case(case_id: str,
         if not keep_join_cols:
             # 1) Drop common linkers created during merges
             linker_exact = {
-                "ENSGene_core", "Ensembl_core", "Ensembl_full",
-                "symbol", "probe", "To_core", "From",
+                "ENSGene", "ENSGene_core", "Ensembl_core", "Ensembl_full",
+                "symbol", "probe", "To_core", "From", "Gene_Name", 
             }
             # also drop any accidental suffixed variants like 'ENSGene_core_probe'
             linker_suffixes = tuple(["_core", "_probe"])
             to_drop = [c for c in base.columns
-                       if c in linker_exact or c.endswith(linker_suffixes)]
+                       if c in linker_exact or any(c.endswith(sfx) for sfx in linker_suffixes)]
             
-          # Keep ENSGene (pretty) and Gene/Gene_Name for readability
-            to_drop = [c for c in to_drop if c not in {"ENSGene", "Gene", "Gene_Name"}]
-            if args.drop_probe_list and "CpG_Probes" in base.columns:
-                to_drop.append("CpG_Probes")
+          # Keep ENSGene (pretty) and Gene for readability
+            to_drop = [c for c in to_drop if c not in {"ENSGene", "Gene"}]
             if to_drop:
-                base = base.drop(columns=sorted(set(to_drop)))
+                base = base.drop(columns=sorted(set(to_drop)), errors="ignore")
+
+            # Reorder so NP is immediately left of SEQ (if both exist)
+            if "NP" in base.columns and "SEQ" in base.columns:
+                cols = list(base.columns)
+                cols.remove("NP")
+                seq_idx = cols.index("SEQ")
+                cols.insert(seq_idx, "NP")
+                base = base[cols]
         
             # 2) Rename integrated columns (unless user says not to)
             if not args.no_rename_integrations:
