@@ -362,10 +362,20 @@ TG = [
 ]
 
 
-BASE_MATRICES = {ctx: np.array('AC': AC,'AG': AG,'AT': AT,'CA': CA,'CG': CG,'CT': CT,'GA': GA,'GC': GC,'GT': GT,'TA': TA,'TC': TC,'TG': TG, dtype=float) for ctx in CONTEXTS}
-# Stack into 3D array shape (12,21,21)
-BASE_STACK = np.stack([BASE_MATRICES[ctx] for ctx in CONTEXTS], axis=0)
-
+BASE_MATRICES = {
+    "AC": np.array(AC, dtype=float),
+    "AG": np.array(AG, dtype=float),
+    "AT": np.array(AT, dtype=float),
+    "CA": np.array(CA, dtype=float),
+    "CG": np.array(CG, dtype=float),
+    "CT": np.array(CT, dtype=float),
+    "GA": np.array(GA, dtype=float),
+    "GC": np.array(GC, dtype=float),
+    "GT": np.array(GT, dtype=float),
+    "TA": np.array(TA, dtype=float),
+    "TC": np.array(TC, dtype=float),
+    "TG": np.array(TG, dtype=float),
+}
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Signature-Based AA Variant Modeling")
