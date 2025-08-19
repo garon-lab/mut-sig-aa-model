@@ -24,6 +24,7 @@ What it does:
 
 #!/usr/bin/env python3
 import argparse
+import os
 import sys
 from pathlib import Path
 import zipfile
