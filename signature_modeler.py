@@ -363,18 +363,18 @@ TG = [
 
 
 BASE_MATRICES = {
-    "AC": np.array(AC, dtype=float),
-    "AG": np.array(AG, dtype=float),
-    "AT": np.array(AT, dtype=float),
-    "CA": np.array(CA, dtype=float),
-    "CG": np.array(CG, dtype=float),
-    "CT": np.array(CT, dtype=float),
-    "GA": np.array(GA, dtype=float),
-    "GC": np.array(GC, dtype=float),
-    "GT": np.array(GT, dtype=float),
-    "TA": np.array(TA, dtype=float),
-    "TC": np.array(TC, dtype=float),
-    "TG": np.array(TG, dtype=float),
+    "AC": _validate_and_coerce("AC", AC),
+    "AG": _validate_and_coerce("AG", AG),
+    "AT": _validate_and_coerce("AT", AT),
+    "CA": _validate_and_coerce("CA", CA),
+    "CG": _validate_and_coerce("CG", CG),
+    "CT": _validate_and_coerce("CT", CT),
+    "GA": _validate_and_coerce("GA", GA),
+    "GC": _validate_and_coerce("GC", GC),
+    "GT": _validate_and_coerce("GT", GT),
+    "TA": _validate_and_coerce("TA", TA),
+    "TC": _validate_and_coerce("TC", TC),
+    "TG": _validate_and_coerce("TG", TG),
 }
 
 def parse_args():
@@ -402,6 +402,47 @@ def validate_context_df(df):
         raise ValueError("Signature validation error: " + "; ".join(msg))
     logging.info("Signature vector validated.")
 
+# --- add above where AC, AG, ... TG are converted to np.array ---
+AA_ORDER = ["A","R","N","D","C","Q","E","G","H","I",
+            "L","K","M","F","P","S","T","W","Y","V","*"]
+
+def _validate_and_coerce(name, M):
+    # Ensure list-of-lists and coerce each cell to float
+    if not isinstance(M, (list, tuple)):
+        raise ValueError(f"{name} must be a list of rows, got {type(M)}")
+
+    # Strip strings, handle ints/floats, and check row lengths
+    coerced = []
+    row_lengths = []
+    for r_idx, row in enumerate(M):
+        if not isinstance(row, (list, tuple)):
+            raise ValueError(f"{name} row {r_idx} is not a list/tuple (type {type(row)})")
+        new_row = []
+        for c_idx, val in enumerate(row):
+            try:
+                # common issue: embedded strings like ' 0 ' or '0.0'
+                new_row.append(float(str(val).strip()))
+            except Exception as e:
+                raise ValueError(
+                    f"{name} has a non-numeric cell at row {r_idx}, col {c_idx}: {val!r}"
+                ) from e
+        row_lengths.append(len(new_row))
+        coerced.append(new_row)
+
+    # Check 21 rows
+    if len(coerced) != 21:
+        raise ValueError(f"{name} must have 21 rows (one per AA in {AA_ORDER}), found {len(coerced)}")
+
+    # Check every row has 21 columns
+    bad = [(i, L) for i, L in enumerate(row_lengths) if L != 21]
+    if bad:
+        sample = ", ".join([f"row{i}={L}" for i, L in bad[:5]])
+        raise ValueError(
+            f"{name} must be 21×21; mismatched row lengths found ({sample}{' ...' if len(bad)>5 else ''})."
+        )
+
+    import numpy as np
+    return np.array(coerced, dtype=float)
 
 def build_expected(df):
     """Vectorized expected matrix computation."""
