@@ -804,7 +804,8 @@ def process_one_case(case_id: str,
             linker_suffixes = tuple(["_core", "_probe"])
             to_drop = [c for c in base.columns
                        if c in linker_exact or c.endswith(linker_suffixes)]
-            # Keep ENSGene (pretty) and Gene/Gene_Name for readability
+            
+          # Keep ENSGene (pretty) and Gene/Gene_Name for readability
             to_drop = [c for c in to_drop if c not in {"ENSGene", "Gene", "Gene_Name"}]
             if args.drop_probe_list and "CpG_Probes" in base.columns:
                 to_drop.append("CpG_Probes")
@@ -818,7 +819,8 @@ def process_one_case(case_id: str,
                     "beta_val": "CH3_Beta",
                     "copy_number": "CNV_Count",
                 }
-                base = base.rename(columns={k: v for k, v in rename_map.items()
+                base = base.rename(columns={k: v for k, v in rename_map.items() if k in base.columns}
+                )
 
         out_fp = out_dir_p / f"{case_id}_integrated.csv"
         base.to_csv(out_fp, index=False)
