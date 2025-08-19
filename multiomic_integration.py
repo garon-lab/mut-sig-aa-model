@@ -754,8 +754,13 @@ def integrate_ch3(base_df: pd.DataFrame, ch3_dir: Path, case_id: str, ensg_join_
 
     left_key = "ENSGene_core" if ensg_join_mode == "core" else "ENSGene"
     # Merge agg + probes; drop helper join cols introduced on the right
-    df = df.merge(agg, how="left", left_on=left_key, right_on="ENSGene_core").drop(columns=["ENSGene_core"])
-    df = df.merge(probes, how="left", left_on=left_key, right_on="ENSGene_core").drop(columns=["ENSGene_core"])
+    df = df.merge(agg, how="left", left_on=left_key, right_on="ENSGene_core")
+    if left_key != "ENSGene_core" and "ENSGene_core" in df.columns:
+        df = df.drop(columns=["ENSGene_core"])
+    
+    df = df.merge(probes, how="left", left_on=left_key, right_on="ENSGene_core")
+    if left_key != "ENSGene_core" and "ENSGene_core" in df.columns:
+        df = df.drop(columns=["ENSGene_core"])
 
     logging.info(f"[CH3] {case_id}: matched beta_val for {int(df['beta_val'].notna().sum())} rows (join={ensg_join_mode})")
     return df
