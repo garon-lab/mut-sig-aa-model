@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 RUN SAMPLE PIPELINE
 ----------------------
@@ -19,9 +20,7 @@ What it does:
 - Writes a case list (<out_dir>/dna/case_ids.txt) via --make-simplified (used by integration).
 - Runs make_manifest.py --build-main to create a unified manifest set in <out_dir>/manifests.
 - Runs multiomic_integration.py with --folder <extracted_root>, --manifest <case_ids.txt>, --out_dir <out_dir>/integration, --step all.
-
 """
-#!/usr/bin/env python3
 import argparse
 import sys
 from pathlib import Path
@@ -77,6 +76,13 @@ def write_single_id_manifest(dest_dir: Path, case_id: str) -> Path:
     p.write_text(case_id + "\n")
     return p
 
+def _assert_reference_here(reference_zip: Path) -> None:
+    if not reference_zip.exists():
+        raise FileNotFoundError(
+            f"reference.zip not found at {reference_zip}. "
+            "Place your reference.zip next to this script or update the path in run_sample_pipeline.py."
+        )
+
 def run_integration_for_case(case_id: str, extracted_root: Path, base_out: Path, dry_run: bool):
     single_out = base_out / case_id
     single_out.mkdir(parents=True, exist_ok=True)
@@ -84,6 +90,7 @@ def run_integration_for_case(case_id: str, extracted_root: Path, base_out: Path,
     # reference + manifests based on outputs
     mani_out_dir = base_out.parent / "manifests"
     reference_zip = (HERE / "reference.zip")
+    _assert_reference_here(reference_zip)
     raw_rna = extracted_root / "test" / "rna"
     raw_ch3 = extracted_root / "test" / "ch3"
     raw_cn  = extracted_root / "test" / "cn"
@@ -157,7 +164,9 @@ def main():
                     "*vep*.tsv", "*vep*.txt"):
             candidates.extend(extracted_root.rglob(pat))
         if candidates:
-            candidates.sort(key=lambda p: (len(p.suffix), len(str(p))))
+            # prefer known names; fall back to shortest path
+            preferred = {"gdc-vep.tsv", "dna_manifest.tsv"}
+            candidates.sort(key=lambda p: (0 if p.name in preferred else 1, len(str(p))))
             dna_manifest = candidates[0]
         else:
             raise FileNotFoundError("Could not locate a DNA manifest inside the extracted test data.")
@@ -228,6 +237,7 @@ def main():
     else:
         # Build explicit refs and manifests based on outputs and test layout
         reference_zip = (HERE / "reference.zip")
+        _assert_reference_here(reference_zip)
         raw_rna = extracted_root / "test" / "rna"
         raw_ch3 = extracted_root / "test" / "ch3"
         raw_cn  = extracted_root / "test" / "cn"
