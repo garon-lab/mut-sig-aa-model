@@ -220,3 +220,24 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# --- Multiomic integration with explicit reference, manifests, and input dirs ---
+subprocess.run([
+    sys.executable, os.path.join(PROJECT_ROOT, "multiomic_integration.py"),
+    "--folder", TEST_DIR,
+    "--manifest", CASE_IDS_TXT,
+    "--out_dir", INTEGRATION_DIR,
+    "--step", "all",
+    "--ref_zip", REFERENCE_ZIP,
+    "--input_dna_dir", DNA_OUT_DIR,
+    "--input_rna_dir", RAW_RNA_DIR,
+    "--input_ch3_dir", RAW_CH3_DIR,
+    "--input_cn_dir",  RAW_CN_DIR,
+    "--input_protein_dir", RAW_PRO_DIR,
+    "--rna_manifest", RNA_MANIFEST,
+    "--ch3_manifest", CH3_MANIFEST,
+    "--cn_manifest",  CN_MANIFEST,
+    "--ensg_join_mode", "core"
+], check=True)
+
