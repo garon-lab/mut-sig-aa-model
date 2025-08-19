@@ -46,6 +46,7 @@ def run(cmd, dry_run=False):
         raise SystemExit(result.returncode)
 
 def extract_zip(zip_path: Path, dest_dir: Path, keep_extracted: bool) -> Path:
+    """Extract zip into <dest_dir>/_test_data and return that path."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     extract_root = dest_dir / "_test_data"
     if extract_root.exists():
@@ -64,10 +65,14 @@ def read_case_ids(case_list_path: Path):
     case_list_path = case_list_path.expanduser().resolve()
     if not case_list_path.exists():
         raise FileNotFoundError(f"Case list not found: {case_list_path}")
-    ids = [ln.strip() for ln in case_list_path.read_text().splitlines() if ln.strip()]
+    ids = [ln.strip() for ln in case_list_path.read_text().splitlines() if ln.strip() and not ln.strip().startswith("#")]
     if not ids:
         raise ValueError(f"No case IDs in {case_list_path}")
     return ids
+
+def write_case_ids(case_list_path: Path, ids):
+    case_list_path.parent.mkdir(parents=True, exist_ok=True)
+    case_list_path.write_text("".join(f"{i}\n" for i in ids))
 
 def write_single_id_manifest(dest_dir: Path, case_id: str) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -81,6 +86,36 @@ def _assert_reference_here(reference_zip: Path) -> None:
             f"reference.zip not found at {reference_zip}. "
             "Place your reference.zip next to this script or pass a different path."
         )
+
+def _autodiscover_ch3_map(user_arg: str, extracted_root: Path) -> Path:
+    """
+    Try, in order:
+      1) --ch3_map (if provided & exists)
+      2) <repo>/reference/ch3.csv
+      3) <repo>/ch3.csv
+      4) any <repo>/**/reference/ch3.csv (first hit)
+      5) <extracted_root>/test/ch3/ch3.csv (if you ever bundle it in the test zip)
+    """
+    candidates = []
+    if user_arg:
+        candidates.append(Path(user_arg).expanduser().resolve())
+    candidates += [
+        HERE / "reference" / "ch3.csv",
+        HERE / "ch3.csv",
+    ]
+    # recursive fallback: any reference/ch3.csv under the repo tree
+    candidates += list(HERE.rglob("reference/ch3.csv"))
+    # rarely: within extracted test data
+    candidates.append(extracted_root / "test" / "ch3" / "ch3.csv")
+
+    for c in candidates:
+        if c and c.exists():
+            log(f"Using CH3 map: {c}")
+            return c
+
+    raise FileNotFoundError(
+        "CH3 map not found. Provide with --ch3_map or place ch3.csv under <repo>/reference/"
+    )
 
 def run_integration_for_case(case_id: str, extracted_root: Path, base_out: Path, ch3_map: Path, dry_run: bool):
     """Per-sample integration helper (used when --per-sample-integration is on)."""
@@ -106,10 +141,6 @@ def run_integration_for_case(case_id: str, extracted_root: Path, base_out: Path,
     rna_manifest = mani_out_dir / "rna_manifest.tsv"
     ch3_manifest = mani_out_dir / "ch3_manifest.tsv"
     cn_manifest  = mani_out_dir / "cn_manifest.tsv"
-
-    # Validate CH3 map exists
-    if not ch3_map.exists():
-        raise FileNotFoundError(f"CH3 map not found: {ch3_map}")
 
     cmd_integ = [
         sys.executable, str(HERE / "multiomic_integration.py"),
@@ -148,8 +179,7 @@ def main():
                     help="Only print commands, do not execute")
     ap.add_argument("--per-sample-integration", action="store_true",
                     help="Run multiomic integration per case in parallel using --jobs")
-    ap.add_argument("--ch3_map", default=str(HERE / "ch3.csv"),
-                    help="Path to CH3 probe→gene map (default: ./ch3.csv)")
+    ap.add_argument("--ch3_map", default="", help="Path to CH3 probe→gene map (IllmnID,UCSC_RefGene_Name).")
     args = ap.parse_args()
 
     dry_run = args.dry_run
@@ -165,20 +195,9 @@ def main():
     out_dir = Path(args.out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) Extract test data
-    extracted_root = extract_zip(zip_path, HERE, keep_extracted=args.keep_extracted)
-    if not args.ch3_map or args.ch3_map == str(HERE / "ch3.csv"):
-        candidates = [
-            HERE / "ch3.csv",
-            extracted_root / "test" / "ch3" / "ch3.csv",
-            extracted_root / "ch3" / "ch3.csv",
-            HERE / "reference" / "ch3.csv",
-        ]
-        for c in candidates:
-            if c.exists():
-                args.ch3_map = str(c)
-                log(f"Auto-selected CH3 map: {args.ch3_map}")
-                break
+    # 1) Extract test data **into out_dir** (not the repo)
+    extracted_root = extract_zip(zip_path, out_dir, keep_extracted=args.keep_extracted)
+
     # 2) dna_preprocessor.py
     dna_out = out_dir / "dna"
     dna_out.mkdir(parents=True, exist_ok=True)
@@ -191,7 +210,6 @@ def main():
                     "*vep*.tsv", "*vep*.txt"):
             candidates.extend(extracted_root.rglob(pat))
         if candidates:
-            # prefer known names; fall back to shortest path
             preferred = {"gdc-vep.tsv", "dna_manifest.tsv"}
             candidates.sort(key=lambda p: (0 if p.name in preferred else 1, len(str(p))))
             dna_manifest = candidates[0]
@@ -208,11 +226,26 @@ def main():
     run(cmd_dna, dry_run)
 
     # ensure created dna files are available under extracted_root/dna for convenience
-    produced = out_dir / "dna" / "dna"
+    produced = dna_out / "dna"
     dest = extracted_root / "dna"
     dest.mkdir(parents=True, exist_ok=True)
     for f in produced.glob("*.csv"):
         shutil.copy2(f, dest / f.name)
+
+    # If the case list missed any produced DNA CSVs, union them back in
+    case_list = dna_out / "case_ids.txt"
+    existing_ids = set()
+    if case_list.exists():
+        try:
+            existing_ids = set(read_case_ids(case_list))
+        except Exception:
+            existing_ids = set()
+    produced_ids = {p.stem for p in (dna_out / "dna").glob("case-*.csv")}
+    union_ids = sorted(existing_ids | produced_ids)
+    if union_ids:
+        write_case_ids(case_list, union_ids)
+        if produced_ids - existing_ids:
+            log(f"Augmented case_ids.txt with: {', '.join(sorted(produced_ids - existing_ids))}")
 
     # 3) make_manifest.py
     mani_out_dir = out_dir / "manifests"
@@ -230,20 +263,23 @@ def main():
     integ_out = out_dir / "integration"
     integ_out.mkdir(parents=True, exist_ok=True)
 
-    case_list = dna_out / "case_ids.txt"
     if not case_list.exists():
-        alts = list(dna_out.glob("*case*id*.txt"))
-        if alts:
-            case_list = alts[0]
-        else:
-            raise FileNotFoundError("Case list not found after dna_preprocessor (expected results/dna/case_ids.txt).")
+        raise FileNotFoundError("Case list not found after dna_preprocessor (expected results/dna/case_ids.txt).")
 
     # Validate reference + CH3 map up-front
     reference_zip = (HERE / "reference.zip")
     _assert_reference_here(reference_zip)
-    ch3_map = Path(args.ch3_map).expanduser().resolve()
-    if not ch3_map.exists():
-        raise FileNotFoundError(f"CH3 map not found: {ch3_map}")
+    ch3_map_path = _autodiscover_ch3_map(args.ch3_map, extracted_root)
+
+    # Build explicit refs and manifests based on outputs and test layout
+    raw_rna = extracted_root / "test" / "rna"
+    raw_ch3 = extracted_root / "test" / "ch3"
+    raw_cn  = extracted_root / "test" / "cn"
+    raw_pro = extracted_root / "test" / "protein"
+    dna_out_dir = dna_out / "dna"
+    rna_manifest = mani_out_dir / "rna_manifest.tsv"
+    ch3_manifest = mani_out_dir / "ch3_manifest.tsv"
+    cn_manifest  = mani_out_dir / "cn_manifest.tsv"
 
     if args.per_sample_integration:
         ids = read_case_ids(case_list)
@@ -252,13 +288,13 @@ def main():
         if args.jobs <= 1 or len(ids) <= 1 or dry_run:
             for sid in ids:
                 try:
-                    run_integration_for_case(sid, extracted_root, integ_out, ch3_map, dry_run)
+                    run_integration_for_case(sid, extracted_root, integ_out, ch3_map_path, dry_run)
                 except Exception as e:
                     failed += 1
                     log(f"[WARN] Sample {sid} failed: {e}")
         else:
             with ProcessPoolExecutor(max_workers=args.jobs) as ex:
-                futures = {ex.submit(run_integration_for_case, sid, extracted_root, integ_out, ch3_map, dry_run): sid for sid in ids}
+                futures = {ex.submit(run_integration_for_case, sid, extracted_root, integ_out, ch3_map_path, dry_run): sid for sid in ids}
                 for fut in as_completed(futures):
                     sid = futures[fut]
                     try:
@@ -269,16 +305,6 @@ def main():
         if failed:
             log(f"[WARN] Integration completed with {failed} failed sample(s).")
     else:
-        # Build explicit refs and manifests based on outputs and test layout
-        raw_rna = extracted_root / "test" / "rna"
-        raw_ch3 = extracted_root / "test" / "ch3"
-        raw_cn  = extracted_root / "test" / "cn"
-        raw_pro = extracted_root / "test" / "protein"
-        dna_out_dir = out_dir / "dna" / "dna"
-        rna_manifest = mani_out_dir / "rna_manifest.tsv"
-        ch3_manifest = mani_out_dir / "ch3_manifest.tsv"
-        cn_manifest  = mani_out_dir / "cn_manifest.tsv"
-
         cmd_integ = [
             sys.executable, str(HERE / "multiomic_integration.py"),
             "--folder", str(extracted_root),
@@ -294,7 +320,7 @@ def main():
             "--rna-manifest", str(rna_manifest),
             "--ch3-manifest", str(ch3_manifest),
             "--cn-manifest",  str(cn_manifest),
-            "--ch3_map", str(ch3_map),
+            "--ch3_map", str(ch3_map_path),
             "--ch3_probe_col", "IllmnID",
             "--ch3_symbol_col", "UCSC_RefGene_Name",
             "--ensg_join_mode", "core",
@@ -306,4 +332,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
