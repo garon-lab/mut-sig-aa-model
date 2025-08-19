@@ -21,12 +21,11 @@ What it does:
 - Runs multiomic_integration.py with --folder <extracted_root>, --manifest <case_ids.txt>, --out_dir <out_dir>/integration, --step all.
 
 """
-
 #!/usr/bin/env python3
 import argparse
-import os
 import sys
 from pathlib import Path
+import os
 import zipfile
 import subprocess
 import shutil
@@ -82,12 +81,34 @@ def run_integration_for_case(case_id: str, extracted_root: Path, base_out: Path,
     single_out = base_out / case_id
     single_out.mkdir(parents=True, exist_ok=True)
     tmp_manifest = write_single_id_manifest(base_out / "_tmp_manifests", case_id)
+    # reference + manifests based on outputs
+    mani_out_dir = base_out.parent / "manifests"
+    reference_zip = (HERE / "reference.zip")
+    raw_rna = extracted_root / "test" / "rna"
+    raw_ch3 = extracted_root / "test" / "ch3"
+    raw_cn  = extracted_root / "test" / "cn"
+    raw_pro = extracted_root / "test" / "protein"
+    dna_out_dir = base_out.parent / "dna" / "dna"
+    rna_manifest = mani_out_dir / "rna_manifest.tsv"
+    ch3_manifest = mani_out_dir / "ch3_manifest.tsv"
+    cn_manifest  = mani_out_dir / "cn_manifest.tsv"
+
     cmd_integ = [
         sys.executable, str(HERE / "multiomic_integration.py"),
         "--folder", str(extracted_root),
         "--manifest", str(tmp_manifest),
         "--out_dir", str(single_out),
         "--step", "all",
+        "--ref_zip", str(reference_zip),
+        "--input_dna_dir", str(dna_out_dir),
+        "--input_rna_dir", str(raw_rna),
+        "--input_ch3_dir", str(raw_ch3),
+        "--input_cn_dir",  str(raw_cn),
+        "--input_protein_dir", str(raw_pro),
+        "--rna_manifest", str(rna_manifest),
+        "--ch3_manifest", str(ch3_manifest),
+        "--cn_manifest",  str(cn_manifest),
+        "--ensg_join_mode", "core",
     ]
     run(cmd_integ, dry_run)
     return case_id
@@ -150,18 +171,16 @@ def main():
     ]
     run(cmd_dna, dry_run)
 
-    # patch to ensure created dna files listed in manifest
+    # ensure created dna files are available under extracted_root/dna for convenience
     produced = out_dir / "dna" / "dna"
     dest = extracted_root / "dna"
     dest.mkdir(parents=True, exist_ok=True)
     for f in produced.glob("*.csv"):
         shutil.copy2(f, dest / f.name)
 
-
     # 3) make_manifest.py
     mani_out_dir = out_dir / "manifests"
     mani_out_dir.mkdir(parents=True, exist_ok=True)
-    main_manifest = mani_out_dir / "main_manifest.tsv"
 
     cmd_manifest = [
         sys.executable, str(HERE / "make_manifest.py"),
@@ -171,7 +190,7 @@ def main():
     ]
     run(cmd_manifest, dry_run)
 
-    # 4) multiomic_integration.py
+    # 4) multiomic_integration.py (batch)
     integ_out = out_dir / "integration"
     integ_out.mkdir(parents=True, exist_ok=True)
 
@@ -207,12 +226,33 @@ def main():
         if failed:
             log(f"[WARN] Integration completed with {failed} failed sample(s).")
     else:
+        # Build explicit refs and manifests based on outputs and test layout
+        reference_zip = (HERE / "reference.zip")
+        raw_rna = extracted_root / "test" / "rna"
+        raw_ch3 = extracted_root / "test" / "ch3"
+        raw_cn  = extracted_root / "test" / "cn"
+        raw_pro = extracted_root / "test" / "protein"
+        dna_out_dir = out_dir / "dna" / "dna"
+        rna_manifest = mani_out_dir / "rna_manifest.tsv"
+        ch3_manifest = mani_out_dir / "ch3_manifest.tsv"
+        cn_manifest  = mani_out_dir / "cn_manifest.tsv"
+
         cmd_integ = [
             sys.executable, str(HERE / "multiomic_integration.py"),
             "--folder", str(extracted_root),
             "--manifest", str(case_list),
             "--out_dir", str(integ_out),
             "--step", "all",
+            "--ref_zip", str(reference_zip),
+            "--input_dna_dir", str(dna_out_dir),
+            "--input_rna_dir", str(raw_rna),
+            "--input_ch3_dir", str(raw_ch3),
+            "--input_cn_dir",  str(raw_cn),
+            "--input_protein_dir", str(raw_pro),
+            "--rna_manifest", str(rna_manifest),
+            "--ch3_manifest", str(ch3_manifest),
+            "--cn_manifest",  str(cn_manifest),
+            "--ensg_join_mode", "core",
         ]
         run(cmd_integ, dry_run)
 
@@ -221,24 +261,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# --- Multiomic integration with explicit reference, manifests, and input dirs ---
-subprocess.run([
-    sys.executable, os.path.join(PROJECT_ROOT, "multiomic_integration.py"),
-    "--folder", TEST_DIR,
-    "--manifest", CASE_IDS_TXT,
-    "--out_dir", INTEGRATION_DIR,
-    "--step", "all",
-    "--ref_zip", REFERENCE_ZIP,
-    "--input_dna_dir", DNA_OUT_DIR,
-    "--input_rna_dir", RAW_RNA_DIR,
-    "--input_ch3_dir", RAW_CH3_DIR,
-    "--input_cn_dir",  RAW_CN_DIR,
-    "--input_protein_dir", RAW_PRO_DIR,
-    "--rna_manifest", RNA_MANIFEST,
-    "--ch3_manifest", CH3_MANIFEST,
-    "--cn_manifest",  CN_MANIFEST,
-    "--ensg_join_mode", "core"
-], check=True)
-
