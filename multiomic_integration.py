@@ -409,20 +409,34 @@ def integrate_gene_annotations(base_df: pd.DataFrame, ref_dir: Optional[Path], c
     if ref_dir is None:
         return base_df
     df = base_df.copy()
+
     sym_fp = _find_ref_file(ref_dir, "esng_gene-sym.txt")
     name_fp = _find_ref_file(ref_dir, "gene-sym_name.txt")
+
     if sym_fp:
         m = _read_any_table(sym_fp, sep="\t", names=["Gene", "Ensembl"]).drop_duplicates()
+        m["Gene"] = m["Gene"].astype(str).str.strip()
         m["Ensembl_core"] = _norm_ensg_ser(m["Ensembl"])
         m = m.drop_duplicates(subset=["Ensembl_core"], keep="first")
         df = df.merge(m[["Gene", "Ensembl_core"]], how="left",
                       left_on="ENSGene_core", right_on="Ensembl_core")
     else:
         logging.warning(f"[DNA] {case_id}: Gene symbol map not found in reference")
+
     if name_fp and "Gene" in df.columns:
         n = _read_any_table(name_fp, sep="\t", names=["symbol", "name"]).drop_duplicates()
+        n["symbol"] = n["symbol"].astype(str).str.strip()
+        n["name"] = n["name"].astype(str).str.strip()
         n = n.drop_duplicates(subset=["symbol"], keep="first")
         df = df.merge(n, how="left", left_on="Gene", right_on="symbol")
+
+    # Cleanup
+    for col in ("Ensembl_core", "symbol"):
+        if col in df.columns:
+            df = df.drop(columns=[col])
+    if "name" in df.columns and "Gene_Name" not in df.columns:
+        df = df.rename(columns={"name": "Gene_Name"})
+
     return df
 
 
