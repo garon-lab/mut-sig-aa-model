@@ -574,22 +574,81 @@ def _ch3_from_manifest(ch3_dir: Path, case_id: str, ch3_manifest: Optional[str])
         logging.warning(f"[CH3] {case_id}: cannot resolve path from manifest.")
         return None
 
-    # If the manifest points directly to a table, use it; else search for a cg/beta TSV
+    # Find candidate file
     candidate = root_or_file if root_or_file.is_file() else None
     if candidate is None:
         for p in root_or_file.rglob("*.tsv"):
             try:
-                head = pd.read_csv(p, sep="\t", dtype=str, nrows=16)
-                lc = {c.lower(): c for c in head.columns}
-                if (lc.get("cg") or lc.get("ilmnid") or lc.get("composite element ref")) and \
-                   (lc.get("beta") or lc.get("beta_value") or lc.get("beta value")):
+                # Lightweight sniff of 1 row to avoid loading big tables unnecessarily
+                head = pd.read_csv(p, sep="\t", dtype=str, nrows=1, header=None)
+                if head.shape[1] >= 2:
                     candidate = p
                     break
             except Exception:
                 continue
     if candidate is None:
-        logging.warning(f"[CH3] {case_id}: could not locate cg/beta table under {root_or_file}")
+        logging.warning(f"[CH3] {case_id}: could not locate a cg/beta table under {root_or_file}")
         return None
+
+    # Heuristic: headerless two-column file like "cg01234567\t0.1234"
+    def _looks_headerless(path: Path) -> bool:
+        import gzip, io, re
+        opener = gzip.open if path.suffix == ".gz" else open
+        try:
+            with opener(path, "rt", encoding="utf-8", errors="ignore") as fh:
+                first = fh.readline().strip()
+        except Exception:
+            return False
+        parts = first.split("\t")
+        if len(parts) < 2:
+            return False
+        probe, beta = parts[0], parts[1]
+        if not re.match(r"^cg\d{5,}$", probe, flags=re.IGNORECASE):
+            return False
+        try:
+            val = float(beta)
+            return 0.0 <= val <= 1.0
+        except ValueError:
+            return False
+
+    headerless = _looks_headerless(candidate)
+
+    try:
+        if headerless:
+            full = pd.read_csv(candidate, sep="\t", dtype=str, header=None, names=["probe", "beta"])
+        else:
+            full = pd.read_csv(candidate, sep="\t", dtype=str)
+            lc = {c.lower().strip(): c for c in full.columns}
+            probe_col = lc.get("cg") or lc.get("ilmnid") or lc.get("composite element ref") or lc.get("probe") or None
+            beta_col  = lc.get("beta") or lc.get("beta_value") or lc.get("beta value") or lc.get("value") or None
+            if probe_col is None or beta_col is None:
+                # Fall back: if exactly two columns and both look like probe/beta, coerce
+                if full.shape[1] >= 2:
+                    c0, c1 = full.columns[:2]
+                    try:
+                        # try to coerce second col to float to verify
+                        _ = pd.to_numeric(full[c1], errors="coerce")
+                        full = full.rename(columns={c0: "probe", c1: "beta"})
+                    except Exception:
+                        logging.warning(f"[CH3] {case_id}: unable to identify probe/beta columns in {candidate.name}; "
+                                        f"found probe_col={probe_col}, beta_col={beta_col}. "
+                                        f"Available columns (first 10): {list(full.columns)[:10]}")
+                        return None
+                else:
+                    logging.warning(f"[CH3] {case_id}: unable to identify probe/beta columns in {candidate.name}; "
+                                    f"Available columns: {list(full.columns)}")
+                    return None
+            else:
+                full = full.rename(columns={probe_col: "probe", beta_col: "beta"})
+    except Exception as e:
+        logging.warning(f"[CH3] {case_id}: failed reading {candidate.name}: {e}")
+        return None
+
+    # Clean and coerce
+    full["probe"] = full["probe"].astype(str).str.strip()
+    full["beta"]  = pd.to_numeric(full["beta"], errors="coerce")
+    out = full.dropna(subset=["probe"])
+    return out[["probe", "beta"]]
 
     full = pd.read_csv(candidate, sep="\t", dtype=str)
 
