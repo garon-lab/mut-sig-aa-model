@@ -181,8 +181,7 @@ def _verify_results(integration_dir: Path, keep_join_cols: bool = False,
 
     # Linkers we expect to be removed in soft-cleanup
     linker_exact = {
-        "ENSGene", "ENSGene_core", "Ensembl_core", "Ensembl_full",
-        "Gene", "Gene_Name", "symbol", "probe", "To_core", "From", "UniProt",
+        "ENSGene", "ENSGene_core", "Ensembl_core", "Ensembl_full", "Gene_Name", "symbol", "probe", "To_core", "From", "UniProt",
     }
     linker_suffixes = ("_core", "_probe")
 
