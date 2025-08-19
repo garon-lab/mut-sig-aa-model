@@ -783,16 +783,26 @@ def process_one_case(case_id: str,
 
         if do_rna:
             base = integrate_rna(base, rna_dir_p, case_id, ensg_join_mode, synth_overlap, rna_manifest)
+        
         if do_ch3:
             base = integrate_ch3(base, ch3_dir_p, case_id, ensg_join_mode, ch3_map, ref_p,
                                  ch3_probe_col, ch3_ensg_col, ch3_symbol_col, ch3_agg, ch3_manifest)
         if do_pro:
             base = integrate_protein(base, protein_dir_p, case_id, synth_overlap)
+        
         if do_cnv:
             base = integrate_cnv(base, cn_dir_p, case_id, ensg_join_mode, synth_overlap, cn_manifest)
+        
+        # ---------- 2) Rename integrated columns ----------
+        rename_map = {
+            "Count": "RNA_Count",
+            "beta_val": "CH3_Beta",
+            "copy_number": "CNV_Count",
+        }
+        base = base.rename(columns={k: v for k, v in rename_map.items() if k in base.columns})
 
         base = _final_dedup(base, dedup_level, dedup_key_cols)
-
+        
         # ---------- Soft cleanup (default) ----------
         if not keep_join_cols:
             # 1) Drop common linkers created during merges
@@ -805,8 +815,8 @@ def process_one_case(case_id: str,
             to_drop = [c for c in base.columns
                        if c in linker_exact or any(c.endswith(sfx) for sfx in linker_suffixes)]
             
-          # Keep ENSGene (pretty) and Gene for readability
-            to_drop = [c for c in to_drop if c not in {"ENSGene", "Gene"}]
+            # Keep ENSGene (pretty) and Gene for readability
+            to_drop = [c for c in to_drop if c not in {"Gene"}]
             if to_drop:
                 base = base.drop(columns=sorted(set(to_drop)), errors="ignore")
 
@@ -817,16 +827,6 @@ def process_one_case(case_id: str,
                 seq_idx = cols.index("SEQ")
                 cols.insert(seq_idx, "NP")
                 base = base[cols]
-        
-            # 2) Rename integrated columns (unless user says not to)
-            if not args.no_rename_integrations:
-                rename_map = {
-                    "Count": "RNA_Count",
-                    "beta_val": "CH3_Beta",
-                    "copy_number": "CNV_Count",
-                }
-                base = base.rename(columns={k: v for k, v in rename_map.items() if k in base.columns}
-                )
 
         out_fp = out_dir_p / f"{case_id}_integrated.csv"
         base.to_csv(out_fp, index=False)
