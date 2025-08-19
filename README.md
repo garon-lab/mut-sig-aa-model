@@ -48,11 +48,19 @@ Each script provides detailed help with the `--help` flag.
 
 ## Quick Start
 
-To verify installation, the `run_sample_pipeline.py` script will:  
-- Download dependencies  
-- Use test.zip to ensure all components are functioning as expected  
+To verify installation, you can:  
+
+- Run `validate_build.py` to check syntax, entrypoints, and optional smoke tests  
+- Run `run_sample_pipeline.py` with the provided test.zip to confirm all components  
 
 ```bash
+# Lightweight build validation
+python validate_build.py --out_dir validate_results
+
+# Optional smoke test
+python validate_build.py --smoke
+
+# Full functional test
 python run_sample_pipeline.py -out_dir OUT_DIR
 ```
 
