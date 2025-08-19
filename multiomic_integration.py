@@ -865,7 +865,7 @@ def process_one_case(case_id: str,
             # 1) Drop common linkers created during merges
             linker_exact = {
                 "ENSGene", "ENSGene_core", "Ensembl_core", "Ensembl_full",
-                "symbol", "probe", "To_core", "From", "Gene_Name", "UniProt", 
+                "symbol", "probe", "To_core", "From", "Gene_Name", "UniProt", "NP", "CpG_Probes" 
             }
             # also drop any accidental suffixed variants like 'ENSGene_core_probe'
             linker_suffixes = tuple(["_core", "_probe"])
@@ -876,6 +876,24 @@ def process_one_case(case_id: str,
             to_drop = [c for c in to_drop if c not in {"Gene"}]
             if to_drop:
                 base = base.drop(columns=sorted(set(to_drop)), errors="ignore")
+            
+            # Reorder NP and CNV_Count to appear just before SEQ if present
+            if "SEQ" in base.columns:
+                cols = list(base.columns)
+            
+                # Ensure NP is right before SEQ
+                if "NP" in cols:
+                    cols.remove("NP")
+                    seq_idx = cols.index("SEQ")
+                    cols.insert(seq_idx, "NP")
+            
+                # Ensure CNV_Count is right before SEQ (and before NP if both exist)
+                if "CNV_Count" in cols:
+                    cols.remove("CNV_Count")
+                    seq_idx = cols.index("SEQ")
+                    cols.insert(seq_idx, "CNV_Count")
+
+                base = base[cols]
 
         out_fp = out_dir_p / f"{case_id}_integrated.csv"
         base.to_csv(out_fp, index=False)
