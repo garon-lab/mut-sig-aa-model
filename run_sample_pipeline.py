@@ -112,9 +112,9 @@ def run_integration_for_case(case_id: str, extracted_root: Path, base_out: Path,
         "--input_ch3_dir", str(raw_ch3),
         "--input_cn_dir",  str(raw_cn),
         "--input_protein_dir", str(raw_pro),
-        "--rna_manifest", str(rna_manifest),
-        "--ch3_manifest", str(ch3_manifest),
-        "--cn_manifest",  str(cn_manifest),
+        "--rna-manifest", str(rna_manifest),
+        "--ch3-manifest", str(ch3_manifest),
+        "--cn-manifest",  str(cn_manifest),
         "--ensg_join_mode", "core",
     ]
     run(cmd_integ, dry_run)
@@ -259,9 +259,9 @@ def main():
             "--input_ch3_dir", str(raw_ch3),
             "--input_cn_dir",  str(raw_cn),
             "--input_protein_dir", str(raw_pro),
-            "--rna_manifest", str(rna_manifest),
-            "--ch3_manifest", str(ch3_manifest),
-            "--cn_manifest",  str(cn_manifest),
+            "--rna-manifest", str(rna_manifest),
+            "--ch3-manifest", str(ch3_manifest),
+            "--cn-manifest",  str(cn_manifest),
             "--ensg_join_mode", "core",
         ]
         run(cmd_integ, dry_run)
