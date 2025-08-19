@@ -24,7 +24,6 @@ What it does:
 import argparse
 import sys
 from pathlib import Path
-import os
 import zipfile
 import subprocess
 import shutil
@@ -80,25 +79,37 @@ def _assert_reference_here(reference_zip: Path) -> None:
     if not reference_zip.exists():
         raise FileNotFoundError(
             f"reference.zip not found at {reference_zip}. "
-            "Place your reference.zip next to this script or update the path in run_sample_pipeline.py."
+            "Place your reference.zip next to this script or pass a different path."
         )
 
-def run_integration_for_case(case_id: str, extracted_root: Path, base_out: Path, dry_run: bool):
+def run_integration_for_case(case_id: str, extracted_root: Path, base_out: Path, ch3_map: Path, dry_run: bool):
+    """Per-sample integration helper (used when --per-sample-integration is on)."""
     single_out = base_out / case_id
     single_out.mkdir(parents=True, exist_ok=True)
     tmp_manifest = write_single_id_manifest(base_out / "_tmp_manifests", case_id)
+
     # reference + manifests based on outputs
     mani_out_dir = base_out.parent / "manifests"
     reference_zip = (HERE / "reference.zip")
     _assert_reference_here(reference_zip)
+
+    # Raw modality roots under extracted test set
     raw_rna = extracted_root / "test" / "rna"
     raw_ch3 = extracted_root / "test" / "ch3"
     raw_cn  = extracted_root / "test" / "cn"
     raw_pro = extracted_root / "test" / "protein"
+
+    # DNA outputs produced by dna_preprocessor
     dna_out_dir = base_out.parent / "dna" / "dna"
+
+    # Manifests written by make_manifest.py
     rna_manifest = mani_out_dir / "rna_manifest.tsv"
     ch3_manifest = mani_out_dir / "ch3_manifest.tsv"
     cn_manifest  = mani_out_dir / "cn_manifest.tsv"
+
+    # Validate CH3 map exists
+    if not ch3_map.exists():
+        raise FileNotFoundError(f"CH3 map not found: {ch3_map}")
 
     cmd_integ = [
         sys.executable, str(HERE / "multiomic_integration.py"),
@@ -137,6 +148,8 @@ def main():
                     help="Only print commands, do not execute")
     ap.add_argument("--per-sample-integration", action="store_true",
                     help="Run multiomic integration per case in parallel using --jobs")
+    ap.add_argument("--ch3_map", default=str(HERE / "ch3.csv"),
+                    help="Path to CH3 probe→gene map (default: ./ch3.csv)")
     args = ap.parse_args()
 
     dry_run = args.dry_run
@@ -214,6 +227,13 @@ def main():
         else:
             raise FileNotFoundError("Case list not found after dna_preprocessor (expected results/dna/case_ids.txt).")
 
+    # Validate reference + CH3 map up-front
+    reference_zip = (HERE / "reference.zip")
+    _assert_reference_here(reference_zip)
+    ch3_map = Path(args.ch3_map).expanduser().resolve()
+    if not ch3_map.exists():
+        raise FileNotFoundError(f"CH3 map not found: {ch3_map}")
+
     if args.per_sample_integration:
         ids = read_case_ids(case_list)
         log(f"Per-sample integration enabled with --jobs={args.jobs} for N={len(ids)} cases")
@@ -221,13 +241,13 @@ def main():
         if args.jobs <= 1 or len(ids) <= 1 or dry_run:
             for sid in ids:
                 try:
-                    run_integration_for_case(sid, extracted_root, integ_out, dry_run)
+                    run_integration_for_case(sid, extracted_root, integ_out, ch3_map, dry_run)
                 except Exception as e:
                     failed += 1
                     log(f"[WARN] Sample {sid} failed: {e}")
         else:
             with ProcessPoolExecutor(max_workers=args.jobs) as ex:
-                futures = {ex.submit(run_integration_for_case, sid, extracted_root, integ_out, dry_run): sid for sid in ids}
+                futures = {ex.submit(run_integration_for_case, sid, extracted_root, integ_out, ch3_map, dry_run): sid for sid in ids}
                 for fut in as_completed(futures):
                     sid = futures[fut]
                     try:
@@ -239,8 +259,6 @@ def main():
             log(f"[WARN] Integration completed with {failed} failed sample(s).")
     else:
         # Build explicit refs and manifests based on outputs and test layout
-        reference_zip = (HERE / "reference.zip")
-        _assert_reference_here(reference_zip)
         raw_rna = extracted_root / "test" / "rna"
         raw_ch3 = extracted_root / "test" / "ch3"
         raw_cn  = extracted_root / "test" / "cn"
@@ -277,3 +295,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
