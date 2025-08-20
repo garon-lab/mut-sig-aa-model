@@ -52,7 +52,10 @@ AA3_TO_1: Dict[str, str] = {
     "SER":"S","THR":"T","TRP":"W","TYR":"Y","VAL":"V",
     "TER":"*", "STOP":"*"
 }
-AA1_SET = set(list("ARNDCQEGHILKMFPSTWYV") + ["X"])  # 'X' used for STOP here
+
+# Use 'X' consistently for stop in column names
+AA_1 = list("ARNDCQEGHILKMFPSTWYV") + ["X"]                 # 21 symbols with X=stop
+PAIR_COLS = [a + b for a in AA_1 for b in AA_1]             # 441 AA-pair columns, canonical order
 
 def _normalize_id_col(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {
@@ -80,8 +83,8 @@ def normalize_aa_cols(df: pd.DataFrame) -> pd.DataFrame:
     raise KeyError("Could not find AA start/end columns; expected one of "
                    "ST/END, FromAA/ToAA, from/to, RefAA/AltAA, Ref_AA/Alt_AA")
 
-def _norm_symbol_to_one_letter_or_X(x: object) -> Optional[str]:
-    """Map row/col headers to 1-letter AA; STOP/*/TER/Ter/X => 'X'."""
+def _to_one_letter_or_X(x: object) -> Optional[str]:
+    """Map labels to 1-letter AA; STOP/*/TER/Ter/X => 'X'."""
     if x is None:
         return None
     s = str(x).strip()
@@ -90,9 +93,8 @@ def _norm_symbol_to_one_letter_or_X(x: object) -> Optional[str]:
     su = s.upper()
     if su in ("*", "STOP", "TER", "TERM", "X"):
         return "X"
-    if len(su) == 1 and su in AA1_SET.union(set("ARNDCQEGHILKMFPSTWYV")):
-        # If plain 1-letter but not X (stop), return as-is; X already handled
-        return su if su != "*" else "X"
+    if len(su) == 1 and su in AA_1:
+        return su
     if len(su) == 3 and su in AA3_TO_1:
         one = AA3_TO_1[su]
         return "X" if one == "*" else one
@@ -112,200 +114,207 @@ HEADING = ['AE','AG','AP','AS','AT','AV','CF','CG','CR','CS','CW','CX','CY',
            'WL','WR','WS','WX','XC','XE','XG','XK','XL','XQ','XR','XS','XW','XY','YC',
            'YD','YF','YH','YN','YS','YX']
 
+CANON_COLS = HEADING
+CANON_SET  = set(CANON_COLS)
+
+# Ensure all HEADING codes are valid AA pairs from AA (incl. X)
+_invalid = [c for c in CANON_COLS if len(c)!=2 or c[0] not in AA or c[1] not in AA]
+if _invalid:
+    raise ValueError(f"HEADING has invalid codes: {_invalid[:5]}{'...' if len(_invalid)>5 else ''}")
+   
 # ---------- IO & Vectorization ----------
 
-def _read_manifest_ids(manifest_path: Optional[str]) -> Optional[Set[str]]:
-    if not manifest_path:
-        return None
-    m = pd.read_table(manifest_path, header=None).iloc[:, 0].astype(str)
-    return set(m)
-
-def _collect_observed_tall(observed_dir: str, manifest_ids: Optional[Set[str]]) -> pd.DataFrame:
+def _read_one_sample_csv(fp: Path) -> pd.Series:
     """
-    Ingest all 'tall' observed CSVs: must contain ID, ST, END and (optionally) Count.
-    If Count is missing, assume Count=1 for each row.
+    Accepts either:
+      (a) tall format with columns like ST/END/(Count|count) or
+      (b) 21x21 matrix (rows=AA, cols=AA) possibly with first col as row labels.
+    Returns a 441-length Series indexed by PAIR_COLS with counts.
     """
-    parts = []
-    for fp in Path(observed_dir).glob("*.csv"):
-        try:
-            df = pd.read_csv(fp)
-            df = _normalize_id_col(df)
-            df = normalize_aa_cols(df)
-            if 'Count' not in df.columns:
-                df['Count'] = 1
-            if manifest_ids is not None:
-                df = df[df['ID'].astype(str).isin(manifest_ids)]
-            parts.append(df[['ID','ST','END','Count']])
-        except Exception as e:
-            logging.debug(f"[tall adapter] skipping {fp.name}: {e}")
-    if not parts:
-        raise FileNotFoundError("No tall-format files found.")
-    return pd.concat(parts, ignore_index=True)
+    df = pd.read_csv(fp)
 
-def _vectorize_one_matrix_file(fp: Path) -> Optional[pd.DataFrame]:
-    """
-    Read a single 21×21-like matrix and return a 1-row DataFrame with columns in HEADING.
-    File name stem is used as sample ID.
-    """
-    try:
-        raw = pd.read_csv(fp, index_col=0)
-    except Exception as e:
-        logging.debug(f"[matrix adapter] cannot read {fp.name}: {e}")
-        return None
+    # --- try tall ---
+    lower = {c.lower(): c for c in df.columns}
+    def _has(*names): return all(n in lower for n in names)
+    if _has('st','end') or _has('fromaa','toaa') or _has('refaa','altaa') or _has('from','to') or _has('ref_aa','alt_aa'):
+        # normalize column names
+        for left,right in [('st','end'),('fromaa','toaa'),('from','to'),('refaa','altaa'),('ref_aa','alt_aa')]:
+            if left in lower and right in lower:
+                df = df.rename(columns={lower[left]:'ST', lower[right]:'END'})
+                break
+        cnt_col = lower.get('count') or 'Count'
+        if cnt_col not in df.columns:
+            df[cnt_col] = 1
+        # normalize AA to one-letter with X for stop
+        df['ST'] = df['ST'].apply(_to_one_letter_or_X)
+        df['END'] = df['END'].apply(_to_one_letter_or_X)
+        df = df[df['ST'].isin(AA_1) & df['END'].isin(AA_1)]
+        # build vector
+        g = df.groupby(['ST','END'])[cnt_col].sum()
+        vec = pd.Series(0.0, index=CANON_COLS, dtype=float)
+        for (s, e), v in g.items():
+            code = f"{s}{e}"
+            if code in CANON_SET:
+                vec[code] += float(v)
+      # ignore codes not in HEADING
+        return vec
 
-    # Normalize axis labels and choose orientation that yields more valid AA labels
-    rows_norm = [ _norm_symbol_to_one_letter_or_X(x) for x in raw.index ]
-    cols_norm = [ _norm_symbol_to_one_letter_or_X(x) for x in raw.columns ]
-    row_valid = sum(1 for r in rows_norm if r in AA1_SET)
-    col_valid = sum(1 for c in cols_norm if c in AA1_SET)
+    # --- try 21x21 matrix ---
+    # If first column is index of AAs, set it as index (common in saved matrices)
+    if df.shape[1] >= 2:
+        # Prefer first column as index if it looks like row labels
+        df = df.set_index(df.columns[0])
+    # normalize axis labels
+    rows_norm = [ _to_one_letter_or_X(x) for x in df.index ]
+    cols_norm = [ _to_one_letter_or_X(x) for x in df.columns ]
+    row_valid = sum(1 for r in rows_norm if r in AA_1)
+    col_valid = sum(1 for c in cols_norm if c in AA_1)
 
-    mat = raw.copy()
+    mat = df.copy()
     if row_valid < col_valid:
         mat = mat.T
         rows_norm, cols_norm = cols_norm, rows_norm
-        row_valid, col_valid = col_valid, row_valid
 
-    # Apply normalized labels
+    # apply normalized labels, keep only valid AAs
     mat.index = rows_norm
     mat.columns = cols_norm
-    # Keep only valid AAs
-    mat = mat.loc[[r for r in mat.index if r in AA1_SET],
-                  [c for c in mat.columns if c in AA1_SET]]
+    mat = mat.loc[[r for r in mat.index if r in AA_1],
+                  [c for c in mat.columns if c in AA_1]]
     if mat.empty:
-        return None
+        raise ValueError(f"{fp.name}: could not recognize AA labels for a 21x21 matrix.")
 
-    # Force numeric
     mat = mat.apply(pd.to_numeric, errors='coerce').fillna(0)
 
-    # Build row for this sample
-    sample_id = fp.stem
-    row = {'ID': sample_id}
-    for code in HEADING:
-        st, en = code[0], code[1]
-        val = 0
-        if st in mat.index and en in mat.columns:
-            v = mat.at[st, en]
-            try:
-                val = float(v)
-            except Exception:
-                val = 0
-        row[code] = val
-    row['SUM'] = sum(row[c] for c in HEADING)
-    return pd.DataFrame([row], columns=['ID','SUM'] + HEADING)
+    vec = pd.Series(0.0, index=CANON_COLS, dtype=float)
+    for r in mat.index:
+        for c in mat.columns:
+            code = r + c
+            if code in CANON_SET:
+                vec[code] = float(mat.at[r, c])
+    return vec
 
-def _collect_observed_matrices(observed_dir: str, manifest_ids: Optional[Set[str]]) -> pd.DataFrame:
-    rows = []
-    for fp in Path(observed_dir).glob("*.csv"):
-        if manifest_ids and fp.stem not in manifest_ids:
-            continue
-        r = _vectorize_one_matrix_file(fp)
-        if r is not None:
-            rows.append(r)
-    if not rows:
-        raise FileNotFoundError("No matrix-format files could be vectorized.")
-    return pd.concat(rows, ignore_index=True)
+
+def summarize_dir(dir_path: str, manifest_path: Optional[str]=None) -> pd.DataFrame:
+    """
+    Build a vectors table from a directory of per-sample CSVs.
+    Returns DataFrame with columns: ID, SUM, <441 AA-pair cols>
+    """
+    dirp = Path(dir_path)
+    samples = []
+    for fp in sorted(dirp.glob("*.csv")):
+        try:
+            vec = _read_one_sample_csv(fp)
+            samples.append((fp.stem, vec))
+        except Exception as e:
+            logging.warning(f"Skipping {fp.name}: {e}")
+
+    if not samples:
+        raise FileNotFoundError(f"No usable CSVs found in {dir_path}")
+
+    df = pd.DataFrame({sid: v for sid, v in samples}).T
+    df.index.name = 'ID'
+    df = df.reindex(columns=CANON_COLS, fill_value=0.0)
+    df.insert(0, 'SUM', df.sum(axis=1))
+
+    # optional manifest filter (IDs in first column)
+    if manifest_path:
+        ids = pd.read_table(manifest_path, header=None).iloc[:,0].astype(str)
+        df = df[df.index.isin(set(ids))]
+
+    return df.reset_index()
 
 def summarize_observed(observed_dir: str, out_dir: str, manifest_path: Optional[str]) -> pd.DataFrame:
-    """
-    Produce out_dir/summary.csv
-    Columns: ID, SUM, <AA-pairs in HEADING...>
-    Auto-detect tall vs matrix inputs.
-    """
-    manifest_ids = _read_manifest_ids(manifest_path)
-
-    # Try tall first, fall back to matrix adapter
-    try:
-        tall = _collect_observed_tall(observed_dir, manifest_ids)
-        tall['code'] = tall['ST'].astype(str) + tall['END'].astype(str)
-        piv = tall.pivot_table(index='ID', columns='code', values='Count',
-                               aggfunc='sum', fill_value=0)
-        for c in HEADING:
-            if c not in piv.columns:
-                piv[c] = 0
-        piv = piv[HEADING]
-        piv.insert(0, 'SUM', piv.sum(axis=1))
-        out_df = piv.reset_index()
-        logging.info("Summarized observed (tall format detected).")
-    except Exception:
-        # Matrix adapter
-        out_df = _collect_observed_matrices(observed_dir, manifest_ids)
-        # Ensure ordering
-        out_df = out_df[['ID','SUM'] + HEADING]
-        logging.info("Summarized observed (matrix format detected).")
-
-    out_path = Path(out_dir) / "summary.csv"
-    out_df.to_csv(out_path, index=False)
+    df = summarize_dir(observed_dir, manifest_path)
+    out_path = Path(out_dir)/"summary.csv"
+    df.to_csv(out_path, index=False)
     logging.info(f"Saved summary -> {out_path}")
-    return out_df
+    return df
 
-def load_comparison(comparison_dir: str, comparison_csv: Optional[str] = None) -> pd.DataFrame:
+def load_comparison(comparison_dir: str,
+                    comparison_csv: Optional[str] = None,
+                    manifest_path: Optional[str] = None,
+                    out_dir: Optional[str] = None) -> pd.DataFrame:
     """
-    Load comparison/reference vectors. Default file name: comp_dir/comparison_vectors.csv
-    Must have an ID (first column if unnamed) and AA-pair columns.
-    Returns dataframe indexed by ID with only AA-pair columns (ordered by HEADING when present).
+    Load comparison vectors. If a combined CSV isn’t provided/found, build it from the directory.
+    Returns a DataFrame indexed by ID (no SUM column), with AA-pair columns aligned to PAIR_COLS.
     """
-    path = Path(comparison_csv) if comparison_csv else Path(comparison_dir) / "comparison_vectors.csv"
-    df = pd.read_csv(path)
+    # Prefer explicit file
+    if comparison_csv:
+        path = Path(comparison_csv)
+        if not path.exists():
+            raise FileNotFoundError(f"--comparison_csv not found: {path}")
+        df = pd.read_csv(path)
+    else:
+        # Try common filenames inside the folder
+        candidates = ["comparison_vectors.csv", "comparison_summary.csv", "summary.csv"]
+        path = next((Path(comparison_dir)/name for name in candidates
+                     if (Path(comparison_dir)/name).exists()), None)
+        if path is not None:
+            df = pd.read_csv(path)
+        else:
+            if not comparison_dir:
+                raise SystemExit("Provide --comparison-dir or --comparison-csv for comparison steps.")
+            logging.info("No precomputed comparison vectors found; summarizing comparison_dir …")
+            built = summarize_dir(comparison_dir, manifest_path)
+            if out_dir:
+                outp = Path(out_dir)/"comparison_summary.csv"
+                built.to_csv(outp, index=False)
+                logging.info(f"Wrote comparison summary -> {outp}")
+            df = built
+
     if 'ID' not in df.columns:
-        df = df.rename(columns={df.columns[0]: 'ID'})
+        df = df.rename(columns={df.columns[0]:'ID'})
     df = df.set_index('ID')
+    df = df.drop(columns=['SUM'], errors='ignore')
+    missing = [c for c in CANON_COLS if c not in df.columns]
+    if missing:
+        logging.warning(f"Comparison vectors missing {len(missing)} codes from HEADING "
+                        f"(filling 0). Example: {missing[:10]}")
+    df = df.reindex(columns=CANON_COLS, fill_value=0.0)
+    return df
 
-    cols_present = [c for c in HEADING if c in df.columns]
-    if not cols_present:
-        raise ValueError(f"Comparison vectors file '{path}' has no AA-pair columns matching the 21×21 codes.")
-    if len(cols_present) < len(HEADING):
-        logging.warning(f"Comparison vectors missing {len(HEADING) - len(cols_present)} AA codes (will align to overlap).")
-
-    return df[cols_present]
 
 # ---------- Comparisons & Plots ----------
 
-def compare_vectors(observed_summary: pd.DataFrame, comparison_df: pd.DataFrame, out_dir: str) -> pd.DataFrame:
-    """
-    Cosine similarity between observed (rows=samples) and comparison (rows=reference labels).
-    observed_summary must have columns: ID, SUM, <AA-pairs...>
-    """
+def compare_vectors(observed_summary: pd.DataFrame,
+                    comparison_df: pd.DataFrame,
+                    out_dir: str,
+                    outfile: str = "similarity_matrix.csv") -> pd.DataFrame:
     obs = observed_summary.set_index('ID').drop(columns=['SUM'], errors='ignore')
     common = [c for c in obs.columns if c in comparison_df.columns]
     if not common:
-        raise ValueError("No overlapping AA-pair columns between observed and comparison.")
-
+        raise ValueError("No overlapping AA-pair columns.")
     X = obs[common].to_numpy(dtype=float)
     Y = comparison_df[common].to_numpy(dtype=float)
-
     Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-12)
     Yn = Y / (np.linalg.norm(Y, axis=1, keepdims=True) + 1e-12)
     sims = Xn @ Yn.T
-
     sim_df = pd.DataFrame(sims, index=obs.index, columns=comparison_df.index)
-    out_path = Path(out_dir) / "similarity_matrix.csv"
+    out_path = Path(out_dir)/outfile
     sim_df.to_csv(out_path)
     logging.info(f"Saved similarity matrix -> {out_path}")
     return sim_df
 
 def plot_similarity_heatmap(sim_df: pd.DataFrame, out_dir: str, name: str = "heatmap.png"):
-    plt.figure(figsize=(10, 10))
+    plt.figure(figsize=(10,10))
     sb.heatmap(sim_df.astype(float), cmap='viridis')
-    out_path = Path(out_dir) / name
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=200)
-    plt.close()
+    out_path = Path(out_dir)/name
+    plt.tight_layout(); plt.savefig(out_path); plt.close()
     logging.info(f"Saved heatmap -> {out_path}")
 
-def plot_clustermap(summary_df: pd.DataFrame, out_dir: str, proportions: bool = False, name: Optional[str] = None):
+def plot_clustermap_vectors(vectors_df: pd.DataFrame, out_dir: str, normalize_rows: bool = True, name: Optional[str]=None):
     """
-    Clustermap of sample-by-AApair matrix (counts or row-wise proportions).
-    summary_df columns: ID, SUM, AA-pairs...
+    Cluster map of sample x AA-pair vectors (optionally row-normalized to proportions).
+    If normalize_rows=True, rows are converted to % composition.
     """
-    mat = summary_df.set_index('ID').drop(columns=['SUM'], errors='ignore').copy()
-    if proportions:
-        denom = summary_df.set_index('ID')['SUM'].replace(0, np.nan)
-        mat = mat.div(denom, axis=0).fillna(0) * 100.0  # percent
-    cm = sb.clustermap(mat.T, metric='cosine', method='average', cmap='viridis',
-                       figsize=(18, 22))
-    out_path = Path(out_dir) / (name or ("clustermap_prop.png" if proportions else "clustermap_counts.png"))
-    cm.savefig(out_path, dpi=200)
-    plt.close(cm.fig)
+    X = vectors_df.set_index('ID').drop(columns=['SUM'], errors='ignore')
+    if normalize_rows:
+        X = X.div(X.sum(axis=1).replace(0, np.nan), axis=0).fillna(0) * 100.0
+    g = sb.clustermap(X, metric='cosine', cmap='viridis', figsize=(14, 12))
+    if name is None:
+        name = "clustermap_proportions.png" if normalize_rows else "clustermap_counts.png"
+    out_path = Path(out_dir)/name
+    g.fig.savefig(out_path); plt.close(g.fig)
     logging.info(f"Saved clustermap -> {out_path}")
 
 # ---------- Single-file utilities ----------
@@ -318,38 +327,32 @@ def _read_summary_csv(vector_file: str) -> pd.DataFrame:
     df = pd.read_csv(vector_file)
     if 'ID' not in df.columns:
         df = df.rename(columns={df.columns[0]: 'ID'})
-    cols_present = [c for c in HEADING if c in df.columns]
+    # keep only known pair columns
+    cols_present = [c for c in CANON_COLS if c in df.columns]
     if 'SUM' not in df.columns:
         df['SUM'] = df[cols_present].sum(axis=1)
-    # reorder
     return df[['ID','SUM'] + cols_present]
 
-def single_file_plots(vector_file: str, out_dir: str):
-    """
-    From a precomputed vector CSV -> heatmaps and clustermaps (counts + proportions).
-    """
-    df = _read_summary_csv(vector_file)
-
-    # counts heatmap
-    mat_counts = df.set_index('ID').drop(columns=['SUM'], errors='ignore').T
-    plt.figure(figsize=(18, 12))
-    sb.heatmap(mat_counts, cmap='viridis')
-    out_path = Path(out_dir) / "aa-counts.png"
-    plt.tight_layout(); plt.savefig(out_path, dpi=200); plt.close()
-    logging.info(f"Saved -> {out_path}")
-
-    # proportions heatmap
-    denom = df.set_index('ID')['SUM'].replace(0, np.nan)
-    mat_prop = df.set_index('ID').drop(columns=['SUM'], errors='ignore').div(denom, axis=0).fillna(0).T * 100.0
-    plt.figure(figsize=(18, 12))
-    sb.heatmap(mat_prop, cmap='viridis', vmin=0, vmax=5)
-    out_path = Path(out_dir) / "aa-proportions.png"
-    plt.tight_layout(); plt.savefig(out_path, dpi=200); plt.close()
-    logging.info(f"Saved -> {out_path}")
-
-    # clustermaps
-    plot_clustermap(df, out_dir, proportions=False, name="aa-clustermap-counts.png")
-    plot_clustermap(df, out_dir, proportions=True,  name="aa-clustermap-proportions.png")
+def plot_single_file(vector_csv: str, out_dir: str):
+    df = _read_summary_csv(vector_csv)
+    df = df.set_index('ID')
+    vec = df.drop(columns=['SUM'], errors='ignore').iloc[0]
+    # Counts
+    plt.figure(figsize=(18, 3))
+    sb.heatmap([vec.values], cmap='viridis', cbar_kws={'label':'Count'})
+    plt.yticks([0], [df.index[0]])
+    plt.xticks(ticks=np.arange(len(vec)), labels=vec.index, rotation=90)
+    out_counts = Path(out_dir)/"single_file_counts.png"
+    plt.tight_layout(); plt.savefig(out_counts); plt.close()
+    # Proportions
+    prop = (vec / (vec.sum() or 1)) * 100.0
+    plt.figure(figsize=(18, 3))
+    sb.heatmap([prop.values], cmap='viridis', cbar_kws={'label':'% of substitutions'})
+    plt.yticks([0], [df.index[0]])
+    plt.xticks(ticks=np.arange(len(prop)), labels=prop.index, rotation=90)
+    out_props = Path(out_dir)/"single_file_proportions.png"
+    plt.tight_layout(); plt.savefig(out_props); plt.close()
+    logging.info(f"Saved single-file plots -> {out_counts}, {out_props}")
 
 def single_file_compare(vector_file: str, comparison_dir: str, out_dir: str, comparison_csv: Optional[str] = None):
     """
@@ -358,7 +361,7 @@ def single_file_compare(vector_file: str, comparison_dir: str, out_dir: str, com
     """
     df = _read_summary_csv(vector_file)
     comp = load_comparison(comparison_dir, comparison_csv=comparison_csv)
-    sim = compare_vectors(df, comp, out_dir)
+    sim = compare_vectors(df, comp, out_dir, outfile="single_similarity.csv")
     plot_similarity_heatmap(sim, out_dir, name="single_similarity_heatmap.png")
 
 # ---------- CLI ----------
@@ -369,15 +372,15 @@ def parse_args():
                    dest='observed_dir',
                    help='Directory of observed AA CSVs (tall files or 21x21 matrices)')
     p.add_argument('--comparison-dir', '--comparison_dir', '--comp-dir', '--comp_dir',
-                   dest='comparison_dir', required=False,
-                   help='Directory containing comparison_vectors.csv (for compare/heatmap/single-file compare)')
-    p.add_argument('--comparison-csv', dest='comparison_csv', default=None,
-                   help="Optional explicit path to comparison/reference CSV (overrides default comparison_vectors.csv)")
+                   dest='comparison_dir',
+                   help='Directory containing comparison vectors (or per-sample CSVs to be summarized)')
+    p.add_argument('--comparison-csv', '--comparison_csv', dest='comparison_csv',
+                   help='Optional explicit path to comparison/reference combined CSV')
     p.add_argument('--manifest', help='Optional manifest (first column are sample IDs) to filter observed')
     p.add_argument('--out-dir', '--out_dir', dest='out_dir', required=True,
                    help='Directory for outputs')
     p.add_argument('--vector-file', '--vector_file', dest='vector_file',
-                   help='Path to an existing summary CSV (used by --step single-file or to skip summarize)')
+                   help='Path to an existing summary CSV (to skip summarize or for single-file)')
     p.add_argument('--step', choices=['summarize','compare','heatmap','single-file','all'],
                    default='all', help='Which step(s) to run')
     return p.parse_args()
@@ -391,51 +394,54 @@ def main():
     summary_df = None
     sim_df = None
 
-    # SUMMARIZE
+    # SUMMARIZE (or load existing)
     if args.step in ('summarize', 'all'):
         if not args.observed_dir:
             raise SystemExit("--observed-dir is required for step 'summarize' or 'all'")
         summary_df = summarize_observed(args.observed_dir, args.out_dir, args.manifest)
-
-    # If skipping summarize but we need the summary later, load it
-    if summary_df is None and args.step in ('compare','heatmap','all'):
-        vf = args.vector_file or (Path(args.out_dir) / 'summary.csv')
-        if not Path(vf).exists():
-            raise SystemExit(f"Summary CSV not found: {vf}. Either run --step summarize first or pass --vector_file.")
-        summary_df = _read_summary_csv(str(vf))
+        # Drop clustermaps for observed cohort
+        plot_clustermap_vectors(summary_df.copy(), args.out_dir, normalize_rows=False, name="clustermap_counts.png")
+        plot_clustermap_vectors(summary_df.copy(), args.out_dir, normalize_rows=True,  name="clustermap_proportions.png")
+    else:
+        # Try to get a summary from vector_file or out_dir/summary.csv
+        if args.vector_file and Path(args.vector_file).exists():
+            summary_df = _read_summary_csv(args.vector_file)
+        else:
+            vf = Path(args.out_dir) / 'summary.csv'
+            if vf.exists():
+                summary_df = _read_summary_csv(str(vf))
 
     # COMPARE
     if args.step in ('compare','all'):
+        if summary_df is None:
+            raise SystemExit("No summary available. Run with --step summarize or provide --vector-file/summary.csv.")
         if not args.comparison_dir and not args.comparison_csv:
             raise SystemExit("--comparison-dir or --comparison-csv is required for 'compare'/'all'")
-        comp = load_comparison(args.comparison_dir or "", comparison_csv=args.comparison_csv)
+        comp = load_comparison(args.comparison_dir or "", comparison_csv=args.comparison_csv,
+                               manifest_path=args.manifest, out_dir=args.out_dir)
         sim_df = compare_vectors(summary_df, comp, args.out_dir)
-
-    # HEATMAP
-    if args.step in ('heatmap','all'):
-        if sim_df is None:
-            # load previously saved similarity if not computed in this run
-            sim_path = Path(args.out_dir) / "similarity_matrix.csv"
-            if not sim_path.exists():
-                raise SystemExit("similarity_matrix.csv not found. Run --step compare first.")
-            sim_df = pd.read_csv(sim_path, index_col=0)
         plot_similarity_heatmap(sim_df, args.out_dir, name="heatmap.png")
 
-        # also drop clustermaps from summary if we have it
+    # HEATMAP only (try to load previously computed similarity)
+    if args.step == 'heatmap':
+        sim_path = Path(args.out_dir) / "similarity_matrix.csv"
+        if not sim_path.exists():
+            raise SystemExit("similarity_matrix.csv not found. Run --step compare first.")
+        sim_df = pd.read_csv(sim_path, index_col=0)
+        plot_similarity_heatmap(sim_df, args.out_dir, name="heatmap.png")
         if summary_df is not None:
-            plot_clustermap(summary_df, args.out_dir, proportions=False)
-            plot_clustermap(summary_df, args.out_dir, proportions=True)
+            plot_clustermap_vectors(summary_df.copy(), args.out_dir, normalize_rows=False, name="clustermap_counts.png")
+            plot_clustermap_vectors(summary_df.copy(), args.out_dir, normalize_rows=True,  name="clustermap_proportions.png")
 
     # SINGLE-FILE utilities
     if args.step == 'single-file':
         if not args.vector_file:
             raise SystemExit("--vector-file is required for step 'single-file'")
-        single_file_plots(args.vector_file, args.out_dir)
-        # optional: compare the single-file vectors to comparison vectors
+        plot_single_file(args.vector_file, args.out_dir)
         if args.comparison_dir or args.comparison_csv:
             single_file_compare(args.vector_file, args.comparison_dir or "", args.out_dir,
                                 comparison_csv=args.comparison_csv)
 
-
 if __name__ == '__main__':
     main()
+   
