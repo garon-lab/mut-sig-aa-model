@@ -25,33 +25,35 @@ python dna_preprocessor.py \
   --preprocess-mutect \
   --vcf-folder <vcf directory> \
   --simplified <case_ids.txt> \
-  --write-signatures --signature-label <type> defaults dna> \
-  --extract-mutations <type, e.g., snp|snv> --write-matrices 
+  --write-signatures \
+  --extract-mutations \ 
+  --write-matrices \
+  --label <text>
 
 Arguments:
-(Required)\
-   --manifest           GDC-like TSV/CSV with at least Case ID, File Name (File ID optional)\
-   --folder             Input directory that contains raw data, format <folder>/dna/<File ID>/<File Name>\
-   --out_dir            Output directory that will contain <dna/<Case-ID>.csv that can be used in multiomic integration\
+Required
+   --manifest           GDC-like TSV/CSV with at least Case ID, File Name (File ID optional)
+   --folder             Input directory that contains raw data, format <folder>/dna/<File ID>/<File Name>
+   --out_dir            Output directory that will contain <dna/<Case-ID>.csv that can be used in multiomic integration
 
-General:\
-   --max-records N      Cap parsed VCF rows per case (for smoke tests)\
+General
+   --max-records N      Cap parsed VCF rows per case (for smoke tests)
    --jobs               Controls parallel execution, if not provided, script uses min(8, CPU count)
 
-Make/list Case-IDS:\
-   --make-simplified    Provides unique Case-IDs derived from --manifest\
-   --simplified         Path to write the Case-ID list (default: <out_dir>/case_ids.txt)\
+Make/list Case-IDS:
+   --make-simplified    Provides unique Case-IDs derived from --manifest
+   --simplified         Path to write the Case-ID list (default: <out_dir>/case_ids.txt)
    
-Preprocess: \
-   --preprocess-mutect  Flag for extended analysis, strips '##' headers and writes prep/<Case-ID>.txt\
+Preprocess: 
+   --preprocess-mutect  Flag for extended analysis, strips '##' headers and writes prep/<Case-ID>.txt
    --vcf-folder         Where per-case VCFs live (default <folder/dna>)
 
 Analytics (require --simplified file listing Case-IDs):\
    --simplified FILE              Path to case_ids.txt if it has been previously made, should have one Case-ID per line (no header)\
    --summarize-variants           Write SNP/SNV counts to <out.dir>/summary.csv\
    --write-signatures             Write <out_dir>/<label>-signature.csv\
-   --signature-label L            Label for signature file prefix (default: dna)\
-   --extract-mutations {snp|snv}  Extracts ST/END AA pairs to <out_dir>/<type>/<Case-ID>.csv\
+   --label                        Label for file prefix (default: snv)\
+   --extract-mutations            Extracts ST/END AA pairs to <out_dir>/<type>/<Case-ID>.csv\
    --write-matrices               Writes 21 x 21 amino acid matrices to <out_dir>/<type>/matrices/<Case-IDs>.csv\
 
 Notes
@@ -84,161 +86,496 @@ import pandas as pd
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-# Amino-acid list for matrices (single-letter codes)
-AA_LIST = ['A','C','D','E','F','G','H','I','K','L','M','N','P','Q','R','S','T','V','W','Y']
+# Helpers
 
-def summarize_variants(simplified: Path, out_dir: Path):
-    """
-    Optional step: summarize SNP/SNV counts per Case-ID from preprocessed VCFs under out_dir/prep/*.txt
-    Writes: out_dir/summary.csv with header: Case-ID,SNP,SNV
-    """
-    import pandas as _pd
-    simplified = Path(simplified)
-    out_dir = Path(out_dir)
-    df = _pd.read_csv(simplified, header=None)
-    ids = df.iloc[:, 0]
-    summary_file = out_dir / "summary.csv"
-    summary_file.parent.mkdir(parents=True, exist_ok=True)
-    with summary_file.open('w') as f:
-        f.write("Case-ID,SNP,SNV\n")
+# Expected Mutect/VCF-like columns (no extra leading ID)
+EXPECTED_MUTECT_COLS = ['#CHROM','POS','ID','REF','ALT','QUAL','FILTER','INFO','FORMAT','NORMAL','TUMOR']
 
-    for case_id in ids:
+AA_LIST = ["A","R","N","D","C","Q","E","G","H","I",
+           "L","K","M","F","P","S","T","W","Y","V"]
+AA_SET = set(AA_LIST + ["*"])
+
+AA3_TO_1 = {
+    "ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C",
+    "GLN":"Q","GLU":"E","GLY":"G","HIS":"H","ILE":"I",
+    "LEU":"L","LYS":"K","MET":"M","PHE":"F","PRO":"P",
+    "SER":"S","THR":"T","TRP":"W","TYR":"Y","VAL":"V","TER":"*","STOP":"*"
+}
+
+def _is_single_base(s: str) -> bool:
+    s = str(s).upper()
+    return len(s) == 1 and s in {"A","C","G","T"}
+
+def _normalize_one_letter(aa: str) -> str | None:
+    if not isinstance(aa, str):
+        return None
+    s = aa.strip().upper()
+    if s in AA_SET: 
+        return s
+    if len(s) == 3 and s in AA3_TO_1:
+        return AA3_TO_1[s]
+    return None
+
+def _read_case_list(case_list_path: Path) -> list[str]:
+    """Read a simple case list (handles header or raw IDs)."""
+    ids = []
+    for line in case_list_path.read_text().splitlines():
+        s = line.strip().strip('"')
+        if not s:
+            continue
+        # if it's TSV/CSV, take the first field
+        if "\t" in s:
+            s = s.split("\t", 1)[0]
+        elif "," in s:
+            s = s.split(",", 1)[0]
+        # skip header-y lines
+        if s.lower() in {"id", "case-id", "case id", "caseid"}:
+            continue
+        ids.append(s)
+    return list(dict.fromkeys(ids))  # de-dupe, preserve order
+
+def _make_unique_columns(cols):
+    """Ensure duplicate column names become unique: ID, ID.1, ID.2, ..."""
+    seen = {}
+    out = []
+    for c in cols:
+        k = str(c)
+        if k in seen:
+            seen[k] += 1
+            out.append(f"{k}.{seen[k]}")
+        else:
+            seen[k] = 0
+            out.append(k)
+    return out
+
+def _read_mutect_or_vep_table(path: Path) -> pd.DataFrame:
+    """
+    Robust reader for prep files:
+      - Headerless 11 cols  -> assign EXPECTED_MUTECT_COLS
+      - Headerless 12 cols  -> ['EXTRA_ID'] + EXPECTED_MUTECT_COLS
+      - Headered            -> use header; if still odd, take last 11 cols as the core set
+    """
+    # Try headerless first
+    df = pd.read_csv(path, sep="\t", comment="#", header=None, engine="python")
+    if df.empty:
+        return df
+
+    n = df.shape[1]
+    if n == 11:
+        df.columns = EXPECTED_MUTECT_COLS
+    elif n == 12:
+        # e.g., an extra first column with an external ID
+        df.columns = ['EXTRA_ID'] + EXPECTED_MUTECT_COLS
+    else:
+        # Maybe there is a header row — try reading with header
         try:
-            filepath = out_dir / "prep" / f"{case_id}.txt"
-            vcf_df = _pd.read_table(filepath, sep='\t', header=None)
-            vcf_df.columns = ['#CHROM', 'POS', 'ID', 'REF', 'ALT', 'QUAL', 'FILTER', 'INFO', 'FORMAT', 'NORMAL', 'TUMOR']
-            snp_count = vcf_df[(vcf_df['FILTER'].str.contains("alt", na=False)) & (vcf_df['INFO'].str.contains("missense", na=False))].shape[0]
-            snv_count = vcf_df[(vcf_df['FILTER'].str.contains("PASS", na=False)) & (vcf_df['INFO'].str.contains("missense", na=False))].shape[0]
-            with summary_file.open('a') as f:
-                f.write(f"{case_id},{snp_count},{snv_count}\n")
-        except Exception as e:
-            logging.warning(f"Skipping {case_id}: {e}")
+            df2 = pd.read_csv(path, sep="\t", comment="#", header=0, engine="python")
+            if set(EXPECTED_MUTECT_COLS).issubset(set(df2.columns)):
+                df = df2
+            else:
+                # Last resort: take the last 11 cols as the core Mutect fields
+                df = df.iloc[:, -11:]
+                df.columns = EXPECTED_MUTECT_COLS
+        except Exception:
+            df = df.iloc[:, -11:]
+            df.columns = EXPECTED_MUTECT_COLS
+
+    # Avoid duplicate label issues (e.g., two "ID" columns)
+    df.columns = _make_unique_columns(list(df.columns))
+    return df
+
+def _make_unique_columns(cols):
+    """Ensure duplicate column names become unique: ID, ID.1, ID.2, ..."""
+    seen = {}
+    out = []
+    for c in cols:
+        k = str(c)
+        if k in seen:
+            seen[k] += 1
+            out.append(f"{k}.{seen[k]}")
+        else:
+            seen[k] = 0
+            out.append(k)
+    return out
+
+def _read_mutect_or_vep_table(path: Path) -> pd.DataFrame:
+    """
+    Robust reader for prep files:
+      - Headerless 11 cols  -> assign EXPECTED_MUTECT_COLS
+      - Headerless 12 cols  -> ['EXTRA_ID'] + EXPECTED_MUTECT_COLS
+      - Headered            -> use header; if still odd, take last 11 cols as the core set
+    """
+    # Try headerless first
+    df = pd.read_csv(path, sep="\t", comment="#", header=None, engine="python")
+    if df.empty:
+        return df
+
+    n = df.shape[1]
+    if n == 11:
+        df.columns = EXPECTED_MUTECT_COLS
+    elif n == 12:
+        df.columns = ['EXTRA_ID'] + EXPECTED_MUTECT_COLS
+    else:
+        # Maybe there is a header row — try reading with header
+        try:
+            df2 = pd.read_csv(path, sep="\t", comment="#", header=0, engine="python")
+            if set(EXPECTED_MUTECT_COLS).issubset(set(df2.columns)):
+                df = df2
+            else:
+                # Last resort: take the last 11 cols as the core Mutect fields
+                df = df.iloc[:, -11:]
+                df.columns = EXPECTED_MUTECT_COLS
+        except Exception:
+            df = df.iloc[:, -11:]
+            df.columns = EXPECTED_MUTECT_COLS
+
+    # Avoid duplicate label issues (e.g., two "ID" columns)
+    df.columns = _make_unique_columns(list(df.columns))
+    return df
+
+def _read_case_list(case_list_path: Path) -> list[str]:
+    """Read a simple case list (handles header or raw IDs; takes first field if TSV/CSV)."""
+    ids = []
+    for line in case_list_path.read_text().splitlines():
+        s = line.strip().strip('"')
+        if not s:
+            continue
+        if "\t" in s:
+            s = s.split("\t", 1)[0]
+        elif "," in s:
+            s = s.split(",", 1)[0]
+        if s.lower() in {"id", "case-id", "case id", "caseid"}:
+            continue
+        ids.append(s)
+    return list(dict.fromkeys(ids))  # de-dupe, preserve order
+
+def _pick_col(df: pd.DataFrame, candidates):
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+def _missense_mask(series: pd.Series) -> pd.Series:
+    # Match both 'missense' and 'missense_variant' (VEP)
+    return series.astype(str).str.contains(r"\bmissense\b|missense_variant", case=False, na=False)
+
+def summarize_variants(case_list_path: Path, out_root: Path) -> Path:
+    """
+    Summarize SNP/SNV counts per case, preserving legacy logic:
+      - SNP_alt_missense: FILTER contains 'alt'  AND INFO contains 'missense'
+      - SNV_PASS_missense: FILTER contains 'PASS' AND INFO contains 'missense'
+    Priority source: out_root/prep/{Case-ID}.txt (Mutect-like TSV)
+    Fallback source: out_root/dna/{Case-ID}.csv (try same logic; else row count)
+    Output: out_root/summary.csv with columns:
+        Case-ID,SNP_alt_missense,SNV_PASS_missense,total_rows,source
+    """
+    prep_dir = out_root / "prep"
+    dna_dir  = out_root / "dna"
+    out_path = out_root / "summary.csv"
+
+    if not case_list_path.exists():
+        raise FileNotFoundError(f"Case list not found: {case_list_path}")
+
+    case_ids = _read_case_list(case_list_path)
+    if not case_ids:
+        raise ValueError(f"No case IDs found in {case_list_path}")
+
+    rows = []
+    used_prep = used_dna = skipped = 0
+
+    def _count_on_df(df: pd.DataFrame, source_label: str):
+        total_rows = len(df)
+        # Try to identify FILTER & INFO-like columns
+        filter_col = _pick_col(df, ["FILTER","Filter","filter","FILTERS"])
+        info_col   = _pick_col(df, ["INFO","Info","info","CSQ","Consequence","INFO.VEP","ANN","VEP"])
+        if filter_col is not None and info_col is not None:
+            filt = df[filter_col].astype(str)
+            info = df[info_col].astype(str)
+            snp_alt  = (filt.str.contains("alt",  case=False, na=False) & _missense_mask(info)).sum()
+            snv_pass = (filt.str.contains("PASS", case=False, na=False) & _missense_mask(info)).sum()
+            return int(snp_alt), int(snv_pass), int(total_rows), source_label
+        # If missing, synthesize an INFO-like string from common annotation cols
+        if info_col is None:
+            cand = [c for c in df.columns if c.lower() in {"info","csq","consequence","ann","vep","vep_info"}]
+            if cand:
+                info = df[cand].astype(str).agg(" ".join, axis=1)
+            else:
+                info = pd.Series([""] * len(df))
+        else:
+            info = df[info_col].astype(str)
+        if filter_col is None:
+            filt = pd.Series([""] * len(df))
+        else:
+            filt = df[filter_col].astype(str)
+        snp_alt  = (filt.str.contains("alt",  case=False, na=False) & _missense_mask(info)).sum()
+        snv_pass = (filt.str.contains("PASS", case=False, na=False) & _missense_mask(info)).sum()
+        return int(snp_alt), int(snv_pass), int(total_rows), source_label
+
+    for cid in case_ids:
+        safe = cid.replace("/", "_")
+        prep_fp = prep_dir / f"{safe}.txt"
+        dna_fp  = dna_dir  / f"{safe}.csv"
+
+        # 1) Preferred: parse prep TSV (Mutect-like), tolerant of extra leading ID col
+        if prep_fp.exists():
+            try:
+                vcf_df = _read_mutect_or_vep_table(prep_fp)
+                snp_alt, snv_pass, total_rows, src = _count_on_df(vcf_df, "prep")
+                rows.append({"Case-ID": cid,
+                             "SNP_alt_missense": snp_alt,
+                             "SNV_PASS_missense": snv_pass,
+                             "total_rows": total_rows,
+                             "source": src})
+                used_prep += 1
+                continue
+            except Exception as e:
+                logging.warning(f"[{cid}] Failed to parse prep file {prep_fp}: {e} (will try DNA fallback)")
+
+        # 2) Fallback: per-case DNA CSV
+        if dna_fp.exists():
+            try:
+                dfd = pd.read_csv(dna_fp)
+                snp_alt, snv_pass, total_rows, src = _count_on_df(dfd, "dna")
+                rows.append({"Case-ID": cid,
+                             "SNP_alt_missense": snp_alt,
+                             "SNV_PASS_missense": snv_pass,
+                             "total_rows": total_rows,
+                             "source": src})
+                used_dna += 1
+                continue
+            except Exception as e:
+                logging.warning(f"[{cid}] Failed to read {dna_fp}: {e}")
+
+        logging.warning(f"Skipping {cid}: no usable prep or dna file under {out_root}")
+        skipped += 1
+
+    # Write output
+    if not rows:
+        logging.warning("No cases could be summarized. Writing empty summary.")
+        pd.DataFrame(columns=["Case-ID","SNP_alt_missense","SNV_PASS_missense","total_rows","source"]).to_csv(out_path, index=False)
+        return out_path
+
+    out_df = pd.DataFrame(rows, columns=["Case-ID","SNP_alt_missense","SNV_PASS_missense","total_rows","source"])
+    out_df.to_csv(out_path, index=False)
+    logging.info(f"Summary written -> {out_path} (from prep: {used_prep}, from dna: {used_dna}, skipped: {skipped})")
+    return out_path
 
 def write_signatures(prep_dir: Path, simplified: Path, out_dir: Path, label: str):
     """
-    Optional step: compute simple mutation 'signatures' per case from preprocessed VCFs.
-    Writes: out_dir/{label}-signature.csv with header: Case-ID,SUM,CTGA,CAGT,GCCG,ATTA,AGTC,ACTG
+    Compute simple base-level mutation 'signatures' per case from preprocessed VCFs.
+    Robust to:
+      - headerless/headered prep files
+      - optional extra leading 'ID' column
+    Output: <out_dir>/<label>-signature.csv with header:
+        Case-ID,SUM,CTGA,CAGT,GCCG,ATTA,AGTC,ACTG
+    Logic:
+      - Keep rows where FILTER contains 'alt' (case-insensitive)
+      - SNVs only (REF/ALT are one of A/C/G/T and of length 1)
+      - Count six folded categories:
+           CTGA: CT + GA
+           CAGT: CA + GT
+           GCCG: CG + GC
+           ATTA: AT + TA
+           AGTC: AG + TC
+           ACTG: AC + TG
     """
-    import pandas as _pd
-    prep_dir = Path(prep_dir)
-    simplified = Path(simplified)
-    out_dir = Path(out_dir)
-    sample_ids = _pd.read_csv(simplified, header=None).iloc[:, 0]
+    prep_dir = Path(prep_dir); out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / f"{label}-signature.csv"
-    header = ['Case-ID', 'SUM', 'CTGA', 'CAGT', 'GCCG', 'ATTA', 'AGTC', 'ACTG']
-    all_rows = []
+
+    # Case list (tolerant to headers / TSV / CSV)
+    sample_ids = _read_case_list(Path(simplified))
+    header = ['Case-ID','SUM','CTGA','CAGT','GCCG','ATTA','AGTC','ACTG']
+    rows = []
+
     for case_id in sample_ids:
-        file_path = prep_dir / f"{case_id}.txt"
-        if not file_path.exists():
-            logging.warning(f"{case_id}: file not found at {file_path}")
+        fp = prep_dir / f"{case_id}.txt"
+        if not fp.exists():
+            logging.warning(f"{case_id}: prep file not found at {fp}")
             continue
         try:
-            df = _pd.read_table(file_path)
-            df['sA'] = df.iloc[:, 3].str.contains('A', na=False)
-            df['sC'] = df.iloc[:, 3].str.contains('C', na=False)
-            df['sG'] = df.iloc[:, 3].str.contains('G', na=False)
-            df['sT'] = df.iloc[:, 3].str.contains('T', na=False)
-            df['eA'] = df.iloc[:, 4].str.contains('A', na=False)
-            df['eC'] = df.iloc[:, 4].str.contains('C', na=False)
-            df['eG'] = df.iloc[:, 4].str.contains('G', na=False)
-            df['eT'] = df.iloc[:, 4].str.contains('T', na=False)
-            df['NM'] = df.iloc[:, 6].str.strip().str[:3]
-            df1 = df[df['NM'].str.contains('alt', na=False)]
-            mutations = {
-                'AC': df1['sA'] & df1['eC'],
-                'AG': df1['sA'] & df1['eG'],
-                'AT': df1['sA'] & df1['eT'],
-                'CA': df1['sC'] & df1['eA'],
-                'CG': df1['sC'] & df1['eG'],
-                'CT': df1['sC'] & df1['eT'],
-                'GA': df1['sG'] & df1['eA'],
-                'GC': df1['sG'] & df1['eC'],
-                'GT': df1['sG'] & df1['eT'],
-                'TA': df1['sT'] & df1['eA'],
-                'TC': df1['sT'] & df1['eC'],
-                'TG': df1['sT'] & df1['eG'],
-            }
+            df = _read_mutect_or_vep_table(fp)
+            if df.empty:
+                rows.append([case_id, 0, 0, 0, 0, 0, 0, 0]); continue
+
+            # Require REF/ALT single nucleotide and FILTER contains 'alt'
+            if 'FILTER' not in df.columns or 'REF' not in df.columns or 'ALT' not in df.columns:
+                logging.warning(f"{case_id}: required columns missing in {fp.name}; skipping")
+                continue
+            snv_mask = df['REF'].map(_is_single_base) & df['ALT'].map(_is_single_base)
+            alt_mask = df['FILTER'].astype(str).str.contains("alt", case=False, na=False)
+            x = df.loc[snv_mask & alt_mask, ['REF','ALT']].astype(str).applymap(str.upper)
+
+            # Count pairs
+            def cnt(frm, to): return int(((x['REF']==frm) & (x['ALT']==to)).sum())
             counts = {
-                'CTGA': (mutations['CT'] | mutations['GA']).sum(),
-                'CAGT': (mutations['CA'] | mutations['GT']).sum(),
-                'GCCG': (mutations['CG'] | mutations['GC']).sum(),
-                'ATTA': (mutations['AT'] | mutations['TA']).sum(),
-                'AGTC': (mutations['AG'] | mutations['TC']).sum(),
-                'ACTG': (mutations['AC'] | mutations['TG']).sum(),
+                'CTGA': cnt('C','T') + cnt('G','A'),
+                'CAGT': cnt('C','A') + cnt('G','T'),
+                'GCCG': cnt('C','G') + cnt('G','C'),
+                'ATTA': cnt('A','T') + cnt('T','A'),
+                'AGTC': cnt('A','G') + cnt('T','C'),
+                'ACTG': cnt('A','C') + cnt('T','G'),
             }
             total = sum(counts.values())
-            row = [case_id, total] + [counts[key] for key in ['CTGA', 'CAGT', 'GCCG', 'ATTA', 'AGTC', 'ACTG']]
-            all_rows.append(row)
+            rows.append([case_id, total, counts['CTGA'], counts['CAGT'], counts['GCCG'],
+                         counts['ATTA'], counts['AGTC'], counts['ACTG']])
         except Exception as e:
-            logging.warning(f"Failed to process {case_id}: {e}")
-    df_out = _pd.DataFrame(all_rows, columns=header)
-    df_out.to_csv(out_file, index=False)
+            logging.warning(f"Failed to process {case_id} signatures: {e}")
+
+    pd.DataFrame(rows, columns=header).to_csv(out_file, index=False)
+    logging.info(f"Signatures written -> {out_file}")
+
 
 def extract_mutations(prep_dir: Path, out_dir: Path, simplified: Path, mutation_type: str):
     """
-    Optional step: extract amino-acid pairs per mutation type (snp|snv) from preprocessed VCFs.
-    Writes: out_dir/{mtype}/{Case-ID}-{mtype}.csv with columns: ST, END, #CHROM, TUMOR
+    Extract amino-acid pairs per mutation type (snp|snv) from preprocessed VCFs.
+    Robust to:
+      - headerless/headered prep files
+      - optional leading 'ID' column
+      - INFO formats: tries CSQ/ANN/HGVSp/Amino_acids; also accepts explicit 'X/Y' tokens
+    FILTER:
+      - snp -> rows where FILTER contains 'alt'
+      - snv -> rows where FILTER contains 'PASS'
+    Output: <out_dir>/<mutation_type>/<Case-ID>-<mutation_type>.csv with columns:
+        ST, END, #CHROM, TUMOR
     """
-    assert mutation_type in ["snp", "snv"]
-    import pandas as _pd
-    prep_dir = Path(prep_dir)
-    out_dir = Path(out_dir)
-    simplified = Path(simplified)
-    df = _pd.read_csv(simplified, header=None)
-    ids = df.iloc[:, 0]
-    (out_dir / mutation_type).mkdir(parents=True, exist_ok=True)
+    assert mutation_type in {"snp","snv"}, "mutation_type must be 'snp' or 'snv'"
+    prep_dir = Path(prep_dir); out_dir = Path(out_dir); simplified = Path(simplified)
+    out_sub = out_dir / mutation_type
+    out_sub.mkdir(parents=True, exist_ok=True)
+
+    ids = _read_case_list(simplified)
+
+    aa_pair_regex = re.compile(r"\b([ACDEFGHIKLMNPQRSTVWY\*])\s*/\s*([ACDEFGHIKLMNPQRSTVWY\*])\b")
+    hgvsp_1L = re.compile(r"p\.([ACDEFGHIKLMNPQRSTVWY\*])\w*\d+([ACDEFGHIKLMNPQRSTVWY\*])", re.IGNORECASE)
+    hgvsp_3L = re.compile(r"p\.([A-Z][a-z]{2})\d+([A-Z][a-z]{2})")
+
+  
+    def parse_info_to_pair(info: str) -> tuple[str,str] | None:
+        s = str(info)
+        # 1) direct X/Y token
+        m = aa_pair_regex.search(s)
+        if m:
+            a, b = _normalize_one_letter(m.group(1)), _normalize_one_letter(m.group(2))
+            if a in AA_SET and b in AA_SET: return a, b
+        # 2) HGVSp with one-letter
+        m = hgvsp_1L.search(s)
+        if m:
+            a, b = _normalize_one_letter(m.group(1)), _normalize_one_letter(m.group(2))
+            if a in AA_SET and b in AA_SET: return a, b
+        # 3) HGVSp with three-letter (Ala123Val)
+        m = hgvsp_3L.search(s)
+        if m:
+            a, b = _normalize_one_letter(AA3_TO_1.get(m.group(1).upper())), _normalize_one_letter(AA3_TO_1.get(m.group(2).upper()))
+            if a in AA_SET and b in AA_SET: return a, b
+        return None
+
     for case_id in ids:
         try:
             infile = prep_dir / f"{case_id}.txt"
-            vcf_df = _pd.read_table(infile, sep='\t', header=None)
-            vcf_df.columns = ['#CHROM', 'POS', 'ID', 'REF', 'ALT', 'QUAL', 'FILTER', 'INFO', 'FORMAT', 'NORMAL', 'TUMOR']
-            if mutation_type == "snp":
-                filtered = vcf_df[vcf_df['FILTER'].str.contains("alt", na=False)]
-            else:
-                filtered = vcf_df[vcf_df['FILTER'].str.contains("PASS", na=False)]
-            info = filtered['INFO'].str.split('|', expand=True)
-            if 15 not in info.columns:
-                logging.warning(f"Case {case_id}: INFO field has fewer than 16 fields - skipping")
+            if not infile.exists():
+                logging.warning(f"extract_mutations: {case_id} missing prep file {infile}")
                 continue
-            aa_df = _pd.DataFrame({
-                'ST': info[15].str[0],
-                'END': info[15].str[-1],
-                '#CHROM': filtered['#CHROM'],
-                'TUMOR': filtered['TUMOR']
-            })
-            outfile = out_dir / mutation_type / f"{case_id}-{mutation_type}.csv"
+
+            vcf_df = _read_mutect_or_vep_table(infile)
+            if vcf_df.empty:
+                logging.warning(f"extract_mutations: {case_id} empty file {infile}")
+                continue
+
+            # filter by type
+            if 'FILTER' not in vcf_df.columns:
+                logging.warning(f"{case_id}: no FILTER column in {infile.name}; skipping")
+                continue
+            if mutation_type == "snp":
+                filt_mask = vcf_df['FILTER'].astype(str).str.contains("alt", case=False, na=False)
+            else:
+                filt_mask = vcf_df['FILTER'].astype(str).str.contains("PASS", case=False, na=False)
+            sub = vcf_df.loc[filt_mask].copy()
+            if sub.empty:
+                logging.info(f"{case_id}: no rows after {mutation_type} filter")
+                continue
+
+            # INFO extraction
+            info_col = None
+            for c in ["INFO","Info","info","CSQ","ANN","VEP","INFO.VEP"]:
+                if c in sub.columns:
+                    info_col = c; break
+            if info_col is None:
+                logging.warning(f"{case_id}: no INFO/CSQ/ANN column; skipping AA extraction")
+                continue
+
+            pairs = sub[info_col].apply(parse_info_to_pair)
+            keep = pairs.notna()
+            if not keep.any():
+                logging.warning(f"{case_id}: no parseable AA changes in INFO; skipping")
+                continue
+
+            st_end = pairs[keep].tolist()
+            st = [a for a,_ in st_end]
+            ed = [b for _,b in st_end]
+            chrom = sub.loc[keep, '#CHROM'] if '#CHROM' in sub.columns else pd.Series([""]*len(st))
+            tumor = sub.loc[keep, 'TUMOR'] if 'TUMOR' in sub.columns else pd.Series([""]*len(st))
+
+            aa_df = pd.DataFrame({'ST': st, 'END': ed, '#CHROM': chrom.values, 'TUMOR': tumor.values})
+            outfile = out_sub / f"{case_id}-{mutation_type}.csv"
             aa_df.to_csv(outfile, index=False)
+            logging.info(f"[{case_id}] extracted {len(aa_df)} AA pairs -> {outfile}")
         except Exception as e:
             logging.warning(f"Failed to extract {mutation_type} for {case_id}: {e}")
 
-def generate_aa_matrix(df):
-    matrix = df.groupby(['ST', 'END']).size().unstack(fill_value=0)
-    matrix = matrix.reindex(index=AA_LIST + ['*'], columns=AA_LIST + ['*'], fill_value=0)
-    return matrix
+
+def generate_aa_matrix(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build a 21x21 matrix from ST/END columns (tolerant of 3-letter codes and lowercase).
+    Missing rows/cols filled with 0. STOP is '*'.
+    """
+    if not {'ST','END'}.issubset(df.columns):
+        raise ValueError("generate_aa_matrix: input DataFrame must have ST and END columns")
+
+    # Normalize to one-letter uppercase (map 3-letter if present)
+    st = df['ST'].apply(_normalize_one_letter)
+    en = df['END'].apply(_normalize_one_letter)
+    ok = st.notna() & en.notna()
+    if not ok.any():
+        # return a zero matrix with proper labels
+        idx = AA_LIST + ["*"]; cols = AA_LIST + ["*"]
+        return pd.DataFrame(0, index=idx, columns=cols, dtype=int)
+
+    g = pd.DataFrame({'ST': st[ok], 'END': en[ok]})
+    mat = g.groupby(['ST','END']).size().unstack(fill_value=0)
+    mat = mat.reindex(index=AA_LIST+["*"], columns=AA_LIST+["*"], fill_value=0)
+    return mat
+
 
 def write_matrices(out_dir: Path, simplified: Path):
     """
-    Optional step: write per-case amino-acid matrices under out_dir/snp/matrices and out_dir/snv/matrices.
+    Write per-case amino-acid 21x21 matrices under:
+        <out_dir>/snp/matrices/<Case-ID>.csv
+        <out_dir>/snv/matrices/<Case-ID>.csv
+    Expects extract_mutations() outputs at:
+        <out_dir>/snp/<Case-ID>-snp.csv  and  <out_dir>/snv/<Case-ID>-snv.csv
     """
-    import pandas as _pd
     out_dir = Path(out_dir)
-    simplified = Path(simplified)
-    df = pd.read_csv(simplified, header=None)
-    ids = df.iloc[:, 0]
+    ids = _read_case_list(Path(simplified))
+    for mtype in ['snp','snv']:
+        (out_dir / mtype / "matrices").mkdir(parents=True, exist_ok=True)
+
     for case_id in ids:
-        for mtype in ['snp', 'snv']:
+        for mtype in ['snp','snv']:
             try:
-                file = out_dir / mtype / f"{case_id}-{mtype}.csv"
-                if not file.exists():
+                infile = out_dir / mtype / f"{case_id}-{mtype}.csv"
+                if not infile.exists():
+                    logging.info(f"write_matrices: missing {infile}, skipping")
                     continue
-                df_aa = _pd.read_csv(file)
-                matrix = generate_aa_matrix(df_aa)
+                df_aa = pd.read_csv(infile)
+                mat = generate_aa_matrix(df_aa)
                 out_path = out_dir / mtype / "matrices" / f"{case_id}.csv"
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                matrix.to_csv(out_path)
+                mat.to_csv(out_path)
+                logging.info(f"[{case_id}] {mtype} matrix -> {out_path}")
             except Exception as e:
                 logging.warning(f"Matrix generation failed for {case_id}-{mtype}: {e}")
-              
+
+
 def _find_vcf_for_case(folder: Path, case_id: str) -> Optional[Path]:
     """
     Try common layouts:
@@ -565,15 +902,12 @@ def parse_args():
     p.add_argument("--write-signatures", "--write_signatures", dest="write_signatures",
                    action="store_true",
                    help="Write <out_dir>/<signature_label>-signature.csv")
-    p.add_argument("--signature-label", "--signature_label", dest="signature_label",
+    p.add_argument("--label", dest="label",
                    default="snv",
-                   help="Label for signature file prefix (default: snv)")
+                   help="Label for file prefix (default: snv)")
     p.add_argument("--write-matrices", "--write_matrices", dest="write_matrices",
                    action="store_true",
                    help="Write 21x21 amino-acid matrices to <out_dir>/<type_label>/matrices/<Case-ID>.csv")
-    p.add_argument("--type-label", "--type_label", dest="type_label",
-                   default="snv",
-                   help="Label for matrices (default: snv)")
     p.add_argument("--extract-mutations", "--extract_mutations", dest="extract_mutations",
                    action="store_true",
                    help="Extract ST/END AA pairs to <out_dir>/<type_label>/<Case-ID>.csv")
