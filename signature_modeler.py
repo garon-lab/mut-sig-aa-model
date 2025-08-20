@@ -405,7 +405,7 @@ TG = [
 ]
 
 
-BASE_MATRICES = {
+base_matrices = {
     "AC": _validate_and_coerce("AC", AC),
     "AG": _validate_and_coerce("AG", AG),
     "AT": _validate_and_coerce("AT", AT),
