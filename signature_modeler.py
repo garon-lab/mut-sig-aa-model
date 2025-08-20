@@ -56,6 +56,13 @@ def init_logging(level_str):
 
 # Helpers
 
+# ---- helpers for plotting CLI ----
+def _parse_figsize(s: str):
+    # accepts "12x8" or "12,8"
+    s = s.lower().replace(" ", "").replace(",", "x")
+    w, h = s.split("x")
+    return (float(w), float(h))
+
 AA_ORDER = ["A","R","N","D","C","Q","E","G","H","I",
             "L","K","M","F","P","S","T","W","Y","V","*"]
 
@@ -96,7 +103,7 @@ def _validate_and_coerce(name, M):
 
     import numpy as np
     return np.array(coerced, dtype=float)
-
+ 
 # Amino-acid row targets
 ROW_TARGETS = np.array([
     1.444267, 0.459934, 1.009417, 1.503128, 0.754421,
@@ -112,8 +119,11 @@ TOTAL_DIVISOR = 438.0
 SCALE_FACTOR = 13.0  # scale = 1 + number of contexts
 
 # Amino acid labels and SUB_VECTOR labels
-AA_LABELS = ['A','C','D','E','F','G','H','I','K','L','M','N','P','Q','R','S','T','V','W','Y','STOP']
+# Replace your AA_LABELS / SUB_VECTOR block with this:
+AA_LABELS = ["A","R","N","D","C","Q","E","G","H","I",
+             "L","K","M","F","P","S","T","W","Y","V","*"]
 SUB_VECTOR = ['ID'] + [f"{r}{c}" for r in AA_LABELS for c in AA_LABELS]
+
 
 # Embedded base 21x21 matrices:
 AC = [
@@ -433,19 +443,6 @@ BASE_STACK = np.stack([base_matrices[k] for k in CONTEXT_ORDER], axis=0)
 if BASE_STACK.shape != (12, 21, 21):
     raise ValueError(f"BASE_STACK shape is {BASE_STACK.shape}, expected (12, 21, 21)")
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Signature-Based AA Variant Modeling")
-    parser.add_argument('--signature_vector', required=True,
-                        help='CSV: ID + 12 signature proportions')
-    parser.add_argument('--out_dir', required=True,
-                        help='Directory for outputs')
-    parser.add_argument('--step', choices=['model','heatmap','both'], default='both',
-                        help='Step to run')
-    parser.add_argument('--log_level', choices=['DEBUG','INFO','WARNING','ERROR'], default='INFO',
-                        help='Logging level')
-    return parser.parse_args()
-
-
 def validate_context_df(df):
     missing = [c for c in CONTEXTS if c not in df.columns]
     extra = [c for c in df.columns if c not in CONTEXTS]
@@ -473,10 +470,19 @@ def build_expected(df):
     return pd.DataFrame(flat, index=df.index, columns=SUB_VECTOR[1:])
 
 
-def plot_heatmap(exp_df, out_dir):
-    """Plot heatmap of expected substitution profiles using module-level constants."""
-    fig, ax = plt.subplots(figsize=FIGSIZE)
-    sb.heatmap(exp_df.astype(float), ax=ax, **HEATMAP_KWARGS)
+def plot_heatmap(exp_df, out_dir, *, cmap, figsize, annot, linewidths, linecolor, vmin, vmax):
+    """Plot heatmap of expected substitution profiles using CLI-configurable options."""
+    fig, ax = plt.subplots(figsize=figsize)
+    sb.heatmap(
+        exp_df.astype(float),
+        ax=ax,
+        cmap=cmap,
+        annot=annot,
+        linewidths=linewidths,
+        linecolor=linecolor,
+        vmin=vmin,
+        vmax=vmax,
+    )
     plt.tight_layout()
     path = Path(out_dir) / 'expected_heatmap.png'
     try:
@@ -486,6 +492,40 @@ def plot_heatmap(exp_df, out_dir):
         return
     plt.close(fig)
     logging.info(f"Saved heatmap to {path}")
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Signature-Based AA Variant Modeling")
+    parser.add_argument('--signature_vector', required=True,
+                        help='CSV: ID + 12 signature proportions')
+    parser.add_argument('--out_dir', required=True,
+                        help='Directory for outputs')
+    parser.add_argument('--step', choices=['model','heatmap','both'], default='both',
+                        help='Step to run')
+    parser.add_argument('--log_level', choices=['DEBUG','INFO','WARNING','ERROR'], default='INFO',
+                        help='Logging level')
+
+    # ---- plotting controls ----
+    parser.add_argument('--no-plot', action='store_true',
+                        help='Skip heatmap even if step includes heatmap')
+    parser.add_argument('--cmap', default='viridis',
+                        help='Matplotlib/Seaborn colormap name (e.g., viridis, magma, coolwarm)')
+    parser.add_argument('--figsize', default='12x8',
+                        help='Figure size WxH (e.g., "12x8" or "12,8")')
+    parser.add_argument('--annot', action='store_true',
+                        help='Annotate heatmap cells with values')
+    parser.add_argument('--linewidths', type=float, default=0.5,
+                        help='Heatmap grid line width')
+    parser.add_argument('--linecolor', default='gray',
+                        help='Heatmap grid line color')
+    parser.add_argument('--vmin', type=float, default=None,
+                        help='Heatmap lower color bound')
+    parser.add_argument('--vmax', type=float, default=None,
+                        help='Heatmap upper color bound')
+
+    # optional: change output CSV filename
+    parser.add_argument('--out_csv', default='expected_vectors.csv',
+                        help='Filename for expected vectors CSV inside --out_dir')
+    return parser.parse_args()
 
 
 def main():
@@ -498,38 +538,61 @@ def main():
         logging.error(f"Permission denied: cannot create output directory {out}")
         return
 
+    # Read signature vector
     try:
         df = pd.read_csv(args.signature_vector, index_col=0)
     except Exception as e:
         logging.error(f"Failed to read signature vector: {e}")
         return
+
+    # Validate columns (must be the 12 contexts)
     try:
         validate_context_df(df)
     except ValueError as e:
         logging.error(e)
         return
 
-    if args.step in ['model','both']:
+    # If we need to build the model, do it and write expected vectors
+    if args.step in ['model', 'both']:
         exp_df = build_expected(df)
-        exp_df = exp_df.reset_index().rename(columns={'index':'ID'})
+
+        # Ensure there is a concrete 'ID' column exactly once
+        if 'ID' in exp_df.columns:
+            exp_df = exp_df.reset_index(drop=True)
+        else:
+            idx_name = exp_df.index.name  # could be 'ID', 'index', or None
+            exp_df = exp_df.reset_index()
+            exp_df = exp_df.rename(columns={(idx_name if idx_name else 'index'): 'ID'})
+
+        csv_path = out / args.out_csv
         try:
-            exp_df.to_csv(out/'expected_vectors.csv', index=False)
+            exp_df.to_csv(csv_path, index=False)
+            logging.info(f"Wrote expected vectors -> {csv_path}")
         except PermissionError:
-            logging.error(f"Permission denied: cannot write expected_vectors.csv to {out}")
-            return
-        logging.info("Expected vectors saved")
-    else:
-        try:
-            exp_df = pd.read_csv(out/'expected_vectors.csv')
-        except Exception as e:
-            logging.error(f"Could not load expected_vectors.csv: {e}")
+            logging.error(f"Permission denied: cannot write {csv_path}")
             return
 
-    if args.step in ['heatmap','both']:
+    # If we need the heatmap, load (or reuse) expected vectors and plot
+    if args.step in ['heatmap', 'both'] and not args.no_plot:
         try:
-            plot_heatmap(exp_df.set_index('ID'), out)
+            if 'exp_df' not in locals():
+                exp_df = pd.read_csv(out / args.out_csv)
+            plot_heatmap(
+                exp_df.set_index('ID'), out,
+                cmap=args.cmap,
+                figsize=_parse_figsize(args.figsize),
+                annot=args.annot,
+                linewidths=args.linewidths,
+                linecolor=args.linecolor,
+                vmin=args.vmin,
+                vmax=args.vmax,
+            )
+        except FileNotFoundError:
+            logging.error(f"{args.out_csv} not found; run with --step model or --step both first.")
         except Exception as e:
             logging.error(f"Heatmap failed: {e}")
+
+         
 
 if __name__=='__main__':
     main()
