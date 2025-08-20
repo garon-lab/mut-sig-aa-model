@@ -528,19 +528,57 @@ def resolve_dna_file(project_root: Path, file_id: str, file_name: str) -> Path:
 # ---- Core ----
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Create per-case DNA CSVs (dna/{Case-ID}.csv) from a dna_manifest.tsv using a VCF parser.")
-    p.add_argument("--folder", required=True, help="Project root containing dna/ or vep/ subfolders")
-    p.add_argument("--manifest", required=True, help="Path to dna_manifest.tsv (GDC-like)")
-    p.add_argument("--out_dir", required=True, help="Output directory root (CSV written under out_dir/dna/)")
-    p.add_argument("--unzip-inputs", action="store_true", help="If set, automatically materialize compressed inputs (.gz, .zip) into a scratch directory before processing.")
-    p.add_argument("--scratch-dir",default=None, help="Optional directory to use for temporary extracted files. Defaults to a new Temporary Directory each run.")
-    p.add_argument("--max-records", type=int, default=None, help="Optional cap on parsed VCF records per case (for testing)")
-    p.add_argument("--make-simplified", action="store_true", help="Emit a Case-ID list derived from --manifest")
-    p.add_argument("--simplified", help="Path to write the Case-ID list (default: <out_dir>/case_ids.txt)")
-    p.add_argument("--preprocess-mutect", dest="preprocess_mutect", action="store_true", help="Preprocess Mutect VCFs prior to downstream steps.")
-    p.add_argument("--vcf-folder", dest="vcf_folder", default=None, help="Optional directory containing VCFs (overrides manifest paths).")
-    p.add_argument("--jobs", type=int, default=None, help="Parallel workers (currently not used; accepted for compatibility)")
+    p = argparse.ArgumentParser(
+        description="Create per-case DNA CSVs (dna/{Case-ID}.csv) from a dna_manifest.tsv using a VCF parser."
+    )
+    p.add_argument("--folder", required=True,
+                   help="Project root containing dna/ or vep/ subfolders")
+    p.add_argument("--manifest", required=True,
+                   help="Path to dna_manifest.tsv (GDC-like)")
+    p.add_argument("--out_dir", required=True,
+                   help="Output directory root (CSV written under out_dir/dna/)")
+    p.add_argument("--unzip-inputs", "--unzip_inputs", dest="unzip_inputs",
+                   action="store_true",
+                   help="Automatically materialize compressed inputs (.gz, .zip) into a scratch directory before processing.")
+    p.add_argument("--scratch-dir", "--scratch_dir", dest="scratch_dir",
+                   default=None,
+                   help="Optional directory to use for temporary extracted files. Defaults to a new Temporary Directory each run.")
+    p.add_argument("--max-records", "--max_records", dest="max_records",
+                   type=int, default=None,
+                   help="Optional cap on parsed VCF records per case (for testing)")
+    p.add_argument("--make-simplified", "--make_simplified", dest="make_simplified",
+                   action="store_true",
+                   help="Emit a Case-ID list derived from --manifest")
+    p.add_argument("--simplified",
+                   help="Path to write the Case-ID list (default: <out_dir>/case_ids.txt)")
+    p.add_argument("--preprocess-mutect", "--preprocess_mutect", dest="preprocess_mutect",
+                   action="store_true",
+                   help="Preprocess Mutect VCFs prior to downstream steps.")
+    p.add_argument("--vcf-folder", "--vcf_folder", dest="vcf_folder",
+                   default=None,
+                   help="Optional directory containing VCFs (overrides manifest paths).")
+    p.add_argument("--jobs", type=int, default=None,
+                   help="Parallel workers (currently not used; accepted for compatibility)")
+    p.add_argument("--summarize-variants", "--summarize_variants", dest="summarize_variants",
+                   action="store_true",
+                   help="Summarize SNP/SNV counts from out_dir/prep/*.txt into out_dir/summary.csv")
+    p.add_argument("--write-signatures", "--write_signatures", dest="write_signatures",
+                   action="store_true",
+                   help="Write <out_dir>/<signature_label>-signature.csv")
+    p.add_argument("--signature-label", "--signature_label", dest="signature_label",
+                   default="snv",
+                   help="Label for signature file prefix (default: snv)")
+    p.add_argument("--write-matrices", "--write_matrices", dest="write_matrices",
+                   action="store_true",
+                   help="Write 21x21 amino-acid matrices to <out_dir>/<type_label>/matrices/<Case-ID>.csv")
+    p.add_argument("--type-label", "--type_label", dest="type_label",
+                   default="snv",
+                   help="Label for matrices (default: snv)")
+    p.add_argument("--extract-mutations", "--extract_mutations", dest="extract_mutations",
+                   action="store_true",
+                   help="Extract ST/END AA pairs to <out_dir>/<type_label>/<Case-ID>.csv")
     return p.parse_args()
+
 
 def main():
     args = parse_args()
@@ -551,9 +589,11 @@ def main():
     # Read manifest
     df = read_table_guess(Path(args.manifest))
 
-    # Optional simplified list
+    # Path for the simplified list (compute once)
+    simp_out = Path(args.simplified) if args.simplified else (out_root / "case_ids.txt")
+
+    # Optional: emit simplified Case-ID list
     if args.make_simplified:
-        simp_out = Path(args.simplified) if args.simplified else (out_root / "case_ids.txt")
         outp = emit_simplified_case_list(Path(args.manifest), simp_out)
         logging.info(f"Wrote simplified Case-ID list: {outp}")
 
@@ -598,7 +638,7 @@ def main():
             seen.add(case_id)
             safe_case = case_id.replace("/", "_")
 
-            # Resolve file_id/file_name (file_id may be absent in some manifests)
+            # Resolve file_id/file_name (file_id may be absent)
             file_id = str(row[file_id_col]).strip() if file_id_col and pd.notna(row[file_id_col]) else ""
             file_name = str(row[file_name_col]).strip()
             if not file_name:
@@ -634,6 +674,40 @@ def main():
         logging.warning("No per-case DNA CSVs were produced. Check your dna_manifest.tsv and input files.")
     else:
         logging.info(f"Done. Wrote {produced} case CSVs under {out_root/'dna'}.")
+
+    # ---- Optional downstream steps (call only if functions exist) ----
+    if args.preprocess_mutect and 'preprocess_mutect' in globals():
+        try:
+            vcf_root = Path(args.vcf_folder) if args.vcf_folder else project_root
+            preprocess_mutect(vcf_root, Path(args.manifest), out_root)
+        except Exception as e:
+            logging.error(f"preprocess_mutect failed: {e}")
+
+    if args.summarize_variants and 'summarize_variants' in globals():
+        try:
+            if not simp_out.exists():
+                emit_simplified_case_list(Path(args.manifest), simp_out)
+            summarize_variants(simp_out, out_root)
+        except Exception as e:
+            logging.error(f"summarize_variants failed: {e}")
+
+    if args.write_signatures and 'write_signatures' in globals():
+        try:
+            write_signatures(out_root, label=args.signature_label)
+        except Exception as e:
+            logging.error(f"write_signatures failed: {e}")
+
+    if args.write_matrices and 'write_matrices' in globals():
+        try:
+            write_matrices(out_root, type_label=args.type_label)
+        except Exception as e:
+            logging.error(f"write_matrices failed: {e}")
+
+    if args.extract_mutations and 'extract_mutations' in globals():
+        try:
+            extract_mutations(out_root, type_label=args.type_label)
+        except Exception as e:
+            logging.error(f"extract_mutations failed: {e}")
 
 
 if __name__ == "__main__":
