@@ -126,66 +126,77 @@ if _invalid:
 
 def _read_one_sample_csv(fp: Path) -> pd.Series:
     """
-    Accepts either:
-      (a) tall format with columns like ST/END/(Count|count) or
-      (b) 21x21 matrix (rows=AA, cols=AA) possibly with first col as row labels.
-    Returns a 441-length Series indexed by PAIR_COLS with counts.
+    Accept one of:
+      (a) tall format: columns include ST/END/(Count|count)
+      (b) 21x21 matrix: rows=AA, cols=AA (any orientation; first col may be row labels)
+      (c) vector-per-sample: a single row whose columns are AA-pair codes (AE, AG, …)
+          with optional ID and/or SUM columns.
+    Returns a Series indexed by CANON_COLS with float counts.
     """
-    df = pd.read_csv(fp)
+    # sniff delimiter
+    try:
+        df = pd.read_csv(fp, sep=None, engine="python")
+    except Exception:
+        df = pd.read_csv(fp)  # fallback
 
-    # --- try tall ---
+    # ---- (c) vector-per-sample (wide) ----
+    # If the file already has many of your AA-pair columns, treat it as a vector.
+    cols_lower = {c.lower(): c for c in df.columns}
+    present_pairs = [c for c in CANON_COLS if c in df.columns]
+    if len(present_pairs) >= max(10, int(0.05 * len(CANON_COLS))):
+        row = df.iloc[0] if len(df) else pd.Series({})
+        vec = pd.Series(0.0, index=CANON_COLS, dtype=float)
+        for c in present_pairs:
+            try:
+                vec[c] = float(row[c])
+            except Exception:
+                vec[c] = 0.0
+        return vec
+
+    # ---- (a) tall ----
     lower = {c.lower(): c for c in df.columns}
     def _has(*names): return all(n in lower for n in names)
     if _has('st','end') or _has('fromaa','toaa') or _has('refaa','altaa') or _has('from','to') or _has('ref_aa','alt_aa'):
         # normalize column names
-        for left,right in [('st','end'),('fromaa','toaa'),('from','to'),('refaa','altaa'),('ref_aa','alt_aa')]:
-            if left in lower and right in lower:
-                df = df.rename(columns={lower[left]:'ST', lower[right]:'END'})
+        for L, R in [('st','end'),('fromaa','toaa'),('from','to'),('refaa','altaa'),('ref_aa','alt_aa')]:
+            if L in lower and R in lower:
+                df = df.rename(columns={lower[L]:'ST', lower[R]:'END'})
                 break
         cnt_col = lower.get('count') or 'Count'
         if cnt_col not in df.columns:
             df[cnt_col] = 1
-        # normalize AA to one-letter with X for stop
+        # AA normalization (map STOP/*/TER->'X')
         df['ST'] = df['ST'].apply(_to_one_letter_or_X)
         df['END'] = df['END'].apply(_to_one_letter_or_X)
         df = df[df['ST'].isin(AA_1) & df['END'].isin(AA_1)]
-        
-        # build vector
         g = df.groupby(['ST','END'])[cnt_col].sum()
         vec = pd.Series(0.0, index=CANON_COLS, dtype=float)
         for (s, e), v in g.items():
             code = f"{s}{e}"
             if code in CANON_SET:
                 vec[code] += float(v)
-        # ignore codes not in HEADING; anything not in CANON_COLS is dropped
         return vec
 
-    # --- try 21x21 matrix ---
-    # If first column is index of AAs, set it as index (common in saved matrices)
+    # ---- (b) 21×21 matrix ----
+    # treat first column as index if it looks like row labels
     if df.shape[1] >= 2:
-        # Prefer first column as index if it looks like row labels
         df = df.set_index(df.columns[0])
-    # normalize axis labels
-    rows_norm = [ _to_one_letter_or_X(x) for x in df.index ]
-    cols_norm = [ _to_one_letter_or_X(x) for x in df.columns ]
+    rows_norm = [_to_one_letter_or_X(x) for x in df.index]
+    cols_norm = [_to_one_letter_or_X(x) for x in df.columns]
     row_valid = sum(1 for r in rows_norm if r in AA_1)
     col_valid = sum(1 for c in cols_norm if c in AA_1)
-
     mat = df.copy()
     if row_valid < col_valid:
         mat = mat.T
         rows_norm, cols_norm = cols_norm, rows_norm
-
-    # apply normalized labels, keep only valid AAs
+    # keep only valid AAs
     mat.index = rows_norm
     mat.columns = cols_norm
     mat = mat.loc[[r for r in mat.index if r in AA_1],
                   [c for c in mat.columns if c in AA_1]]
     if mat.empty:
-        raise ValueError(f"{fp.name}: could not recognize AA labels for a 21x21 matrix.")
-
+        raise ValueError(f"{fp.name}: unrecognized format (not tall, vector, or 21×21).")
     mat = mat.apply(pd.to_numeric, errors='coerce').fillna(0)
-
     vec = pd.Series(0.0, index=CANON_COLS, dtype=float)
     for r in mat.index:
         for c in mat.columns:
@@ -193,6 +204,40 @@ def _read_one_sample_csv(fp: Path) -> pd.Series:
             if code in CANON_SET:
                 vec[code] = float(mat.at[r, c])
     return vec
+
+
+# --- replace your existing summarize_dir with this ---
+def summarize_dir(dir_path: str, manifest_path: Optional[str]=None) -> pd.DataFrame:
+    """
+    Build a vectors table from a directory of per-sample files (.csv/.tsv),
+    recursively. Accepts tall, 21×21, or vector-per-sample files.
+    Returns DataFrame with columns: ID, SUM, <CANON_COLS>.
+    """
+    dirp = Path(dir_path)
+    files = sorted(set(list(dirp.rglob("*.csv")) + list(dirp.rglob("*.tsv"))))
+    samples = []
+    for fp in files:
+        try:
+            vec = _read_one_sample_csv(fp)
+            sid = fp.stem
+            samples.append((sid, vec))
+        except Exception as e:
+            logging.debug(f"[summarize_dir] skipping {fp.relative_to(dirp)}: {e}")
+
+    if not samples:
+        raise FileNotFoundError(f"No usable CSV/TSV files found in {dir_path}")
+
+    df = pd.DataFrame({sid: v for sid, v in samples}).T
+    df.index.name = 'ID'
+    df = df.reindex(columns=CANON_COLS, fill_value=0.0)
+    df.insert(0, 'SUM', df.sum(axis=1))
+
+    # Optional manifest filter (IDs in first column)
+    if manifest_path:
+        ids = pd.read_table(manifest_path, header=None).iloc[:, 0].astype(str)
+        df = df[df.index.isin(set(ids))]
+
+    return df.reset_index()
 
 
 def summarize_dir(dir_path: str, manifest_path: Optional[str]=None) -> pd.DataFrame:
