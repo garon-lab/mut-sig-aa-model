@@ -420,6 +420,19 @@ BASE_MATRICES = {
     "TG": _validate_and_coerce("TG", TG),
 }
 
+# ---- Context order for the 12 signature channels (must match your CSV columns) ----
+CONTEXT_ORDER = ["AC","AG","AT","CA","CG","CT","GA","GC","GT","TA","TC","TG"]
+
+# Sanity: make sure all 12 are present
+missing = [k for k in CONTEXT_ORDER if k not in base_matrices]
+if missing:
+    raise KeyError(f"Missing matrices for: {missing}")
+
+# Each base matrix is 21x21; stack them into a (12, 21, 21) tensor
+BASE_STACK = np.stack([base_matrices[k] for k in CONTEXT_ORDER], axis=0)
+if BASE_STACK.shape != (12, 21, 21):
+    raise ValueError(f"BASE_STACK shape is {BASE_STACK.shape}, expected (12, 21, 21)")
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Signature-Based AA Variant Modeling")
     parser.add_argument('--signature_vector', required=True,
@@ -447,8 +460,11 @@ def validate_context_df(df):
 
 def build_expected(df):
     """Vectorized expected matrix computation."""
-    weights = df[CONTEXTS].values.astype(float) * SCALE_FACTOR
-    mats = np.tensordot(weights, BASE_STACK, axes=([1],[0]))
+    # weights shape: (N, 12) using the same CONTEXT_ORDER as BASE_STACK
+    weights = df[CONTEXT_ORDER].to_numpy(dtype=float)  # rows: samples, cols: AC..TG
+    # Expected tensors: (N, 21, 21)
+    mats = np.tensordot(weights, BASE_STACK, axes=([1], [0]))
+
     mats /= TOTAL_DIVISOR
     row_sums = mats.sum(axis=2)
     norm_factors = (ROW_TARGETS * len(AA_LABELS)) / np.where(row_sums==0, 1, row_sums)
