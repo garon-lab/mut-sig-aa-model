@@ -43,6 +43,20 @@ import seaborn as sb
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
+# Helper
+
+def _normalize_id_col(df):
+    # Accept a variety of common ID column names
+    rename_map = {
+        'Case-ID': 'ID', 'case-id': 'ID', 'CaseId': 'ID',
+        'CaseID': 'ID', 'caseID': 'ID', 'Case_Id': 'ID'
+    }
+    df = df.rename(columns=rename_map)
+    if 'ID' not in df.columns:
+        raise KeyError("Observed file is missing an 'ID' (or Case-ID) column.")
+    return df
+
+
 # Columns for summarizing observed variants
 SUB_VECTOR = ['ID','SUM','AE','AG','AP','AS','AT','AV','CF','CG','CR','CS','CW','CX','CY',
               'DA','DE','DG','DH','DN','DV','DY','EA','ED','EG','EK','EQ','EV','EX','FC',
@@ -138,6 +152,22 @@ def load_comparison(comparison_dir, manifest):
 
 def summarize_observed(observed, out_dir, vector_file=None):
     rows = []
+    obs = pd.read_csv(path_to_observed_csv)
+    obs = _normalize_id_col(obs)
+    
+    # also normalize AA column names if needed
+    obs = obs.rename(columns={
+        'FromAA': 'FromAA',
+        'ToAA': 'ToAA',
+        'from': 'FromAA', 'to': 'ToAA',
+        'fromAA': 'FromAA', 'toAA': 'ToAA'
+    })
+
+required = {'ID','FromAA','ToAA','Count'}
+missing = required - set(obs.columns)
+if missing:
+    raise KeyError(f"Observed file {path_to_observed_csv} missing columns: {sorted(missing)}")
+
     for sid, df in observed.items():
         row = {'ID': sid, 'SUM': len(df)}
         for code in SUB_VECTOR[2:]:
