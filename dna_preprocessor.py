@@ -83,6 +83,7 @@ from contextlib import nullcontext
 from typing import Optional, List, Tuple
 from pathlib import Path
 import pandas as pd
+import re
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -183,71 +184,6 @@ def _read_mutect_or_vep_table(path: Path) -> pd.DataFrame:
     # Avoid duplicate label issues (e.g., two "ID" columns)
     df.columns = _make_unique_columns(list(df.columns))
     return df
-
-def _make_unique_columns(cols):
-    """Ensure duplicate column names become unique: ID, ID.1, ID.2, ..."""
-    seen = {}
-    out = []
-    for c in cols:
-        k = str(c)
-        if k in seen:
-            seen[k] += 1
-            out.append(f"{k}.{seen[k]}")
-        else:
-            seen[k] = 0
-            out.append(k)
-    return out
-
-def _read_mutect_or_vep_table(path: Path) -> pd.DataFrame:
-    """
-    Robust reader for prep files:
-      - Headerless 11 cols  -> assign EXPECTED_MUTECT_COLS
-      - Headerless 12 cols  -> ['EXTRA_ID'] + EXPECTED_MUTECT_COLS
-      - Headered            -> use header; if still odd, take last 11 cols as the core set
-    """
-    # Try headerless first
-    df = pd.read_csv(path, sep="\t", comment="#", header=None, engine="python")
-    if df.empty:
-        return df
-
-    n = df.shape[1]
-    if n == 11:
-        df.columns = EXPECTED_MUTECT_COLS
-    elif n == 12:
-        df.columns = ['EXTRA_ID'] + EXPECTED_MUTECT_COLS
-    else:
-        # Maybe there is a header row — try reading with header
-        try:
-            df2 = pd.read_csv(path, sep="\t", comment="#", header=0, engine="python")
-            if set(EXPECTED_MUTECT_COLS).issubset(set(df2.columns)):
-                df = df2
-            else:
-                # Last resort: take the last 11 cols as the core Mutect fields
-                df = df.iloc[:, -11:]
-                df.columns = EXPECTED_MUTECT_COLS
-        except Exception:
-            df = df.iloc[:, -11:]
-            df.columns = EXPECTED_MUTECT_COLS
-
-    # Avoid duplicate label issues (e.g., two "ID" columns)
-    df.columns = _make_unique_columns(list(df.columns))
-    return df
-
-def _read_case_list(case_list_path: Path) -> list[str]:
-    """Read a simple case list (handles header or raw IDs; takes first field if TSV/CSV)."""
-    ids = []
-    for line in case_list_path.read_text().splitlines():
-        s = line.strip().strip('"')
-        if not s:
-            continue
-        if "\t" in s:
-            s = s.split("\t", 1)[0]
-        elif "," in s:
-            s = s.split(",", 1)[0]
-        if s.lower() in {"id", "case-id", "case id", "caseid"}:
-            continue
-        ids.append(s)
-    return list(dict.fromkeys(ids))  # de-dupe, preserve order
 
 def _pick_col(df: pd.DataFrame, candidates):
     for c in candidates:
@@ -426,22 +362,23 @@ def write_signatures(prep_dir: Path, simplified: Path, out_dir: Path, label: str
     logging.info(f"Signatures written -> {out_file}")
 
 
-def extract_mutations(prep_dir: Path, out_dir: Path, simplified: Path, mutation_type: str):
+def extract_mutations(prep_dir: Path, out_dir: Path, simplified: Path, label: str):
     """
-    Extract amino-acid pairs per mutation type (snp|snv) from preprocessed VCFs.
-    Robust to:
-      - headerless/headered prep files
-      - optional leading 'ID' column
-      - INFO formats: tries CSQ/ANN/HGVSp/Amino_acids; also accepts explicit 'X/Y' tokens
-    FILTER:
-      - snp -> rows where FILTER contains 'alt'
-      - snv -> rows where FILTER contains 'PASS'
-    Output: <out_dir>/<mutation_type>/<Case-ID>-<mutation_type>.csv with columns:
-        ST, END, #CHROM, TUMOR
+    Extract amino-acid pairs per mutation label ('snp' or 'snv') from preprocessed VCFs.
+
+    FILTER rule (driven by label):
+      - label == 'snp' -> rows where FILTER contains 'alt'
+      - label == 'snv' -> rows where FILTER contains 'PASS'
+
+    Output: <out_dir>/<label>/<Case-ID>-<label>.csv with columns: ST, END, #CHROM, TUMOR
     """
-    assert mutation_type in {"snp","snv"}, "mutation_type must be 'snp' or 'snv'"
+    mtype = str(label).lower().strip()
+    if mtype not in {"snp", "snv"}:
+        logging.warning(f"extract_mutations: label '{label}' not in {{snp,snv}}; defaulting to 'snv'")
+        mtype = "snv"
+
     prep_dir = Path(prep_dir); out_dir = Path(out_dir); simplified = Path(simplified)
-    out_sub = out_dir / mutation_type
+    out_sub = out_dir / mtype
     out_sub.mkdir(parents=True, exist_ok=True)
 
     ids = _read_case_list(simplified)
@@ -449,6 +386,75 @@ def extract_mutations(prep_dir: Path, out_dir: Path, simplified: Path, mutation_
     aa_pair_regex = re.compile(r"\b([ACDEFGHIKLMNPQRSTVWY\*])\s*/\s*([ACDEFGHIKLMNPQRSTVWY\*])\b")
     hgvsp_1L = re.compile(r"p\.([ACDEFGHIKLMNPQRSTVWY\*])\w*\d+([ACDEFGHIKLMNPQRSTVWY\*])", re.IGNORECASE)
     hgvsp_3L = re.compile(r"p\.([A-Z][a-z]{2})\d+([A-Z][a-z]{2})")
+
+    def parse_info_to_pair(info: str):
+        s = str(info)
+        m = aa_pair_regex.search(s)
+        if m:
+            a, b = _normalize_one_letter(m.group(1)), _normalize_one_letter(m.group(2))
+            if a in AA_SET and b in AA_SET: return a, b
+        m = hgvsp_1L.search(s)
+        if m:
+            a, b = _normalize_one_letter(m.group(1)), _normalize_one_letter(m.group(2))
+            if a in AA_SET and b in AA_SET: return a, b
+        m = hgvsp_3L.search(s)
+        if m:
+            a, b = _normalize_one_letter(AA3_TO_1.get(m.group(1).upper())), _normalize_one_letter(AA3_TO_1.get(m.group(2).upper()))
+            if a in AA_SET and b in AA_SET: return a, b
+        return None
+
+    for case_id in ids:
+        try:
+            infile = prep_dir / f"{case_id}.txt"
+            if not infile.exists():
+                logging.warning(f"extract_mutations: {case_id} missing prep file {infile}")
+                continue
+
+            vcf_df = _read_mutect_or_vep_table(infile)
+            if vcf_df.empty:
+                logging.warning(f"extract_mutations: {case_id} empty file {infile}")
+                continue
+
+            if 'FILTER' not in vcf_df.columns:
+                logging.warning(f"{case_id}: no FILTER column in {infile.name}; skipping")
+                continue
+
+            if mtype == "snp":
+                filt_mask = vcf_df['FILTER'].astype(str).str.contains("alt", case=False, na=False)
+            else:  # mtype == "snv"
+                filt_mask = vcf_df['FILTER'].astype(str).str.contains("PASS", case=False, na=False)
+
+            sub = vcf_df.loc[filt_mask].copy()
+            if sub.empty:
+                logging.info(f"{case_id}: no rows after {mtype} filter")
+                continue
+
+            info_col = None
+            for c in ["INFO","Info","info","CSQ","ANN","VEP","INFO.VEP"]:
+                if c in sub.columns:
+                    info_col = c; break
+            if info_col is None:
+                logging.warning(f"{case_id}: no INFO/CSQ/ANN column; skipping AA extraction")
+                continue
+
+            pairs = sub[info_col].apply(parse_info_to_pair)
+            keep = pairs.notna()
+            if not keep.any():
+                logging.warning(f"{case_id}: no parseable AA changes in INFO; skipping")
+                continue
+
+            st_end = pairs[keep].tolist()
+            st = [a for a,_ in st_end]
+            ed = [b for _,b in st_end]
+            chrom = sub.loc[keep, '#CHROM'] if '#CHROM' in sub.columns else pd.Series([""]*len(st))
+            tumor = sub.loc[keep, 'TUMOR'] if 'TUMOR' in sub.columns else pd.Series([""]*len(st))
+
+            aa_df = pd.DataFrame({'ST': st, 'END': ed, '#CHROM': chrom.values, 'TUMOR': tumor.values})
+            outfile = out_sub / f"{case_id}-{mtype}.csv"
+            aa_df.to_csv(outfile, index=False)
+            logging.info(f"[{case_id}] extracted {len(aa_df)} AA pairs -> {outfile}")
+        except Exception as e:
+            logging.warning(f"Failed to extract {mtype} for {case_id}: {e}")
 
   
     def parse_info_to_pair(info: str) -> tuple[str,str] | None:
@@ -896,22 +902,29 @@ def parse_args():
                    help="Optional directory containing VCFs (overrides manifest paths).")
     p.add_argument("--jobs", type=int, default=None,
                    help="Parallel workers (currently not used; accepted for compatibility)")
+
+    # Analytics controls
     p.add_argument("--summarize-variants", "--summarize_variants", dest="summarize_variants",
                    action="store_true",
                    help="Summarize SNP/SNV counts from out_dir/prep/*.txt into out_dir/summary.csv")
     p.add_argument("--write-signatures", "--write_signatures", dest="write_signatures",
                    action="store_true",
-                   help="Write <out_dir>/<signature_label>-signature.csv")
-    p.add_argument("--label", dest="label",
-                   default="snv",
-                   help="Label for file prefix (default: snv)")
-    p.add_argument("--write-matrices", "--write_matrices", dest="write_matrices",
-                   action="store_true",
-                   help="Write 21x21 amino-acid matrices to <out_dir>/<type_label>/matrices/<Case-ID>.csv")
+                   help="Write <out_dir>/<label>-signature.csv")
     p.add_argument("--extract-mutations", "--extract_mutations", dest="extract_mutations",
                    action="store_true",
-                   help="Extract ST/END AA pairs to <out_dir>/<type_label>/<Case-ID>.csv")
+                   help="Extract ST/END AA pairs to <out_dir>/<label>/<Case-ID>-<label>.csv "
+                        "(uses label to choose SNP/SNV logic)")
+    p.add_argument("--write-matrices", "--write_matrices", dest="write_matrices",
+                   action="store_true",
+                   help="Write 21x21 AA matrices to <out_dir>/{snp,snv}/matrices/<Case-ID>.csv")
+
+    # Single knob that also drives mutation type
+    p.add_argument("--label", dest="label",
+                   default="snv",
+                   help="Label used for filenames AND mutation-type logic in extraction "
+                        "(accepted: 'snv' or 'snp'; default: snv)")
     return p.parse_args()
+
 
 
 def main():
@@ -1009,7 +1022,7 @@ def main():
     else:
         logging.info(f"Done. Wrote {produced} case CSVs under {out_root/'dna'}.")
 
-    # ---- Optional downstream steps (call only if functions exist) ----
+        # ---- Optional downstream steps ----
     if args.preprocess_mutect and 'preprocess_mutect' in globals():
         try:
             vcf_root = Path(args.vcf_folder) if args.vcf_folder else project_root
@@ -1017,31 +1030,40 @@ def main():
         except Exception as e:
             logging.error(f"preprocess_mutect failed: {e}")
 
+    # ensure we have a case list for downstream steps
+    if (args.summarize_variants or args.write_signatures or
+        args.extract_mutations or args.write_matrices):
+        if not simp_out.exists():
+            try:
+                emit_simplified_case_list(Path(args.manifest), simp_out)
+                logging.info(f"Wrote simplified Case-ID list: {simp_out}")
+            except Exception as e:
+                logging.error(f"failed to produce case list for downstream steps: {e}")
+
     if args.summarize_variants and 'summarize_variants' in globals():
         try:
-            if not simp_out.exists():
-                emit_simplified_case_list(Path(args.manifest), simp_out)
             summarize_variants(simp_out, out_root)
         except Exception as e:
             logging.error(f"summarize_variants failed: {e}")
 
     if args.write_signatures and 'write_signatures' in globals():
         try:
-            write_signatures(out_root, label=args.signature_label)
+            write_signatures(out_root / "prep", simp_out, out_root, label=args.label)
         except Exception as e:
             logging.error(f"write_signatures failed: {e}")
 
+    if args.extract_mutations and 'extract_mutations' in globals():
+    try:
+        extract_mutations(out_root / "prep", out_root, simp_out, label=args.label)
+    except Exception as e:
+        logging.error(f"extract_mutations failed: {e}")
+
     if args.write_matrices and 'write_matrices' in globals():
         try:
-            write_matrices(out_root, type_label=args.type_label)
+            write_matrices(out_root, simp_out)
         except Exception as e:
             logging.error(f"write_matrices failed: {e}")
 
-    if args.extract_mutations and 'extract_mutations' in globals():
-        try:
-            extract_mutations(out_root, type_label=args.type_label)
-        except Exception as e:
-            logging.error(f"extract_mutations failed: {e}")
 
 
 if __name__ == "__main__":
