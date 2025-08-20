@@ -419,20 +419,16 @@ def extract_mutations(prep_dir: Path, out_dir: Path, simplified: Path, label: st
                 logging.warning(f"{case_id}: no FILTER column in {infile.name}; skipping")
                 continue
 
-            if mtype == "snp":
-                filt_mask = vcf_df['FILTER'].astype(str).str.contains("alt", case=False, na=False)
-            else:  # mtype == "snv"
-                filt_mask = vcf_df['FILTER'].astype(str).str.contains("PASS", case=False, na=False)
+            filt_mask = (vcf_df['FILTER'].astype(str).str.contains("alt", case=False, na=False)
+                         if mtype == "snp"
+                         else vcf_df['FILTER'].astype(str).str.contains("PASS", case=False, na=False))
 
             sub = vcf_df.loc[filt_mask].copy()
             if sub.empty:
                 logging.info(f"{case_id}: no rows after {mtype} filter")
                 continue
 
-            info_col = None
-            for c in ["INFO","Info","info","CSQ","ANN","VEP","INFO.VEP"]:
-                if c in sub.columns:
-                    info_col = c; break
+            info_col = next((c for c in ["INFO","Info","info","CSQ","ANN","VEP","INFO.VEP"] if c in sub.columns), None)
             if info_col is None:
                 logging.warning(f"{case_id}: no INFO/CSQ/ANN column; skipping AA extraction")
                 continue
@@ -455,79 +451,6 @@ def extract_mutations(prep_dir: Path, out_dir: Path, simplified: Path, label: st
             logging.info(f"[{case_id}] extracted {len(aa_df)} AA pairs -> {outfile}")
         except Exception as e:
             logging.warning(f"Failed to extract {mtype} for {case_id}: {e}")
-
-  
-    def parse_info_to_pair(info: str) -> tuple[str,str] | None:
-        s = str(info)
-        # 1) direct X/Y token
-        m = aa_pair_regex.search(s)
-        if m:
-            a, b = _normalize_one_letter(m.group(1)), _normalize_one_letter(m.group(2))
-            if a in AA_SET and b in AA_SET: return a, b
-        # 2) HGVSp with one-letter
-        m = hgvsp_1L.search(s)
-        if m:
-            a, b = _normalize_one_letter(m.group(1)), _normalize_one_letter(m.group(2))
-            if a in AA_SET and b in AA_SET: return a, b
-        # 3) HGVSp with three-letter (Ala123Val)
-        m = hgvsp_3L.search(s)
-        if m:
-            a, b = _normalize_one_letter(AA3_TO_1.get(m.group(1).upper())), _normalize_one_letter(AA3_TO_1.get(m.group(2).upper()))
-            if a in AA_SET and b in AA_SET: return a, b
-        return None
-
-    for case_id in ids:
-        try:
-            infile = prep_dir / f"{case_id}.txt"
-            if not infile.exists():
-                logging.warning(f"extract_mutations: {case_id} missing prep file {infile}")
-                continue
-
-            vcf_df = _read_mutect_or_vep_table(infile)
-            if vcf_df.empty:
-                logging.warning(f"extract_mutations: {case_id} empty file {infile}")
-                continue
-
-            # filter by type
-            if 'FILTER' not in vcf_df.columns:
-                logging.warning(f"{case_id}: no FILTER column in {infile.name}; skipping")
-                continue
-            if mutation_type == "snp":
-                filt_mask = vcf_df['FILTER'].astype(str).str.contains("alt", case=False, na=False)
-            else:
-                filt_mask = vcf_df['FILTER'].astype(str).str.contains("PASS", case=False, na=False)
-            sub = vcf_df.loc[filt_mask].copy()
-            if sub.empty:
-                logging.info(f"{case_id}: no rows after {mutation_type} filter")
-                continue
-
-            # INFO extraction
-            info_col = None
-            for c in ["INFO","Info","info","CSQ","ANN","VEP","INFO.VEP"]:
-                if c in sub.columns:
-                    info_col = c; break
-            if info_col is None:
-                logging.warning(f"{case_id}: no INFO/CSQ/ANN column; skipping AA extraction")
-                continue
-
-            pairs = sub[info_col].apply(parse_info_to_pair)
-            keep = pairs.notna()
-            if not keep.any():
-                logging.warning(f"{case_id}: no parseable AA changes in INFO; skipping")
-                continue
-
-            st_end = pairs[keep].tolist()
-            st = [a for a,_ in st_end]
-            ed = [b for _,b in st_end]
-            chrom = sub.loc[keep, '#CHROM'] if '#CHROM' in sub.columns else pd.Series([""]*len(st))
-            tumor = sub.loc[keep, 'TUMOR'] if 'TUMOR' in sub.columns else pd.Series([""]*len(st))
-
-            aa_df = pd.DataFrame({'ST': st, 'END': ed, '#CHROM': chrom.values, 'TUMOR': tumor.values})
-            outfile = out_sub / f"{case_id}-{mutation_type}.csv"
-            aa_df.to_csv(outfile, index=False)
-            logging.info(f"[{case_id}] extracted {len(aa_df)} AA pairs -> {outfile}")
-        except Exception as e:
-            logging.warning(f"Failed to extract {mutation_type} for {case_id}: {e}")
 
 
 def generate_aa_matrix(df: pd.DataFrame) -> pd.DataFrame:
@@ -1053,10 +976,10 @@ def main():
             logging.error(f"write_signatures failed: {e}")
 
     if args.extract_mutations and 'extract_mutations' in globals():
-    try:
-        extract_mutations(out_root / "prep", out_root, simp_out, label=args.label)
-    except Exception as e:
-        logging.error(f"extract_mutations failed: {e}")
+        try:
+            extract_mutations(out_root / "prep", out_root, simp_out, label=args.label)
+        except Exception as e:
+            logging.error(f"extract_mutations failed: {e}")
 
     if args.write_matrices and 'write_matrices' in globals():
         try:
