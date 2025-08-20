@@ -118,7 +118,7 @@ CANON_COLS = HEADING
 CANON_SET  = set(CANON_COLS)
 
 # Ensure all HEADING codes are valid AA pairs from AA (incl. X)
-_invalid = [c for c in CANON_COLS if len(c)!=2 or c[0] not in AA or c[1] not in AA]
+_invalid = [c for c in CANON_COLS if len(c)!=2 or c[0] not in AA_1 or c[1] not in AA_1]
 if _invalid:
     raise ValueError(f"HEADING has invalid codes: {_invalid[:5]}{'...' if len(_invalid)>5 else ''}")
    
@@ -149,6 +149,7 @@ def _read_one_sample_csv(fp: Path) -> pd.Series:
         df['ST'] = df['ST'].apply(_to_one_letter_or_X)
         df['END'] = df['END'].apply(_to_one_letter_or_X)
         df = df[df['ST'].isin(AA_1) & df['END'].isin(AA_1)]
+        
         # build vector
         g = df.groupby(['ST','END'])[cnt_col].sum()
         vec = pd.Series(0.0, index=CANON_COLS, dtype=float)
@@ -156,7 +157,7 @@ def _read_one_sample_csv(fp: Path) -> pd.Series:
             code = f"{s}{e}"
             if code in CANON_SET:
                 vec[code] += float(v)
-      # ignore codes not in HEADING
+        # ignore codes not in HEADING; anything not in CANON_COLS is dropped
         return vec
 
     # --- try 21x21 matrix ---
@@ -236,42 +237,48 @@ def load_comparison(comparison_dir: str,
                     out_dir: Optional[str] = None) -> pd.DataFrame:
     """
     Load comparison vectors. If a combined CSV isn’t provided/found, build it from the directory.
-    Returns a DataFrame indexed by ID (no SUM column), with AA-pair columns aligned to PAIR_COLS.
+    Returns a DataFrame indexed by ID (no SUM), aligned to CANON_COLS.
     """
-    # Prefer explicit file
+    # 1) Explicit file wins
     if comparison_csv:
         path = Path(comparison_csv)
         if not path.exists():
-            raise FileNotFoundError(f"--comparison_csv not found: {path}")
+            raise FileNotFoundError(f"--comparison-csv not found: {path}")
+        logging.info(f"Using comparison file -> {path}")
         df = pd.read_csv(path)
+
     else:
-        # Try common filenames inside the folder
-        candidates = ["comparison_vectors.csv", "comparison_summary.csv", "summary.csv"]
-        path = next((Path(comparison_dir)/name for name in candidates
-                     if (Path(comparison_dir)/name).exists()), None)
+        # 2) Try common filenames inside the folder
+        if not comparison_dir:
+            raise SystemExit("Provide --comparison-dir or --comparison-csv for comparison steps.")
+        comp_dir = Path(comparison_dir)
+        candidates = ("comparison_vectors.csv", "comparison_summary.csv", "summary.csv")
+        path = next((comp_dir / name for name in candidates if (comp_dir / name).exists()), None)
+
         if path is not None:
+            logging.info(f"Using comparison file -> {path}")
             df = pd.read_csv(path)
         else:
-            if not comparison_dir:
-                raise SystemExit("Provide --comparison-dir or --comparison-csv for comparison steps.")
-            logging.info("No precomputed comparison vectors found; summarizing comparison_dir …")
-            built = summarize_dir(comparison_dir, manifest_path)
+            # 3) Fall back: summarize the comparison directory itself
+            logging.info(f"No combined comparison file found in {comp_dir}. Summarizing that directory …")
+            df = summarize_dir(str(comp_dir), manifest_path)
             if out_dir:
-                outp = Path(out_dir)/"comparison_summary.csv"
-                built.to_csv(outp, index=False)
+                outp = Path(out_dir) / "comparison_summary.csv"
+                df.to_csv(outp, index=False)
                 logging.info(f"Wrote comparison summary -> {outp}")
-            df = built
 
+    # Normalize & align
     if 'ID' not in df.columns:
-        df = df.rename(columns={df.columns[0]:'ID'})
+        df = df.rename(columns={df.columns[0]: 'ID'})
     df = df.set_index('ID')
     df = df.drop(columns=['SUM'], errors='ignore')
+
     missing = [c for c in CANON_COLS if c not in df.columns]
     if missing:
-        logging.warning(f"Comparison vectors missing {len(missing)} codes from HEADING "
-                        f"(filling 0). Example: {missing[:10]}")
-    df = df.reindex(columns=CANON_COLS, fill_value=0.0)
-    return df
+        logging.warning(f"Comparison vectors missing {len(missing)} AA codes (filled with 0). "
+                        f"Examples: {missing[:8]}")
+
+    return df.reindex(columns=CANON_COLS, fill_value=0.0)
 
 
 # ---------- Comparisons & Plots ----------
@@ -390,6 +397,10 @@ def parse_args():
 def main():
     args = parse_args()
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    comp = load_comparison(args.comparison_dir or "",
+                       comparison_csv=args.comparison_csv,
+                       manifest_path=args.manifest,
+                       out_dir=args.out_dir)
 
     summary_df = None
     sim_df = None
