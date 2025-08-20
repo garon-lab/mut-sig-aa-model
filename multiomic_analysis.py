@@ -12,13 +12,13 @@ Features:
 
 Usage:
     python multiomic_analysis.py \
-        --input_dir <directory of integrated CSVs> \
+        --in_dir <directory of integrated CSVs> \
         --manifest <manifest file> \
         --out_dir <output directory> \
         [--step stats|plots|cluster|protein_only|no_protein|single_entry|all]
 
 Arguments:
-    --input_dir  Directory containing per-sample integrated CSV files
+    --in_dir     Directory containing per-sample integrated CSV files
     --manifest   Tab-delimited manifest file listing sample IDs in the first column
     --out_dir    Directory to write analysis outputs
     --step       Analysis step to run: stats, plots, cluster, protein_only (selects for genes with protein expression), no_protein (selects for genes without protein expression), single_entry (compresses each gene information into a single row selecting for highest E value and averaging beta values), or all (default: all)
@@ -40,7 +40,7 @@ target_logger.setLevel(logging.INFO)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Multi-Omic Analysis Pipeline")
-    parser.add_argument('--input_dir', required=True,
+    parser.add_argument('--input_dir', '--folder', '--in_dir', '--in-dir', '--input-dir', dest='root', required=True,
                         help='Directory of per-sample integrated CSV files')
     parser.add_argument('--manifest', required=True,
                         help='Manifest file listing sample IDs')
@@ -168,6 +168,7 @@ def main():
     args = parse_args()
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    project_root = Path(args.root).resolve()
 
     data = load_data(args.input_dir, args.manifest)
 
