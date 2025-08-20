@@ -2,51 +2,59 @@
 """
 Comparison Pipeline
 
-Summarizes observed amino acid variant counts per sample and generates a count heatmap.
+Summarizes observed amino acid variant counts per sample and generates similarity
+and visualization outputs.
 
-Features:
-1. Aggregate observed amino acid variants into a single vector per sample.
-2. Visualize count distributions across samples as a heatmap.
+Features
+--------
+1) Aggregate observed amino acid variants into one vector per sample (summary.csv)
+   - Auto-detects 'tall' (ID, ST, END, Count) OR 21×21 matrix files in --observed-dir
+2) Compare observed vectors vs. comparison/reference vectors (cosine similarity)
+3) Visualize similarity as a heatmap
+4) Plot clustermaps (counts & row-wise proportions)
+5) Single-file utilities: plot counts/proportions and optional compare
 
-Usage:
+Dependencies: pandas, numpy, matplotlib, seaborn
+
+Typical usage:
     python comparison_and_modeling.py \
-        --observed_dir <directory of observed AA matrix CSVs> \
-        --comparison_dir <directory of comparison AA matrix CSVs> \
-        --manifest <manifest file> \
-        --out_dir <output directory> \
-        [--vector_file <observed summary CSV>] \
-        [--step summarize|heatmap|all]
+        --obs_dir <observed CSVs> \
+        --comp_dir <directory containing comparison_vectors.csv> \
+        --manifest <optional manifest (first col are IDs)> \
+        --out_dir <output> \
+        --step all
 
-Arguments:
-    --observed_dir      Directory of observed AA CSVs named {sample-id}.csv
-    --comparison_dir    Directory of comparison AA matrix CSVs named {sample-id}.csv
-    --manifest          Tab-delimited manifest file listing sample IDs (first column)
-    --out_dir           Directory to save outputs: summary and heatmap
-    --vector_file       Optional path to save or load single summary CSV (default: out_dir/observed_summary.csv)
-    --step              Step to run: summarize, compare, heatmap, single_file or all (default: all)
-
-Dependencies:
-    pandas
-    numpy
-    matplotlib
-    seaborn
+Single-file usage (you already have a summary CSV):
+    python comparison_and_modeling.py \
+        --vector_file path/to/summary.csv \
+        --comp_dir <directory with comparison_vectors.csv> \
+        --out_dir <output> \
+        --step single-file
 """
 
 import argparse
 import logging
 from pathlib import Path
+from typing import Optional, Set, Dict
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sb
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-# Helper
+# ---------- Helpers & Constants ----------
 
-def _normalize_id_col(df):
-    # Accept a variety of common ID column names
+AA3_TO_1: Dict[str, str] = {
+    "ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C",
+    "GLN":"Q","GLU":"E","GLY":"G","HIS":"H","ILE":"I",
+    "LEU":"L","LYS":"K","MET":"M","PHE":"F","PRO":"P",
+    "SER":"S","THR":"T","TRP":"W","TYR":"Y","VAL":"V",
+    "TER":"*", "STOP":"*"
+}
+AA1_SET = set(list("ARNDCQEGHILKMFPSTWYV") + ["X"])  # 'X' used for STOP here
+
+def _normalize_id_col(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {
         'Case-ID': 'ID', 'case-id': 'ID', 'CaseId': 'ID',
         'CaseID': 'ID', 'caseID': 'ID', 'Case_Id': 'ID'
@@ -56,260 +64,378 @@ def _normalize_id_col(df):
         raise KeyError("Observed file is missing an 'ID' (or Case-ID) column.")
     return df
 
+def normalize_aa_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize any reasonable AA start/end columns to ST/END."""
+    candidates = [
+        ('st','end'),
+        ('fromaa','toaa'),
+        ('from','to'),
+        ('refaa','altaa'),
+        ('ref_aa','alt_aa'),
+    ]
+    lower = {c.lower(): c for c in df.columns}
+    for left, right in candidates:
+        if left in lower and right in lower:
+            return df.rename(columns={lower[left]:'ST', lower[right]:'END'})
+    raise KeyError("Could not find AA start/end columns; expected one of "
+                   "ST/END, FromAA/ToAA, from/to, RefAA/AltAA, Ref_AA/Alt_AA")
 
-# Columns for summarizing observed variants
-SUB_VECTOR = ['ID','SUM','AE','AG','AP','AS','AT','AV','CF','CG','CR','CS','CW','CX','CY',
-              'DA','DE','DG','DH','DN','DV','DY','EA','ED','EG','EK','EQ','EV','EX','FC',
-              'FI','FL','FS','FV','FY','GA','GC','GD','GE','GR','GS','GV','GW','GX','HD',
-              'HL','HN','HP','HQ','HR','HY','IF','IK','IL','IM','IN','IR','IS','IT','IV',
-              'IW','KE','KI','KM','KN','KQ','KR','KT','KX','LF','LH','LI','LM','LP','LQ',
-              'LR','LS','LV','LW','LX','MI','MK','ML','MR','MT','MV','ND','NH','NI','NK',
-              'NS','NT','NY','PA','PH','PL','PQ','PR','PS','PT','QE','QH','QK','QL','QP',
-              'QR','QX','RC','RG','RH','RI','RK','RL','RM','RP','RQ','RS','RT','RW','RX',
-              'SA','SC','SF','SG','SI','SL','SN','SP','SR','ST','SW','SX','SY','TA','TI',
-              'TK','TM','TN','TP','TR','VA','VD','VE','VF','VG','VI','VL','VM','WC','WG',
-              'WL','WR','WS','WX','XC','XE','XG','XK','XL','XQ','XR','XS','XW','XY','YC',
-              'YD','YF','YH','YN','YS','YX']
+def _norm_symbol_to_one_letter_or_X(x: object) -> Optional[str]:
+    """Map row/col headers to 1-letter AA; STOP/*/TER/Ter/X => 'X'."""
+    if x is None:
+        return None
+    s = str(x).strip()
+    if not s:
+        return None
+    su = s.upper()
+    if su in ("*", "STOP", "TER", "TERM", "X"):
+        return "X"
+    if len(su) == 1 and su in AA1_SET.union(set("ARNDCQEGHILKMFPSTWYV")):
+        # If plain 1-letter but not X (stop), return as-is; X already handled
+        return su if su != "*" else "X"
+    if len(su) == 3 and su in AA3_TO_1:
+        one = AA3_TO_1[su]
+        return "X" if one == "*" else one
+    return None
 
-# Columns for summarizing variants
+# AA-pair column order for vectors
 HEADING = ['AE','AG','AP','AS','AT','AV','CF','CG','CR','CS','CW','CX','CY',
-              'DA','DE','DG','DH','DN','DV','DY','EA','ED','EG','EK','EQ','EV','EX','FC',
-              'FI','FL','FS','FV','FY','GA','GC','GD','GE','GR','GS','GV','GW','GX','HD',
-              'HL','HN','HP','HQ','HR','HY','IF','IK','IL','IM','IN','IR','IS','IT','IV',
-              'IW','KE','KI','KM','KN','KQ','KR','KT','KX','LF','LH','LI','LM','LP','LQ',
-              'LR','LS','LV','LW','LX','MI','MK','ML','MR','MT','MV','ND','NH','NI','NK',
-              'NS','NT','NY','PA','PH','PL','PQ','PR','PS','PT','QE','QH','QK','QL','QP',
-              'QR','QX','RC','RG','RH','RI','RK','RL','RM','RP','RQ','RS','RT','RW','RX',
-              'SA','SC','SF','SG','SI','SL','SN','SP','SR','ST','SW','SX','SY','TA','TI',
-              'TK','TM','TN','TP','TR','VA','VD','VE','VF','VG','VI','VL','VM','WC','WG',
-              'WL','WR','WS','WX','XC','XE','XG','XK','XL','XQ','XR','XS','XW','XY','YC',
-              'YD','YF','YH','YN','YS','YX']
+           'DA','DE','DG','DH','DN','DV','DY','EA','ED','EG','EK','EQ','EV','EX','FC',
+           'FI','FL','FS','FV','FY','GA','GC','GD','GE','GR','GS','GV','GW','GX','HD',
+           'HL','HN','HP','HQ','HR','HY','IF','IK','IL','IM','IN','IR','IS','IT','IV',
+           'IW','KE','KI','KM','KN','KQ','KR','KT','KX','LF','LH','LI','LM','LP','LQ',
+           'LR','LS','LV','LW','LX','MI','MK','ML','MR','MT','MV','ND','NH','NI','NK',
+           'NS','NT','NY','PA','PH','PL','PQ','PR','PS','PT','QE','QH','QK','QL','QP',
+           'QR','QX','RC','RG','RH','RI','RK','RL','RM','RP','RQ','RS','RT','RW','RX',
+           'SA','SC','SF','SG','SI','SL','SN','SP','SR','ST','SW','SX','SY','TA','TI',
+           'TK','TM','TN','TP','TR','VA','VD','VE','VF','VG','VI','VL','VM','WC','WG',
+           'WL','WR','WS','WX','XC','XE','XG','XK','XL','XQ','XR','XS','XW','XY','YC',
+           'YD','YF','YH','YN','YS','YX']
 
-# Substitution matrix for expected AA vectors
-SUB_MATRIX = [
-    ['A',0,0,'AD','AE',0,'AG',0,0,0,0,0,0,'AP',0,0,'AS','AT','AV',0,0,0],
-    ['C',0,0,0,0,'CF','CG',0,0,0,0,0,0,0,0,'CR','CS',0,0,'CW','CY','CX'],
-    ['D','DA',0,0,'DE','DG','DH',0,0,0,0,'DN',0,0,0,0,0,'DV',0,'DY',0],
-    ['E','EA',0,'ED',0,0,'EG',0,0,'EK',0,0,0,0,'EQ',0,0,0,'EV',0,0,'EX'],
-    ['F',0,'FC',0,0,0,0,0,'FI',0,'FL',0,0,0,0,0,'FS',0,'FV',0,'FY',0],
-    ['G','GA','GC','GD','GE',0,0,0,0,0,0,0,0,0,0,'GR','GS',0,'GV','GW',0,'GX'],
-    ['H',0,0,'HD',0,0,0,0,0,'HL',0,'HN','HP','HQ','HR',0,0,0,0,'HY',0],
-    ['I',0,0,0,0,'IF',0,0,0,'IK','IL','IM','IN',0,0,'IR','IS','IT','IV','IW',0,0],
-    ['K',0,0,'KE',0,0,0,'KI',0,0,'KM','KN',0,'KQ','KR',0,'KT',0,0,0,'KX'],
-    ['L',0,0,0,0,'LF',0,'LH','LI',0,0,'LM',0,'LP','LQ','LR','LS',0,'LV','LW',0,'LX'],
-    ['M',0,0,0,0,0,0,0,'MI','MK','ML',0,0,0,0,'MR',0,'MT','MV',0,0,0],
-    ['N',0,0,'ND',0,0,'NH','NI','NK',0,0,0,0,0,0,'NS','NT',0,0,'NY',0],
-    ['P','PA',0,0,0,0,0,'PH',0,0,'PL',0,0,0,'PQ','PR','PS','PT',0,0,0,0],
-    ['Q',0,0,0,'QE',0,0,'QH','QK','QL',0,0,'QP',0,'QR',0,0,0,0,0,'QX'],
-    ['R',0,'RC',0,0,0,'RG','RH','RI','RK','RL','RM',0,'RP','RQ',0,'RS','RT',0,'RW',0,'RX'],
-    ['S','SA','SC',0,0,'SF','SG',0,'SI',0,'SL',0,'SN','SP',0,'SR',0,'ST',0,'SW','SY','SX'],
-    ['T','TA',0,0,0,0,0,0,'TI','TK',0,'TM','TN','TP',0,'TR',0,0,0,0,0,0],
-    ['V','VA',0,'VD','VE','VF','VG',0,'VI',0,'VL','VM',0,0,0,0,0,0,0,0,0,0],
-    ['W',0,'WC',0,0,0,'WG',0,0,0,'WL',0,0,0,0,'WR','WS',0,0,0,0,'WX'],
-    ['Y',0,'YC','YD',0,'YF',0,'YH',0,0,0,0,'YN',0,0,0,'YS',0,0,0,0,'YX'],
-    ['STOP',0,'XC',0,'XE',0,'XG',0,0,'XK','XL',0,0,0,'XQ','XR','XS',0,0,'XW','XY',0]
-]
+# ---------- IO & Vectorization ----------
 
+def _read_manifest_ids(manifest_path: Optional[str]) -> Optional[Set[str]]:
+    if not manifest_path:
+        return None
+    m = pd.read_table(manifest_path, header=None).iloc[:, 0].astype(str)
+    return set(m)
+
+def _collect_observed_tall(observed_dir: str, manifest_ids: Optional[Set[str]]) -> pd.DataFrame:
+    """
+    Ingest all 'tall' observed CSVs: must contain ID, ST, END and (optionally) Count.
+    If Count is missing, assume Count=1 for each row.
+    """
+    parts = []
+    for fp in Path(observed_dir).glob("*.csv"):
+        try:
+            df = pd.read_csv(fp)
+            df = _normalize_id_col(df)
+            df = normalize_aa_cols(df)
+            if 'Count' not in df.columns:
+                df['Count'] = 1
+            if manifest_ids is not None:
+                df = df[df['ID'].astype(str).isin(manifest_ids)]
+            parts.append(df[['ID','ST','END','Count']])
+        except Exception as e:
+            logging.debug(f"[tall adapter] skipping {fp.name}: {e}")
+    if not parts:
+        raise FileNotFoundError("No tall-format files found.")
+    return pd.concat(parts, ignore_index=True)
+
+def _vectorize_one_matrix_file(fp: Path) -> Optional[pd.DataFrame]:
+    """
+    Read a single 21×21-like matrix and return a 1-row DataFrame with columns in HEADING.
+    File name stem is used as sample ID.
+    """
+    try:
+        raw = pd.read_csv(fp, index_col=0)
+    except Exception as e:
+        logging.debug(f"[matrix adapter] cannot read {fp.name}: {e}")
+        return None
+
+    # Normalize axis labels and choose orientation that yields more valid AA labels
+    rows_norm = [ _norm_symbol_to_one_letter_or_X(x) for x in raw.index ]
+    cols_norm = [ _norm_symbol_to_one_letter_or_X(x) for x in raw.columns ]
+    row_valid = sum(1 for r in rows_norm if r in AA1_SET)
+    col_valid = sum(1 for c in cols_norm if c in AA1_SET)
+
+    mat = raw.copy()
+    if row_valid < col_valid:
+        mat = mat.T
+        rows_norm, cols_norm = cols_norm, rows_norm
+        row_valid, col_valid = col_valid, row_valid
+
+    # Apply normalized labels
+    mat.index = rows_norm
+    mat.columns = cols_norm
+    # Keep only valid AAs
+    mat = mat.loc[[r for r in mat.index if r in AA1_SET],
+                  [c for c in mat.columns if c in AA1_SET]]
+    if mat.empty:
+        return None
+
+    # Force numeric
+    mat = mat.apply(pd.to_numeric, errors='coerce').fillna(0)
+
+    # Build row for this sample
+    sample_id = fp.stem
+    row = {'ID': sample_id}
+    for code in HEADING:
+        st, en = code[0], code[1]
+        val = 0
+        if st in mat.index and en in mat.columns:
+            v = mat.at[st, en]
+            try:
+                val = float(v)
+            except Exception:
+                val = 0
+        row[code] = val
+    row['SUM'] = sum(row[c] for c in HEADING)
+    return pd.DataFrame([row], columns=['ID','SUM'] + HEADING)
+
+def _collect_observed_matrices(observed_dir: str, manifest_ids: Optional[Set[str]]) -> pd.DataFrame:
+    rows = []
+    for fp in Path(observed_dir).glob("*.csv"):
+        if manifest_ids and fp.stem not in manifest_ids:
+            continue
+        r = _vectorize_one_matrix_file(fp)
+        if r is not None:
+            rows.append(r)
+    if not rows:
+        raise FileNotFoundError("No matrix-format files could be vectorized.")
+    return pd.concat(rows, ignore_index=True)
+
+def summarize_observed(observed_dir: str, out_dir: str, manifest_path: Optional[str]) -> pd.DataFrame:
+    """
+    Produce out_dir/summary.csv
+    Columns: ID, SUM, <AA-pairs in HEADING...>
+    Auto-detect tall vs matrix inputs.
+    """
+    manifest_ids = _read_manifest_ids(manifest_path)
+
+    # Try tall first, fall back to matrix adapter
+    try:
+        tall = _collect_observed_tall(observed_dir, manifest_ids)
+        tall['code'] = tall['ST'].astype(str) + tall['END'].astype(str)
+        piv = tall.pivot_table(index='ID', columns='code', values='Count',
+                               aggfunc='sum', fill_value=0)
+        for c in HEADING:
+            if c not in piv.columns:
+                piv[c] = 0
+        piv = piv[HEADING]
+        piv.insert(0, 'SUM', piv.sum(axis=1))
+        out_df = piv.reset_index()
+        logging.info("Summarized observed (tall format detected).")
+    except Exception:
+        # Matrix adapter
+        out_df = _collect_observed_matrices(observed_dir, manifest_ids)
+        # Ensure ordering
+        out_df = out_df[['ID','SUM'] + HEADING]
+        logging.info("Summarized observed (matrix format detected).")
+
+    out_path = Path(out_dir) / "summary.csv"
+    out_df.to_csv(out_path, index=False)
+    logging.info(f"Saved summary -> {out_path}")
+    return out_df
+
+def load_comparison(comparison_dir: str, comparison_csv: Optional[str] = None) -> pd.DataFrame:
+    """
+    Load comparison/reference vectors. Default file name: comp_dir/comparison_vectors.csv
+    Must have an ID (first column if unnamed) and AA-pair columns.
+    Returns dataframe indexed by ID with only AA-pair columns (ordered by HEADING when present).
+    """
+    path = Path(comparison_csv) if comparison_csv else Path(comparison_dir) / "comparison_vectors.csv"
+    df = pd.read_csv(path)
+    if 'ID' not in df.columns:
+        df = df.rename(columns={df.columns[0]: 'ID'})
+    df = df.set_index('ID')
+
+    cols_present = [c for c in HEADING if c in df.columns]
+    if not cols_present:
+        raise ValueError(f"Comparison vectors file '{path}' has no AA-pair columns matching the 21×21 codes.")
+    if len(cols_present) < len(HEADING):
+        logging.warning(f"Comparison vectors missing {len(HEADING) - len(cols_present)} AA codes (will align to overlap).")
+
+    return df[cols_present]
+
+# ---------- Comparisons & Plots ----------
+
+def compare_vectors(observed_summary: pd.DataFrame, comparison_df: pd.DataFrame, out_dir: str) -> pd.DataFrame:
+    """
+    Cosine similarity between observed (rows=samples) and comparison (rows=reference labels).
+    observed_summary must have columns: ID, SUM, <AA-pairs...>
+    """
+    obs = observed_summary.set_index('ID').drop(columns=['SUM'], errors='ignore')
+    common = [c for c in obs.columns if c in comparison_df.columns]
+    if not common:
+        raise ValueError("No overlapping AA-pair columns between observed and comparison.")
+
+    X = obs[common].to_numpy(dtype=float)
+    Y = comparison_df[common].to_numpy(dtype=float)
+
+    Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-12)
+    Yn = Y / (np.linalg.norm(Y, axis=1, keepdims=True) + 1e-12)
+    sims = Xn @ Yn.T
+
+    sim_df = pd.DataFrame(sims, index=obs.index, columns=comparison_df.index)
+    out_path = Path(out_dir) / "similarity_matrix.csv"
+    sim_df.to_csv(out_path)
+    logging.info(f"Saved similarity matrix -> {out_path}")
+    return sim_df
+
+def plot_similarity_heatmap(sim_df: pd.DataFrame, out_dir: str, name: str = "heatmap.png"):
+    plt.figure(figsize=(10, 10))
+    sb.heatmap(sim_df.astype(float), cmap='viridis')
+    out_path = Path(out_dir) / name
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200)
+    plt.close()
+    logging.info(f"Saved heatmap -> {out_path}")
+
+def plot_clustermap(summary_df: pd.DataFrame, out_dir: str, proportions: bool = False, name: Optional[str] = None):
+    """
+    Clustermap of sample-by-AApair matrix (counts or row-wise proportions).
+    summary_df columns: ID, SUM, AA-pairs...
+    """
+    mat = summary_df.set_index('ID').drop(columns=['SUM'], errors='ignore').copy()
+    if proportions:
+        denom = summary_df.set_index('ID')['SUM'].replace(0, np.nan)
+        mat = mat.div(denom, axis=0).fillna(0) * 100.0  # percent
+    cm = sb.clustermap(mat.T, metric='cosine', method='average', cmap='viridis',
+                       figsize=(18, 22))
+    out_path = Path(out_dir) / (name or ("clustermap_prop.png" if proportions else "clustermap_counts.png"))
+    cm.savefig(out_path, dpi=200)
+    plt.close(cm.fig)
+    logging.info(f"Saved clustermap -> {out_path}")
+
+# ---------- Single-file utilities ----------
+
+def _read_summary_csv(vector_file: str) -> pd.DataFrame:
+    """
+    Expect a CSV with columns: ID, SUM, <AA-pair columns...>
+    If SUM is missing, we compute it.
+    """
+    df = pd.read_csv(vector_file)
+    if 'ID' not in df.columns:
+        df = df.rename(columns={df.columns[0]: 'ID'})
+    cols_present = [c for c in HEADING if c in df.columns]
+    if 'SUM' not in df.columns:
+        df['SUM'] = df[cols_present].sum(axis=1)
+    # reorder
+    return df[['ID','SUM'] + cols_present]
+
+def single_file_plots(vector_file: str, out_dir: str):
+    """
+    From a precomputed vector CSV -> heatmaps and clustermaps (counts + proportions).
+    """
+    df = _read_summary_csv(vector_file)
+
+    # counts heatmap
+    mat_counts = df.set_index('ID').drop(columns=['SUM'], errors='ignore').T
+    plt.figure(figsize=(18, 12))
+    sb.heatmap(mat_counts, cmap='viridis')
+    out_path = Path(out_dir) / "aa-counts.png"
+    plt.tight_layout(); plt.savefig(out_path, dpi=200); plt.close()
+    logging.info(f"Saved -> {out_path}")
+
+    # proportions heatmap
+    denom = df.set_index('ID')['SUM'].replace(0, np.nan)
+    mat_prop = df.set_index('ID').drop(columns=['SUM'], errors='ignore').div(denom, axis=0).fillna(0).T * 100.0
+    plt.figure(figsize=(18, 12))
+    sb.heatmap(mat_prop, cmap='viridis', vmin=0, vmax=5)
+    out_path = Path(out_dir) / "aa-proportions.png"
+    plt.tight_layout(); plt.savefig(out_path, dpi=200); plt.close()
+    logging.info(f"Saved -> {out_path}")
+
+    # clustermaps
+    plot_clustermap(df, out_dir, proportions=False, name="aa-clustermap-counts.png")
+    plot_clustermap(df, out_dir, proportions=True,  name="aa-clustermap-proportions.png")
+
+def single_file_compare(vector_file: str, comparison_dir: str, out_dir: str, comparison_csv: Optional[str] = None):
+    """
+    Compare vectors from a precomputed summary file to comparison vectors.
+    Saves single_similarity.csv and single_similarity_heatmap.png
+    """
+    df = _read_summary_csv(vector_file)
+    comp = load_comparison(comparison_dir, comparison_csv=comparison_csv)
+    sim = compare_vectors(df, comp, out_dir)
+    plot_similarity_heatmap(sim, out_dir, name="single_similarity_heatmap.png")
+
+# ---------- CLI ----------
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Comparison Pipeline")
-    parser.add_argument('--observed_dir', required=True,
-                        help='Directory of observed AA matrix CSVs')
-    parser.add_argument('--comparison_dir', required=True,
-                        help='Directory of comparison AA matrix CSVs')
-    parser.add_argument('--manifest', required=True,
-                        help='Manifest file listing sample IDs')
-    parser.add_argument('--out_dir', required=True,
-                        help='Directory for outputs')
-    parser.add_argument('--vector_file', required=False,
-                        help='Path to summary CSV to skip compare step')
-    parser.add_argument('--step', choices=['summarize','compare','heatmap','single-file','all'], default='all',
-                        help='Step(s) to run')
-    return parser.parse_args()
+    p = argparse.ArgumentParser(description="Comparison Pipeline")
+    p.add_argument('--observed-dir', '--observed_dir', '--obs-dir', '--obs_dir',
+                   dest='observed_dir',
+                   help='Directory of observed AA CSVs (tall files or 21x21 matrices)')
+    p.add_argument('--comparison-dir', '--comparison_dir', '--comp-dir', '--comp_dir',
+                   dest='comparison_dir', required=False,
+                   help='Directory containing comparison_vectors.csv (for compare/heatmap/single-file compare)')
+    p.add_argument('--comparison-csv', dest='comparison_csv', default=None,
+                   help="Optional explicit path to comparison/reference CSV (overrides default comparison_vectors.csv)")
+    p.add_argument('--manifest', help='Optional manifest (first column are sample IDs) to filter observed')
+    p.add_argument('--out-dir', '--out_dir', dest='out_dir', required=True,
+                   help='Directory for outputs')
+    p.add_argument('--vector-file', '--vector_file', dest='vector_file',
+                   help='Path to an existing summary CSV (used by --step single-file or to skip summarize)')
+    p.add_argument('--step', choices=['summarize','compare','heatmap','single-file','all'],
+                   default='all', help='Which step(s) to run')
+    return p.parse_args()
 
-
-
-
-def load_observed(observed_dir, manifest):
-    ids = pd.read_table(manifest, header=None).iloc[:,0].astype(str)
-    obs = {}
-    for sid in ids:
-        fp = Path(observed_dir)/f"{sid}.csv"
-        if fp.exists(): obs[sid] = pd.read_csv(fp, index_col=0)
-        else: logging.warning(f"Missing observed for {sid}")
-    return obs
-
-
-def load_comparison(comparison_dir, manifest):
-    ids = pd.read_table(manifest, header=None).iloc[:,0].astype(str)
-    obs = {}
-    for sid in ids:
-        fp = Path(comparison_dir)/f"{sid}.csv"
-        if fp.exists(): obs[sid] = pd.read_csv(fp, index_col=0)
-        else: logging.warning(f"Missing observed for {sid}")
-    return obs
-
-
-def summarize_observed(observed, out_dir, vector_file=None):
-    rows = []
-    obs = pd.read_csv(path_to_observed_csv)
-    obs = _normalize_id_col(obs)
-    
-    # also normalize AA column names if needed
-    obs = obs.rename(columns={
-        'FromAA': 'FromAA',
-        'ToAA': 'ToAA',
-        'from': 'FromAA', 'to': 'ToAA',
-        'fromAA': 'FromAA', 'toAA': 'ToAA'
-    })
-
-required = {'ID','FromAA','ToAA','Count'}
-missing = required - set(obs.columns)
-if missing:
-    raise KeyError(f"Observed file {path_to_observed_csv} missing columns: {sorted(missing)}")
-
-    for sid, df in observed.items():
-        row = {'ID': sid, 'SUM': len(df)}
-        for code in SUB_VECTOR[2:]:
-            r, c = code[0], code[1:]
-            row[code] = ((df['ST']==r)&(df['END']==c)).sum()
-        rows.append(row)
-    summary = pd.DataFrame(rows).set_index('ID')
-    summary = summary.reindex(columns=SUB_VECTOR[1:])
-    out_path = Path(vector_file) if vector_file else Path(out_dir)/'observed_summary.csv'
-    summary.to_csv(out_path)
-    logging.info(f"Saved observed summary to {out_path}")
-    return summary
-
-
-def compare_vectors(observed_summary, out_dir, vector_file):
-    sims = pd.DataFrame(index=observed_summary.index, columns=expected.index)
-    for sid in observed_summary.index:
-        obs_vec = observed_summary.loc[sid].values.astype(float)
-        for sig in expected.index:
-            exp_vec = expected.loc[sig].astype(float).values
-            sims.loc[sid, sig] = np.dot(exp_vec, obs_vec)/(np.linalg.norm(exp_vec)*np.linalg.norm(obs_vec))
-    out_path = Path(comparison_file) if comparison_file else Path(out_dir)/"similarity_matrix.csv"
-    sims.to_csv(out_path)
-    logging.info(f"Similarity matrix saved to {out_path}")
-    return sims
-
-
-def plot_heatmap(similarity, out_dir, vector_file=None):
-    fig, ax = plt.subplots(figsize=(10,10))
-    sb.heatmap(similarity.astype(float), cmap='viridis', ax=ax)
-    hm_path = Path(vector_file) if vector_file else Path(out_dir)/"heatmap.png"
-    plt.tight_layout()
-    plt.savefig(hm_path)
-    plt.close(fig)
-    logging.info(f"Heatmap saved to {hm_path}")
-
-
-def plot_cluster(observed_dir, out_dir, vector_file=None):
-    ids = pd.read_table(manifest, header=None).iloc[:,0].astype(str)
-    file1 = observed_dir + id + '.csv'
-    M = pd.read_csv(file1)
-    ID = M.iloc[:,0]
-    M = M.iloc[:,1:]
-    M = np.matrix(M, dtype=float)
-    M = M/M.sum
-    MOD = MOD.T
-    MOD = MOD + 0.0000000000000000000001
-    cbar_kws= {'label':'Percentage of Substitutions'}
-    heat_map4 = sb.clustermap(MOD, vmin=0, vmax=10, metric='cosine', figsize=(30,40), cbar_kws=cbar_kws)
-    plt.savefig(outpath)
-    logging.info(f"Heatmap saved to {hm_path}")
-   
-  
-def compare_multiple(observed_dir, comparison_dir, out_dir, vector_file=None):
-    ids = pd.read_table(manifest, header=None).iloc[:,0].astype(str)
-    file1 = observed_dir + id + '.csv'
-    file2 = comparison_dir + id + '.csv'
-    outpath = out_dir + id + '-compared.csv'
-  
-    M = pd.read_csv(file1)
-    ID = M.iloc[:,0]
-    M = M.iloc[:,1:]
-    M = np.matrix(M, dtype=float)
-    M = M/M.sum
-    
-    N = pd.read_csv(file2)
-    N = N.iloc[:,1:]
-    N = np.matrix(N, dtype=float)
-    N = N/N.sum
-
-    delt = M-N
-    delt = delt + 0.0000000000000000000001
-    delt = pd.DataFrame(delt)
-    delt.to_csv(outpath, index=False, header=False)
-    
-    text1 = HEADING
-    text2 = ID.T
-    outpath = f"{Out}{id}-compared.png"
-    delt = delt.T
-    sb.set(rc={'figure.figsize':(30,40)})
-    cbar_kws= {'shrink':0.25,'ticks':[-5,-4,-3,-2,-1,0,1,2,3,4,5],'label':'Percent of Substitutions','orientation':'vertical',"use_gridspec":False}
-    heat_map = sb.heatmap(delt, vmin=-5, vmax=5,annot_kws = {'size':15}, cbar_kws=cbar_kws)
-    heat_map.set_yticklabels(text1)
-    heat_map.set_xticklabels(text2, rotation=90)
-    plt.savefig(outpath)
-
-  
-def single_file_count(vector_file):
-    df = pd.read_csv(vector_file)
-    ID = df.iloc[:,0]
-    text1 = HEADING
-    text2 = ID.T
-    out_path = out_dir + 'aa-count.png'
-    MOD = df.iloc[:,2:]
-    MOD = MOD.T
-    MOD = MOD + 0.000000000000000000001
-    sb.set(rc={'figure.figsize':(30,40)})
-    cbar_kws= {'shrink':0.25,'ticks':[0,1,2,3,4,5,6,7,8,9,10],'label':'Number of Substitutions','orientation':'vertical',"use_gridspec":False}
-    heat_map = sb.heatmap(MOD, vmin=0, vmax=10,annot_kws = {'size':15}, cbar_kws=cbar_kws)
-    heat_map.set_yticklabels(text1)
-    heat_map.set_xticklabels(text2, rotation=90)
-    plt.savefig(outpath)
-
-
-def single_file_proportion(vector_file):
-    df = pd.read_csv(vector_file)
-    ID = df.iloc[:,0]
-    text1 = HEADING
-    text2 = ID.T
-    out_path = out_dir + 'aa-proportion.png'
-    NSC = df.iloc[:,1]
-    MOD = df.iloc[:,2:]
-    MOD = MOD/NSC
-    MOD = MOD.T
-    MOD = MOD + 0.000000000000000000001
-    sb.set(rc={'figure.figsize':(30,40)})
-    cbar_kws= {'shrink':0.25,'ticks':[0,1,2,3,4,5],'label':'Percent of Substitutions','orientation':'vertical',"use_gridspec":False}
-    heat_map = sb.heatmap(MOD, vmin=0, vmax=5,annot_kws = {'size':15}, cbar_kws=cbar_kws)
-    heat_map.set_yticklabels(text1)
-    heat_map.set_xticklabels(text2, rotation=90)
-    plt.savefig(outpath)
-
+# ---------- Main ----------
 
 def main():
     args = parse_args()
-    out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
 
-    comparison = load_comparison(args.comparison_dir,args.manifest)
-    observed = load_observed(args.observed_dir,args.manifest)
+    summary_df = None
+    sim_df = None
 
-    if args.step in ['summarize','all']:
-        observed_summary = summarize_observed(observed,args.out_dir,args.vector_file)
-    else:
-        observed_summary = pd.read_csv(Path(args.vector_file) if args.vector_file else Path(args.out_dir)/'observed_summary.csv', index_col=0)
+    # SUMMARIZE
+    if args.step in ('summarize', 'all'):
+        if not args.observed_dir:
+            raise SystemExit("--observed-dir is required for step 'summarize' or 'all'")
+        summary_df = summarize_observed(args.observed_dir, args.out_dir, args.manifest)
 
-    if args.step in ['compare','all']:
-        sims = compare_vectors(expected,observed_summary,args.out_dir,args.comparison_file)
-    else:
-        sims = pd.read_csv(Path(args.comparison_file) if args.comparison_file else Path(args.out_dir)/"similarity_matrix.csv", index_col=0)
+    # If skipping summarize but we need the summary later, load it
+    if summary_df is None and args.step in ('compare','heatmap','all'):
+        vf = args.vector_file or (Path(args.out_dir) / 'summary.csv')
+        if not Path(vf).exists():
+            raise SystemExit(f"Summary CSV not found: {vf}. Either run --step summarize first or pass --vector_file.")
+        summary_df = _read_summary_csv(str(vf))
 
-    if args.step in ['heatmap','all']:
-        plot_heatmap(sims,args.out_dir,args.comparison_file)
+    # COMPARE
+    if args.step in ('compare','all'):
+        if not args.comparison_dir and not args.comparison_csv:
+            raise SystemExit("--comparison-dir or --comparison-csv is required for 'compare'/'all'")
+        comp = load_comparison(args.comparison_dir or "", comparison_csv=args.comparison_csv)
+        sim_df = compare_vectors(summary_df, comp, args.out_dir)
 
-if __name__=='__main__':
+    # HEATMAP
+    if args.step in ('heatmap','all'):
+        if sim_df is None:
+            # load previously saved similarity if not computed in this run
+            sim_path = Path(args.out_dir) / "similarity_matrix.csv"
+            if not sim_path.exists():
+                raise SystemExit("similarity_matrix.csv not found. Run --step compare first.")
+            sim_df = pd.read_csv(sim_path, index_col=0)
+        plot_similarity_heatmap(sim_df, args.out_dir, name="heatmap.png")
+
+        # also drop clustermaps from summary if we have it
+        if summary_df is not None:
+            plot_clustermap(summary_df, args.out_dir, proportions=False)
+            plot_clustermap(summary_df, args.out_dir, proportions=True)
+
+    # SINGLE-FILE utilities
+    if args.step == 'single-file':
+        if not args.vector_file:
+            raise SystemExit("--vector-file is required for step 'single-file'")
+        single_file_plots(args.vector_file, args.out_dir)
+        # optional: compare the single-file vectors to comparison vectors
+        if args.comparison_dir or args.comparison_csv:
+            single_file_compare(args.vector_file, args.comparison_dir or "", args.out_dir,
+                                comparison_csv=args.comparison_csv)
+
+
+if __name__ == '__main__':
     main()
