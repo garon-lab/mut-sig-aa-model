@@ -133,63 +133,56 @@ def _read_one_sample_csv(fp: Path) -> pd.Series:
           with optional ID and/or SUM columns.
     Returns a Series indexed by CANON_COLS with float counts.
     """
-    # sniff delimiter
-    try:
-        df = pd.read_csv(fp, sep=None, engine="python")
-    except Exception:
-        df = pd.read_csv(fp)  # fallback
 
-    # ---- (c) vector-per-sample (wide) ----
-    # If the file already has many of your AA-pair columns, treat it as a vector.
-    cols_lower = {c.lower(): c for c in df.columns}
+    try:
+        df = pd.read_csv(fp, sep=None, engine="python", compression="infer")
+    except Exception:
+        df = pd.read_csv(fp, compression="infer")
+
+    # (c) single-row vectors (wide)
     present_pairs = [c for c in CANON_COLS if c in df.columns]
-    if len(present_pairs) >= max(10, int(0.05 * len(CANON_COLS))):
-        row = df.iloc[0] if len(df) else pd.Series({})
+    if len(present_pairs) >= max(10, int(0.05 * len(CANON_COLS))) and len(df) == 1:
+        row = df.iloc[0]
         vec = pd.Series(0.0, index=CANON_COLS, dtype=float)
         for c in present_pairs:
-            try:
-                vec[c] = float(row[c])
-            except Exception:
-                vec[c] = 0.0
+            try: vec[c] = float(row[c])
+            except Exception: pass
         return vec
 
-    # ---- (a) tall ----
+    # (a) tall format
     lower = {c.lower(): c for c in df.columns}
     def _has(*names): return all(n in lower for n in names)
     if _has('st','end') or _has('fromaa','toaa') or _has('refaa','altaa') or _has('from','to') or _has('ref_aa','alt_aa'):
-        # normalize column names
-        for L, R in [('st','end'),('fromaa','toaa'),('from','to'),('refaa','altaa'),('ref_aa','alt_aa')]:
+        for L,R in [('st','end'),('fromaa','toaa'),('from','to'),('refaa','altaa'),('ref_aa','alt_aa')]:
             if L in lower and R in lower:
                 df = df.rename(columns={lower[L]:'ST', lower[R]:'END'})
                 break
         cnt_col = lower.get('count') or 'Count'
         if cnt_col not in df.columns:
             df[cnt_col] = 1
-        # AA normalization (map STOP/*/TER->'X')
         df['ST'] = df['ST'].apply(_to_one_letter_or_X)
         df['END'] = df['END'].apply(_to_one_letter_or_X)
         df = df[df['ST'].isin(AA_1) & df['END'].isin(AA_1)]
         g = df.groupby(['ST','END'])[cnt_col].sum()
         vec = pd.Series(0.0, index=CANON_COLS, dtype=float)
-        for (s, e), v in g.items():
+        for (s,e), v in g.items():
             code = f"{s}{e}"
-            if code in CANON_SET:
+            if code in CANON_COLS:
                 vec[code] += float(v)
         return vec
 
-    # ---- (b) 21×21 matrix ----
-    # treat first column as index if it looks like row labels
+    # (b) 21×21 matrix
     if df.shape[1] >= 2:
         df = df.set_index(df.columns[0])
     rows_norm = [_to_one_letter_or_X(x) for x in df.index]
     cols_norm = [_to_one_letter_or_X(x) for x in df.columns]
     row_valid = sum(1 for r in rows_norm if r in AA_1)
     col_valid = sum(1 for c in cols_norm if c in AA_1)
+
     mat = df.copy()
     if row_valid < col_valid:
         mat = mat.T
         rows_norm, cols_norm = cols_norm, rows_norm
-    # keep only valid AAs
     mat.index = rows_norm
     mat.columns = cols_norm
     mat = mat.loc[[r for r in mat.index if r in AA_1],
@@ -197,78 +190,71 @@ def _read_one_sample_csv(fp: Path) -> pd.Series:
     if mat.empty:
         raise ValueError(f"{fp.name}: unrecognized format (not tall, vector, or 21×21).")
     mat = mat.apply(pd.to_numeric, errors='coerce').fillna(0)
+
     vec = pd.Series(0.0, index=CANON_COLS, dtype=float)
     for r in mat.index:
         for c in mat.columns:
             code = r + c
-            if code in CANON_SET:
+            if code in CANON_COLS:
                 vec[code] = float(mat.at[r, c])
     return vec
 
 
-# --- replace your existing summarize_dir with this ---
-def summarize_dir(dir_path: str, manifest_path: Optional[str]=None) -> pd.DataFrame:
+def _read_combined_vectors_table(fp: Path) -> pd.DataFrame | None:
+    """Read multi-row combined vectors table (columns are AA-pair codes; +optional ID/SUM)."""
+    try:
+        df = pd.read_csv(fp, sep=None, engine="python", compression="infer")
+    except Exception:
+        df = pd.read_csv(fp, compression="infer")
+    present = [c for c in CANON_COLS if c in df.columns]
+    if len(present) >= max(50, int(0.2 * len(CANON_COLS))) and len(df) >= 2:
+        if 'ID' not in df.columns:
+            df = df.rename(columns={df.columns[0]: 'ID'})
+        out = df[['ID'] + present].copy()
+        out[CANON_COLS] = out.reindex(columns=CANON_COLS, fill_value=0).apply(pd.to_numeric, errors='coerce').fillna(0.0)
+        out['SUM'] = out[CANON_COLS].sum(axis=1)
+        return out[['ID','SUM'] + CANON_COLS]
+    return None
+
+
+def summarize_dir(dir_path: str, manifest_path: str | None = None) -> pd.DataFrame:
     """
-    Build a vectors table from a directory of per-sample files (.csv/.tsv),
-    recursively. Accepts tall, 21×21, or vector-per-sample files.
-    Returns DataFrame with columns: ID, SUM, <CANON_COLS>.
+    Recursively ingest .csv/.CSV/.tsv/.TSV/.csv.gz/.tsv.gz files.
+    Accept tall, matrices, single-row vectors, and combined tables.
     """
     dirp = Path(dir_path)
-    files = sorted(set(list(dirp.rglob("*.csv")) + list(dirp.rglob("*.tsv"))))
-    samples = []
+    patterns = ["*.csv","*.CSV","*.tsv","*.TSV","*.csv.gz","*.CSV.GZ","*.tsv.gz","*.TSV.GZ"]
+    files = sorted({p for pat in patterns for p in dirp.rglob(pat)})
+    logging.info(f"[summarize_dir] Scanning {dir_path} — {len(files)} candidate file(s)")
+
+    rows = []
     for fp in files:
+        # combined table?
+        comb = _read_combined_vectors_table(fp)
+        if comb is not None:
+            logging.info(f"[summarize_dir] Combined table: {fp.name} (+{len(comb)} rows)")
+            rows.append(comb)
+            continue
+        # per-sample file
         try:
             vec = _read_one_sample_csv(fp)
             sid = fp.stem
-            samples.append((sid, vec))
+            one = pd.DataFrame([{'ID': sid, 'SUM': float(np.nansum(vec))} | {c: float(vec[c]) for c in CANON_COLS}])
+            rows.append(one)
         except Exception as e:
-            logging.debug(f"[summarize_dir] skipping {fp.relative_to(dirp)}: {e}")
+            logging.debug(f"[summarize_dir] Skipping {fp}: {e}")
 
-    if not samples:
+    if not rows:
         raise FileNotFoundError(f"No usable CSV/TSV files found in {dir_path}")
 
-    df = pd.DataFrame({sid: v for sid, v in samples}).T
-    df.index.name = 'ID'
-    df = df.reindex(columns=CANON_COLS, fill_value=0.0)
-    df.insert(0, 'SUM', df.sum(axis=1))
-
-    # Optional manifest filter (IDs in first column)
-    if manifest_path:
-        ids = pd.read_table(manifest_path, header=None).iloc[:, 0].astype(str)
-        df = df[df.index.isin(set(ids))]
-
-    return df.reset_index()
-
-
-def summarize_dir(dir_path: str, manifest_path: Optional[str]=None) -> pd.DataFrame:
-    """
-    Build a vectors table from a directory of per-sample CSVs.
-    Returns DataFrame with columns: ID, SUM, <441 AA-pair cols>
-    """
-    dirp = Path(dir_path)
-    samples = []
-    for fp in sorted(dirp.glob("*.csv")):
-        try:
-            vec = _read_one_sample_csv(fp)
-            samples.append((fp.stem, vec))
-        except Exception as e:
-            logging.warning(f"Skipping {fp.name}: {e}")
-
-    if not samples:
-        raise FileNotFoundError(f"No usable CSVs found in {dir_path}")
-
-    df = pd.DataFrame({sid: v for sid, v in samples}).T
-    df.index.name = 'ID'
-    df = df.reindex(columns=CANON_COLS, fill_value=0.0)
-    df.insert(0, 'SUM', df.sum(axis=1))
-
-    # optional manifest filter (IDs in first column)
+    df = pd.concat(rows, ignore_index=True)
+    if 'ID' not in df.columns:
+        df = df.rename(columns={df.columns[0]: 'ID'})
+    df = df[['ID','SUM'] + CANON_COLS]
     if manifest_path:
         ids = pd.read_table(manifest_path, header=None).iloc[:,0].astype(str)
-        df = df[df.index.isin(set(ids))]
-
-    return df.reset_index()
-
+        df = df[df['ID'].astype(str).isin(set(ids))]
+    return df
 def summarize_observed(observed_dir: str, out_dir: str, manifest_path: Optional[str]) -> pd.DataFrame:
     df = summarize_dir(observed_dir, manifest_path)
     out_path = Path(out_dir)/"summary.csv"
