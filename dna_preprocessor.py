@@ -16,7 +16,7 @@ Dependencies: pandas
 
 Usage:
 python dna_preprocessor.py \
-  --folder <input directory> \
+  --in_dir <input directory> \
   --manifest <gdc-manifest tsv> \
   --out_dir <output directory>
 
@@ -797,7 +797,7 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Create per-case DNA CSVs (dna/{Case-ID}.csv) from a dna_manifest.tsv using a VCF parser."
     )
-    p.add_argument("--folder", required=True,
+    p.add_argument("--folder", "--project-root", "--data-root", "--input_dir", "--in_dir", required=True,
                    help="Project root containing dna/ or vep/ subfolders")
     p.add_argument("--manifest", required=True,
                    help="Path to dna_manifest.tsv (GDC-like)")
