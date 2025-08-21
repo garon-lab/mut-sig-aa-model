@@ -340,20 +340,56 @@ def plot_similarity_heatmap(sim_df: pd.DataFrame, out_dir: str, name: str = "hea
     plt.tight_layout(); plt.savefig(out_path); plt.close()
     logging.info(f"Saved heatmap -> {out_path}")
 
-def plot_clustermap_vectors(vectors_df: pd.DataFrame, out_dir: str, normalize_rows: bool = True, name: Optional[str]=None):
+def plot_clustermap_vectors(vectors_df, out_dir, normalize_rows=True, name=None, metric='cosine'):
     """
     Cluster map of sample x AA-pair vectors (optionally row-normalized to proportions).
-    If normalize_rows=True, rows are converted to % composition.
+    Drops rows/cols that would create NaN/Inf distances (e.g., all-zero rows for cosine).
     """
     X = vectors_df.set_index('ID').drop(columns=['SUM'], errors='ignore')
+    # force numeric & clean non-finites
+    X = X.apply(pd.to_numeric, errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    # drop all-zero rows before cosine (undefined)
     if normalize_rows:
-        X = X.div(X.sum(axis=1).replace(0, np.nan), axis=0).fillna(0) * 100.0
-    g = sb.clustermap(X, metric='cosine', cmap='viridis', figsize=(14, 12))
+        row_sums = X.sum(axis=1)
+        zero_rows = (row_sums == 0)
+        if zero_rows.any():
+            logging.warning(f"Clustermap: dropping {int(zero_rows.sum())} all-zero rows before normalization.")
+            X = X.loc[~zero_rows]
+        # proportions in %
+        X = X.div(X.sum(axis=1), axis=0).fillna(0.0) * 100.0
+    else:
+        if metric == 'cosine':
+            norms = np.linalg.norm(X.values, axis=1)
+            zero_norm = (norms == 0)
+            if zero_norm.any():
+                logging.warning(f"Clustermap: dropping {int(zero_norm.sum())} rows with zero norm for cosine metric.")
+                X = X.iloc[~zero_norm]
+
+    # drop all-zero columns (no information)
+    zero_cols = (X.sum(axis=0) == 0)
+    if zero_cols.any():
+        logging.info(f"Clustermap: dropping {int(zero_cols.sum())} all-zero columns.")
+        X = X.loc[:, ~zero_cols]
+
+    if X.shape[0] < 2 or X.shape[1] < 2:
+        logging.warning("Clustermap: not enough data to cluster after filtering; skipping.")
+        return
+
     if name is None:
         name = "clustermap_proportions.png" if normalize_rows else "clustermap_counts.png"
-    out_path = Path(out_dir)/name
-    g.fig.savefig(out_path); plt.close(g.fig)
+    out_path = Path(out_dir) / name
+
+    try:
+        g = sb.clustermap(X, metric=metric, cmap='viridis', figsize=(14, 12))
+    except ValueError as e:
+        logging.warning(f"Clustermap failed with metric={metric} ({e}); retrying with 'euclidean'.")
+        g = sb.clustermap(X, metric='euclidean', cmap='viridis', figsize=(14, 12))
+
+    g.fig.savefig(out_path)
+    plt.close(g.fig)
     logging.info(f"Saved clustermap -> {out_path}")
+
 
 # ---------- Single-file utilities ----------
 
@@ -421,6 +457,9 @@ def parse_args():
                    help='Path to an existing summary CSV (to skip summarize or for single-file)')
     p.add_argument('--step', choices=['summarize','compare','heatmap','single-file','all'],
                    default='all', help='Which step(s) to run')
+    p.add_argument('--cluster-metric', choices=['cosine','euclidean','correlation'],
+                   default='cosine', help='Distance metric for clustermap (default: cosine)')
+
     return p.parse_args()
 
 # ---------- Main ----------
@@ -442,8 +481,13 @@ def main():
             raise SystemExit("--observed-dir is required for step 'summarize' or 'all'")
         summary_df = summarize_observed(args.observed_dir, args.out_dir, args.manifest)
         # Drop clustermaps for observed cohort
-        plot_clustermap_vectors(summary_df.copy(), args.out_dir, normalize_rows=False, name="clustermap_counts.png")
-        plot_clustermap_vectors(summary_df.copy(), args.out_dir, normalize_rows=True,  name="clustermap_proportions.png")
+        plot_clustermap_vectors(summary_df.copy(), args.out_dir,
+                        normalize_rows=False, name="clustermap_counts.png",
+                        metric=args.cluster_metric)
+        plot_clustermap_vectors(summary_df.copy(), args.out_dir,
+                        normalize_rows=True,  name="clustermap_proportions.png",
+                        metric=args.cluster_metric)
+
     else:
         # Try to get a summary from vector_file or out_dir/summary.csv
         if args.vector_file and Path(args.vector_file).exists():
