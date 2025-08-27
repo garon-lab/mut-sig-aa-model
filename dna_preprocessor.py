@@ -956,7 +956,7 @@ def main():
                 vdf_pass.to_csv(out_path, index=False)
             
 
-            vdf.to_csv(out_path, index=False)
+            vdf_pass.to_csv(out_path, index=False)
             produced += 1
             logging.info(f"[{case_id}] Wrote {out_path} ({len(vdf)} rows)")
 
