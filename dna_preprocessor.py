@@ -1,4 +1,3 @@
-from concurrent.futures import ProcessPoolExecutor, as_completed
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -42,6 +41,7 @@ Troubleshooting
 2. No CSVs produced → Verify Case ID and File Name columns exist in your manifest and that files are .vcf or .vcf.gz.
 
 """
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
 import argparse
 import logging
