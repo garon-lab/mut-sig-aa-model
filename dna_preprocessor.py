@@ -862,7 +862,7 @@ def parse_args():
                    help="Write <out_dir>/<label>-signature.csv")
     p.add_argument("--extract-mutations", "--extract_mutations", dest="extract_mutations",
                    action="store_true",
-                   help="Extract ST/END AA pairs to <out_dir>/<label>/<Case-ID>-<label>.csv "
+                   help="Extract ST/END AA pairs to <out_dir>/<label>/<Case-ID>.csv "
                         "(uses label to choose SNP/SNV logic)")
     p.add_argument("--write-matrices", "--write_matrices", dest="write_matrices",
                    action="store_true",
