@@ -937,23 +937,24 @@ def main():
             out_path = out_root / "dna" / f"{safe_case}.csv"
             ensure_dir(out_path.parent)
           
-            # Keep only variants that passed filters
-            if "FILTER" in df.columns:
-                df_pass = df[df["FILTER"] == "PASS"].copy()
+            # Keep only PASS variants
+            if "FILTER" in vdf.columns:
+                vdf_pass = vdf[vdf["FILTER"] == "PASS"].copy()
             else:
-                # Some tools lowercase/rename — try a tolerant fallback
-                cols_norm = {c.lower(): c for c in df.columns}
+                # Be robust if header differs in case
+                cols_norm = {c.lower(): c for c in vdf.columns}
                 if "filter" in cols_norm:
-                    df_pass = df[df[cols_norm["filter"]] == "PASS"].copy()
+                    vdf_pass = vdf[vdf[cols_norm["filter"]] == "PASS"].copy()
                 else:
-                    logging.warning(f"[DNA] {case_id}: no FILTER column in {vcf_file}; skipping write.")
-                    df_pass = df.iloc[0:0].copy()  # empty
+                    logging.warning(f"[DNA] {case_id}: no FILTER column found; skipping write.")
+                    vdf_pass = vdf.iloc[0:0].copy()  # empty
             
-            # If nothing passed, skip writing; otherwise write the per-case CSV
-            if df_pass.empty:
-                logging.warning(f"[DNA] {case_id}: no PASS variants — not writing dna/{case_id}.csv.")
+            # Only write if there’s at least one PASS variant
+            if vdf_pass.empty:
+                logging.warning(f"[DNA] {case_id}: no PASS variants — skipping dna/{case_id}.csv")
             else:
-                df_pass.to_csv(out_path, index=False)
+                vdf_pass.to_csv(out_path, index=False)
+            
 
             vdf.to_csv(out_path, index=False)
             produced += 1
