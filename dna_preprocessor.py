@@ -33,7 +33,7 @@ python dna_preprocessor.py \
 Arguments:
 Required
    --manifest           GDC-like TSV/CSV with at least Case ID, File Name (File ID optional)
-   --folder             Input directory that contains raw data, format <folder>/dna/<File ID>/<File Name>
+   --in_dir             Input directory that contains raw data, format <folder>/dna/<File ID>/<File Name>
    --out_dir            Output directory that will contain <dna/<Case-ID>.csv that can be used in multiomic integration
 
 General
@@ -852,7 +852,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    project_root = Path(args.root).resolve()
+    project_root = Path(args.in_dir).resolve()
     out_root = Path(args.out_dir).resolve()
     ensure_dir(out_root / "dna")
 
