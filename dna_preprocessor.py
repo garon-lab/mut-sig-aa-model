@@ -852,7 +852,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    project_root = Path(args.in_dir).resolve()
+    project_root = Path(args.folder).resolve()
     out_root = Path(args.out_dir).resolve()
     ensure_dir(out_root / "dna")
 
