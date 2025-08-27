@@ -6,7 +6,7 @@ DNA PREPROCESSOR
 This script creates per-case DNA CSVs under 'dna/{Case-ID}.csv' that can be used in multiomic integration. It reads a GDC-like 'dna_manifest.tsv' and parses VCF/VCF.GZ files for each case. Our manuscript selects for single nucleotide variants (SNVs) and sningle nucleotide polymorphisms (SNPs), which is available pre-built in optional steps, but can be adapted as needed by the user. 
 
 This script processes VEP annotated mutect files by:
-1. Using a VCF parser to select for variants of interest (e.g., SNV/SNP).
+1. Using a VCF parser to select for variants that pass the filter (if you want more stringent selection, add parameters after line 942).
 2. Summarizing SNP/SNV counts (optional).
 3. Extracting DNA mutational signatures (optional).
 4. Extracting amino acid substitutions from SNV/SNPs (optional).
@@ -941,7 +941,6 @@ def main():
             if "FILTER" in vdf.columns:
                 vdf_pass = vdf[vdf["FILTER"] == "PASS"].copy()
             else:
-                # Be robust if header differs in case
                 cols_norm = {c.lower(): c for c in vdf.columns}
                 if "filter" in cols_norm:
                     vdf_pass = vdf[vdf[cols_norm["filter"]] == "PASS"].copy()
