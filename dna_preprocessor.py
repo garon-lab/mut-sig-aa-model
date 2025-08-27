@@ -378,7 +378,7 @@ def write_signatures(prep_dir: Path, simplified: Path, out_dir: Path, label: str
 
         snv_mask = df['REF'].map(_is_single_base) & df['ALT'].map(_is_single_base)
         alt_mask = df['FILTER'].astype(str).str.contains("alt", case=False, na=False)
-        x = df.loc[snv_mask & alt_mask, ['REF','ALT']].astype(str).applymap(str.upper)
+        df.loc[mask, cols] = df.loc[mask, cols].apply(lambda s: s.astype("string").str.upper())
         if x.empty:
             rows.append([case_id, 0, 0, 0, 0, 0, 0, 0]); continue
 
