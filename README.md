@@ -25,7 +25,8 @@ Standard references are available for download with this repository. Otherwise, 
 - [DNA Preprocessor](#dna-preprocessor)  
 - [Protein Preprocessor](#protein-preprocessor)  
 - [Make Manifest](#make-manifest)  
-- [Multiomic Integration](#multiomic-integration)  
+- [Multiomic Integration](#multiomic-integration)
+- [DNA Analysis](#multiomic-analysis)  
 - [Multiomic Analysis](#multiomic-analysis)  
 - [Signature Modeler](#signature-modeler)  
 - [Comparative Analysis](#comparative-analysis)  
@@ -37,10 +38,11 @@ Standard references are available for download with this repository. Otherwise, 
 1. **DNA Preprocessor** (VEP-annotated Mutect → per-case DNA CSVs)  
 2. **Protein Preprocessor** (PSM reads → per-case protein CSVs)  
 3. **Make Manifest** (unified or per-omic manifests)  
-4. **Multiomic Data Integration**  
-5. **Multiomic Analysis**  
-6. **Signature Modeler** *(optional)*  
-7. **Comparative Analysis** *(optional)*  
+4. **Multiomic Data Integration**
+5. **DNA Analysis**  
+6. **Multiomic Analysis**  
+7. **Signature Modeler** *(optional)*  
+8. **Comparative Analysis** *(optional)*  
 
 Each script provides detailed help with the `--help` flag.  
 
@@ -141,7 +143,25 @@ python multiomic_integration.py   --folder <project root>   --manifest <manifest
 ```bash
   --input_dna_dir DNA_DIR   --input_rna_dir RNA_DIR --rna_manifest RNA_MANIFEST   --input_ch3_dir CH3_DIR --ch3_manifest CH3_MANIFEST   --input_protein_dir PROTEIN_DIR   --input_cn_dir CNV_DIR --cn_manifest CNV_MANIFEST   --skip_rna --skip_ch3 --skip_protein --skip_cn --step <all|dna|rna|ch3|cnv|protein>
 ```
+---
 
+## DNA Analysis
+
+Provides downstream analysis for DNA data.  
+
+**Features:**  
+- Case-level summary of SNV and SNP counts  
+- Signature composition (12-channel REF->ALT) per case  
+- Amino acid substitution extract (from INFO field) 
+- Amino acid substitution matrices (21x21) separated by label (SNV vs SNP, or custom labels)
+
+**Dependencies:** `argparse`, `logging`, `pathlib`, `pandas`, `concurrent.futures`
+
+### Usage
+```bash
+python dna_analysis.py   --in_dir <directory with dna/{Case-ID}.csv>   --simplified <case_ids.txt>   --out_dir <output directory> \
+  [--summarize-variants   --write-signatures   --extract-mutations   --write-matrices   --labels Label1 Label2   --max-records N --jobs N]
+```
 ---
 
 ## Multiomic Analysis
