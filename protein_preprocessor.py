@@ -31,7 +31,7 @@ Arguments:
    --step        Step(s) to run: split, prep, join, all 
                  *split writes per-channel manifests to <out_dir>/channel_<CH>.txt
                  *prep reads psm parts and filters by --channel, writes to <out_dir>/<case-id>/part-XX.csv
-                 *join concatenantes part-*.csv for each case-id into <out_dir>/<case-id>.csv
+                 *join concatenates part-*.csv for each case-id into <out_dir>/<case-id>.csv
                  *all runs split, then prep, then join
 
 General:
@@ -39,7 +39,7 @@ General:
 
 Troubleshooting
 1. If join says "No parts found", ensure prep ran and that FilefXX.psm were found for each ID.
-2. IF you see "Unrecognizaed channel", confirm the Channel matches one of the listed values.
+2. IF you see "Unrecognized channel", confirm the Channel matches one of the listed values.
 3. For I/O-heavy runs on fast storage, slightly increasing --jobs over core count can help; reduce if you observe disk contention or high memory.
 """
 
@@ -312,68 +312,6 @@ def prep_data(folder, manifest_path, out_dir, channel_flag, jobs=None):
 
     logger.info("Parallel prep complete. " + ", ".join(f"{k}={v}" for k, v in status_counts.items()))
 
-
-    # --- LOG the final selection up front ---
-    if selected is None:
-        logger.info(f"Channel selection: all ({list(CHANNEL_MAP.keys())})")
-    else:
-        sel_sorted = sorted(selected, key=lambda x: list(CHANNEL_MAP).index(x))
-        logger.info(f"Channel selection ({len(sel_sorted)}): {sel_sorted}")
-
-    # --- Build tasks ---
-    tasks = []
-    kept_rows = 0
-    skipped_unknown = 0
-    skipped_not_selected = 0
-
-    for _, row in df.iterrows():
-        case_id = row['Case-ID']
-        CH = str(row['Channel']).strip()
-        FOLDER = (row['Folder'] if 'Folder' in row and pd.notna(row['Folder']) else None)
-        FILE = str(row['File']).strip()
-
-        if not case_id or str(case_id).lower() in {'nan', '<na>'}:
-            continue
-
-        if CH not in CHANNEL_MAP:
-            skipped_unknown += 1
-            continue
-
-        if selected is not None and CH not in selected:
-            skipped_not_selected += 1
-            continue
-
-        kept_rows += 1
-        sample_dir = Path(out_dir) / case_id
-        sample_dir.mkdir(parents=True, exist_ok=True)
-        for j in range(1, 26):
-            tasks.append((folder, FOLDER, FILE, j, CH, str(sample_dir), case_id))
-
-    logger.info(
-        f"Manifest rows → kept: {kept_rows}, "
-        f"skipped_unknown_channel: {skipped_unknown}, "
-        f"skipped_not_selected: {skipped_not_selected}"
-    )
-
-    if not tasks:
-        logger.warning("No tasks to run (check manifest or channel selection).")
-        return
-
-    # --- Parallel execution ---
-    workers = jobs if (jobs and jobs > 0) else min(8, (os.cpu_count() or 4))
-    logger.info(f"Launching parallel processing with {workers} workers for {len(tasks)} parts...")
-    status_counts = {}
-    with ProcessPoolExecutor(max_workers=workers) as ex:
-        futures = [ex.submit(_process_part_task, t) for t in tasks]
-        for fut in as_completed(futures):
-            status, case_id, part_num, info = fut.result()
-            status_counts[status] = status_counts.get(status, 0) + 1
-            if status in ("missing", "read_error", "channel_index_error", "unexpected_error", "empty"):
-                logger.warning(f"[{status}] {case_id} part {part_num}: {info}")
-
-    logger.info("Parallel prep complete. " + ", ".join(f"{k}={v}" for k, v in status_counts.items()))
-
-
 def join_parts(parts_root, manifest_path, out_dir):
     logger.info("Joining processed parts...")
     df = read_manifest(manifest_path)
@@ -397,12 +335,22 @@ def join_parts(parts_root, manifest_path, out_dir):
             logger.warning(f"No parts found for {case_id}")
 
 def split_channels(manifest_path, out_dir):
-    logger.info("Splitting manifest into channels...")
+    logger.info("Splitting manifest into per-channel manifests...")
     df = read_manifest(manifest_path)
-    out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
-    for ch in CHANNEL_MAP.keys():
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # stable sort: known channels first in CHANNEL_MAP order, unknowns at end
+    channels = sorted(
+        df['Channel'].dropna().astype(str).unique(),
+        key=lambda x: list(CHANNEL_MAP).index(x) if x in CHANNEL_MAP else 999
+    )
+
+    for ch in channels:
+        sub = df[df['Channel'].astype(str) == ch]
         path = out_dir / f"channel_{ch}.txt"
-        df[df['Channel'] == ch].to_csv(path, index=False)
+        sub.to_csv(path, sep='\t', index=False)
+        logger.info(f"Wrote {len(sub)} rows -> {path}")
 
 def parse_args():
     p = argparse.ArgumentParser()
@@ -411,10 +359,11 @@ def parse_args():
     p.add_argument('--manifest', required=True,
                    help="TSV/CSV with columns: [Folder?] File, Case-ID, Channel")
     p.add_argument('--out_dir', required=True)
-   p.add_argument(
-    '--channel', required=True,
-    help=("Channel(s): 'all', a single (e.g. 130N), "
-          "comma-separated (127N,128N,129N), or space-separated (127N 128N 129N).")
+    p.add_argument(
+        '--channel', required=True,
+        help=("Channel(s): 'all', a single (e.g. 130N), "
+              "comma-separated (127N,128N,129N), or space-separated (127N 128N 129N).")
+    )
     p.add_argument('--step', required=True, help="all | split | prep | join")
     p.add_argument('--jobs', type=int, default=None)
     return p.parse_args()
