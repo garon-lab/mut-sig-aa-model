@@ -568,9 +568,9 @@ def parse_args():
     p.add_argument('--step', default="all", help="all | split | prep | join (default: all)")
     p.add_argument('--jobs', type=int, default=None, help="Number of parallel workers (default: min(8,CPU count))")
     # after your existing argparse arguments:
-    ap.add_argument("--cleanup", action="store_true",
+    p.add_argument("--cleanup", action="store_true",
                     help="After processing, remove per-run parts (e.g., *_f??.psm) when all cases depending on a run folder are complete.")
-    ap.add_argument("--cleanup-dry-run", action="store_true",
+    p.add_argument("--cleanup-dry-run", action="store_true",
                     help="Show what would be deleted without actually deleting.")
 
     return p.parse_args()
