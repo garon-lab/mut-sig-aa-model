@@ -17,7 +17,7 @@ Dependencies: pandas, numpy, argparse, pathlib
 
 Usage:
 python protein_preprocessor.py \
-  --folder <input directory> \
+  --in_dir <input directory> \
   --manifest <gdc-manifest> \
   --out_dir <output directory> \
   --channel <channel list (e.g. [all|126|127N|127C|128N|128C|129N|129C|130N|130C|131])> \
@@ -356,45 +356,52 @@ def split_channels(manifest_path, out_dir):
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--folder', required=True,
-                   help="Root directory containing raw data (e.g., .../P##/FilefXX.psm)")
+    # Backward compatibility: allow both --in_dir and --folder
+    p.add_argument('--in_dir', dest="in_dir", help="Input directory containing raw data (e.g., .../P##/FilefXX.psm)")
+    p.add_argument('--folder', dest="in_dir", help=argparse.SUPPRESS)  # alias for backward compatibility
     p.add_argument('--manifest', required=True,
                    help="TSV/CSV with columns: [Folder?] File, Case-ID, Channel")
-    p.add_argument('--out_dir', required=True)
+    p.add_argument('--out_dir', required=True,
+                   help="Output directory")
     p.add_argument(
         '--channel', required=True,
         help=("Channel(s): 'all', a single (e.g. 130N), "
               "comma-separated (127N,128N,129N), or space-separated (127N 128N 129N).")
     )
-    p.add_argument('--step', required=True, help="all | split | prep | join")
-    p.add_argument('--jobs', type=int, default=None)
+    p.add_argument('--step', default="all", help="all | split | prep | join (default: all)")
+    p.add_argument('--jobs', type=int, default=None, help="Number of parallel workers (default: min(8,CPU count))")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    # Normalize channels robustly (handles string OR list from argparse)
+
+    # Normalize channels
     selected, bad, raw = parse_channels(args.channel)
     logger.info(f"--channel raw: {repr(args.channel)}  parsed: {raw}")
     if bad:
         logger.warning(f"Ignoring unrecognized channels: {bad}")
-    # channel_flag is either None ('all') or a set of valid channels
     channel_flag = selected  # None means 'all'
 
-    step = args.step.lower()
+    # Use in_dir (required via either --in_dir or --folder)
+    if not args.in_dir:
+        raise SystemExit("Error: you must supply --in_dir (or legacy --folder)")
+    in_dir = args.in_dir
     manifest = args.manifest
-    folder = args.folder
     out = args.out_dir
     jobs = args.jobs
+    step = (args.step or "all").lower()
+
     Path(out).mkdir(parents=True, exist_ok=True)
 
     if step in ('all', 'split'):
         split_channels(manifest, out)
     if step in ('all', 'prep'):
         index_dirs(out, manifest)
-        prep_data(folder, manifest, out, channel_flag, jobs=jobs)
+        prep_data(in_dir, manifest, out, channel_flag, jobs=jobs)
     if step in ('all', 'join'):
         join_parts(out, manifest, out)
+
 
 
 if __name__ == '__main__':
