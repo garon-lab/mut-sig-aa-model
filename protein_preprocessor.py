@@ -231,40 +231,45 @@ def prep_data(folder, manifest_path, out_dir, channel_flag, jobs=None):
       - 'all'
       - single channel e.g. '130N'
       - comma/space separated e.g. '127N,128N 129N'
-      - a list/tuple of channels e.g. ['127N','128N']
     """
     logger.info("Filtering and organizing PSMs by channel...")
     df = read_manifest(manifest_path)
 
     # --- Normalize channel selection ---
-    selected: set[str] | None = None  # None means 'all'
+    selected: set[str] | None = None  # None == 'all'
     if isinstance(channel_flag, str):
         if channel_flag.lower() == 'all':
             selected = None
         else:
             parts = [c.strip() for c in re.split(r'[,\s]+', channel_flag) if c.strip()]
             bad = [c for c in parts if c not in CHANNEL_MAP]
+            good = [c for c in parts if c in CHANNEL_MAP]
             if bad:
                 logger.warning(f"Ignoring unrecognized channels: {bad}")
-            good = [c for c in parts if c in CHANNEL_MAP]
             if not good:
-                logger.error(f"No valid channels found in {parts}. "
-                             f"Valid: {list(CHANNEL_MAP.keys())} or 'all'.")
+                logger.error(
+                    f"No valid channels found in {parts}. "
+                    f"Valid: {list(CHANNEL_MAP.keys())} or 'all'."
+                )
                 return
             selected = set(good)
-    elif isinstance(channel_flag, (list, tuple, set)):
-        good = [c for c in channel_flag if isinstance(c, str) and c in CHANNEL_MAP]
-        if not good:
-            logger.error(f"No valid channels in {channel_flag}. "
-                         f"Valid: {list(CHANNEL_MAP.keys())} or 'all'.")
-            return
-        selected = set(good)
     else:
         logger.error(f"Unsupported --channel value: {channel_flag!r}")
         return
 
+    # --- LOG the final selection up front ---
+    if selected is None:
+        logger.info(f"Channel selection: all ({list(CHANNEL_MAP.keys())})")
+    else:
+        sel_sorted = sorted(selected, key=lambda x: list(CHANNEL_MAP).index(x))
+        logger.info(f"Channel selection ({len(sel_sorted)}): {sel_sorted}")
+
     # --- Build tasks ---
     tasks = []
+    kept_rows = 0
+    skipped_unknown = 0
+    skipped_not_selected = 0
+
     for _, row in df.iterrows():
         case_id = row['Case-ID']
         CH = str(row['Channel']).strip()
@@ -274,19 +279,25 @@ def prep_data(folder, manifest_path, out_dir, channel_flag, jobs=None):
         if not case_id or str(case_id).lower() in {'nan', '<na>'}:
             continue
 
-        # If 'all', accept whatever CH is (provided it's known). Otherwise require CH ∈ selected.
         if CH not in CHANNEL_MAP:
-            logger.warning(f"[prep] Unrecognized manifest channel '{CH}' for Case-ID {case_id}; skipping.")
-            continue
-        if (selected is not None) and (CH not in selected):
+            skipped_unknown += 1
             continue
 
+        if selected is not None and CH not in selected:
+            skipped_not_selected += 1
+            continue
+
+        kept_rows += 1
         sample_dir = Path(out_dir) / case_id
         sample_dir.mkdir(parents=True, exist_ok=True)
-
-        # One task per expected part (1..25). Worker will resolve path with folder-first, then filename-only fallback.
         for j in range(1, 26):
             tasks.append((folder, FOLDER, FILE, j, CH, str(sample_dir), case_id))
+
+    logger.info(
+        f"Manifest rows → kept: {kept_rows}, "
+        f"skipped_unknown_channel: {skipped_unknown}, "
+        f"skipped_not_selected: {skipped_not_selected}"
+    )
 
     if not tasks:
         logger.warning("No tasks to run (check manifest or channel selection).")
@@ -339,11 +350,19 @@ def split_channels(manifest_path, out_dir):
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--folder', required=True, help="Root directory containing raw data (e.g., .../P##/FilefXX.psm)")
-    p.add_argument('--manifest', required=True, help="TSV/CSV with columns: [Folder?] File, Case-ID, Channel")
+    p.add_argument('--folder', required=True,
+                   help="Root directory containing raw data (e.g., .../P##/FilefXX.psm)")
+    p.add_argument('--manifest', required=True,
+                   help="TSV/CSV with columns: [Folder?] File, Case-ID, Channel")
     p.add_argument('--out_dir', required=True)
-    p.add_argument('--channel', required=True,
-               help="One or more channels, e.g. '127N,128N' or '127N 128N' or 'all'")
+    p.add_argument(
+        '--channel',
+        required=True,
+        help=("Channel(s) to process. Accepts:"
+              " 'all', a single channel (e.g. 130N),"
+              " comma-separated (127N,128N,129N),"
+              " or space-separated (127N 128N 129N).")
+    )
     p.add_argument('--step', required=True, help="all | split | prep | join")
     p.add_argument('--jobs', type=int, default=None)
     return p.parse_args()
