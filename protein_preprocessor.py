@@ -574,16 +574,16 @@ def parse_args():
     p.add_argument('--step', default="all", help="all | split | prep | join (default: all)")
     p.add_argument('--jobs', type=int, default=None, help="Number of parallel workers (default: min(8,CPU count))")
     # after your existing argparse arguments:
-    parser.add_argument("--cleanup-cases", action="store_true",
+    p.add_argument("--cleanup-cases", action="store_true",
                     help="Clean case-ID folders under out_dir")
-    parser.add_argument("--cleanup-cases-mode", default="parts-only",
+    p.add_argument("--cleanup-cases-mode", default="parts-only",
                         choices=["empty","parts-only","all"],
                         help="What to remove")
-    parser.add_argument("--cases-dry-run", action="store_true",
+    p.add_argument("--cases-dry-run", action="store_true",
                         help="Show what would be removed (default if flag omitted)")
-    parser.add_argument("--cases-trash", default=None,
+    p.add_argument("--cases-trash", default=None,
                         help="Optional trash/quarantine dir; if set, folders are moved there")
-    parser.add_argument("--yes-i-am-sure", action="store_true",
+    p.add_argument("--yes-i-am-sure", action="store_true",
                         help="Required when --cleanup-cases-mode=all")
 
     return p.parse_args()
