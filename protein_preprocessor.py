@@ -96,6 +96,113 @@ def normalize_plex_name(name: str) -> str:
         return f"P{int(m.group(1)):02d}"
     return s
 
+  def _glob_psm_parts(run_dir: Path):
+    # Matches ..._fXX.psm
+    return sorted(run_dir.glob("*_f[0-9][0-9].psm"))
+
+def _all_case_outputs_exist(case_ids, out_dir: Path):
+    """
+    Define what 'done' means for a case. Adjust this function if your final output file names differ.
+    For example, if you write combined outputs to out_dir / f"{case}.csv" or ".psm":
+    """
+    ok = True
+    missing = []
+    for cid in case_ids:
+        # EDIT HERE if your expected output differs:
+        expected = out_dir / f"{cid}.csv"
+        if not expected.exists():
+            ok = False
+            missing.append((cid, expected))
+    return ok, missing
+
+
+def cleanup_parts_folders(manifest_path: Path, base_dir: Path, out_dir: Path, dry_run: bool = True):
+    """
+    Read your manifest, build a map RunFolder -> {Case-IDs}, and delete per-run parts if
+    every dependent case has its expected final output in out_dir.
+
+    Manifest must contain columns:
+      - 'Folder' (run folder like 10CPTAC_LSCC_W_BI_20190726_KL_)
+      - 'Case-ID' (your case IDs)
+    If your column names differ, rename below.
+    """
+    df = pd.read_table(manifest_path, dtype=str).fillna("")
+    # normalize likely columns
+    col_folder = None
+    for c in df.columns:
+        if c.strip().lower() == "folder":
+            col_folder = c
+            break
+    col_case = None
+    for c in df.columns:
+        if c.strip().lower() in {"case-id", "case id"}:
+            col_case = c
+            break
+
+    if col_folder is None or col_case is None:
+        print("[cleanup] Could not find required columns 'Folder' and 'Case-ID' in manifest.")
+        return
+
+    # Build mapping RunFolder -> set(Case-ID)
+    mapping = {}
+    for _, row in df.iterrows():
+        folder = (row[col_folder] or "").strip()
+        cid = (row[col_case] or "").strip()
+        if not folder or not cid:
+            continue
+        mapping.setdefault(folder, set()).add(cid)
+
+    print(f"[cleanup] Found {len(mapping)} run folders in manifest.")
+
+    total_deleted = 0
+    for folder, case_ids in sorted(mapping.items()):
+        run_dir = base_dir / folder
+        if not run_dir.is_dir():
+            print(f"[cleanup] Skip (not a directory): {run_dir}")
+            continue
+
+        ok, missing = _all_case_outputs_exist(case_ids, out_dir)
+        if not ok:
+            # Skip deleting if not all dependent cases wrote outputs
+            miss_text = "; ".join([f"{cid} -> {p.name}" for cid, p in missing[:5]])
+            more = "" if len(missing) <= 5 else f" (+{len(missing)-5} more)"
+            print(f"[cleanup] Hold: outputs missing for {len(missing)} case(s) in {folder}: {miss_text}{more}")
+            continue
+
+        parts = _glob_psm_parts(run_dir)
+        if not parts:
+            # Nothing to delete; optionally remove folder if empty
+            try:
+                if not any(run_dir.iterdir()):
+                    print(f"[cleanup] Empty folder -> rmdir {run_dir}")
+                    if not dry_run:
+                        run_dir.rmdir()
+            except Exception as e:
+                print(f"[cleanup] Could not rmdir {run_dir}: {e}")
+            continue
+
+        print(f"[cleanup] Ready to delete {len(parts)} parts in {run_dir.name}: "
+              f"{', '.join([p.name for p in parts[:6]])}{' ...' if len(parts)>6 else ''}")
+
+        if not dry_run:
+            # Delete part files
+            for p in parts:
+                try:
+                    p.unlink()
+                except Exception as e:
+                    print(f"[cleanup] Could not delete {p}: {e}")
+            # If directory becomes empty, remove it
+            try:
+                if not any(run_dir.iterdir()):
+                    run_dir.rmdir()
+            except Exception as e:
+                print(f"[cleanup] Could not rmdir {run_dir}: {e}")
+
+            total_deleted += len(parts)
+
+    print(f"[cleanup] Done. Deleted {total_deleted} part files{' (dry-run)' if dry_run else ''}.")
+
+
 # ---------- Flexible manifest + fallback path helpers ----------
 
 def read_manifest_flexible(path: str | Path) -> pd.DataFrame:
@@ -460,6 +567,12 @@ def parse_args():
     )
     p.add_argument('--step', default="all", help="all | split | prep | join (default: all)")
     p.add_argument('--jobs', type=int, default=None, help="Number of parallel workers (default: min(8,CPU count))")
+    # after your existing argparse arguments:
+    ap.add_argument("--cleanup", action="store_true",
+                    help="After processing, remove per-run parts (e.g., *_f??.psm) when all cases depending on a run folder are complete.")
+    ap.add_argument("--cleanup-dry-run", action="store_true",
+                    help="Show what would be deleted without actually deleting.")
+
     return p.parse_args()
 
 
@@ -491,6 +604,17 @@ def main():
         prep_data(in_dir, manifest, out, channel_flag, jobs=jobs)
     if step in ('all', 'join'):
         join_parts(out, manifest, out)
+    
+    if args.cleanup:
+      manifest_path = Path(args.manifest)         
+      base_dir     = Path(args.folder)           
+      out_dir      = Path(args.out_dir)          
+      cleanup_parts_folders(
+          manifest_path=manifest_path,
+          base_dir=base_dir,
+          out_dir=out_dir,
+          dry_run=args.cleanup_dry_run
+      )
 
 
 
