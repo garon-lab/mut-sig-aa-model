@@ -60,6 +60,31 @@ CHANNEL_MAP = {
     '129N': 27, '129C': 28, '130N': 29, '130C': 30, '131': 31
 }
 
+def parse_channels(arg):
+    """
+    Accepts 'all', a single channel, comma/space separated string,
+    or a list/tuple of strings. Returns (selected, bad, raw_parts)
+      - selected: None for 'all', or a set of valid channels
+      - bad: list of unrecognized tokens
+      - raw_parts: the tokens parsed from input
+    """
+    def tokenize(x):
+        if isinstance(x, (list, tuple, set)):
+            tokens = []
+            for a in x:
+                tokens += re.split(r'[,\s]+', str(a))
+            return tokens
+        return re.split(r'[,\s]+', str(x))
+
+    parts = [t.strip() for t in tokenize(arg) if str(t).strip()]
+    # early: if any token == 'all'
+    if any(p.lower() == 'all' for p in parts):
+        return None, [p for p in parts if p.lower() not in ('all',) and p not in CHANNEL_MAP], parts
+
+    good = [p for p in parts if p in CHANNEL_MAP]
+    bad  = [p for p in parts if p and p not in CHANNEL_MAP]
+    return (set(good), bad, parts)
+
 def normalize_plex_name(name: str) -> str:
     if not isinstance(name, str):
         return name
@@ -226,36 +251,67 @@ def _process_part_task(task):
 
 def prep_data(folder, manifest_path, out_dir, channel_flag, jobs=None):
     """
-    Prepare per-case part files in parallel.
-    channel_flag can be:
-      - 'all'
-      - single channel e.g. '130N'
-      - comma/space separated e.g. '127N,128N 129N'
+    channel_flag:
+      - None  => 'all'
+      - set[str] of specific channels (subset of CHANNEL_MAP)
     """
     logger.info("Filtering and organizing PSMs by channel...")
     df = read_manifest(manifest_path)
 
-    # --- Normalize channel selection ---
-    selected: set[str] | None = None  # None == 'all'
-    if isinstance(channel_flag, str):
-        if channel_flag.lower() == 'all':
-            selected = None
-        else:
-            parts = [c.strip() for c in re.split(r'[,\s]+', channel_flag) if c.strip()]
-            bad = [c for c in parts if c not in CHANNEL_MAP]
-            good = [c for c in parts if c in CHANNEL_MAP]
-            if bad:
-                logger.warning(f"Ignoring unrecognized channels: {bad}")
-            if not good:
-                logger.error(
-                    f"No valid channels found in {parts}. "
-                    f"Valid: {list(CHANNEL_MAP.keys())} or 'all'."
-                )
-                return
-            selected = set(good)
+    # Log selection
+    if channel_flag is None:
+        logger.info(f"Channel selection: all ({list(CHANNEL_MAP.keys())})")
     else:
-        logger.error(f"Unsupported --channel value: {channel_flag!r}")
+        sel_sorted = sorted(channel_flag, key=lambda x: list(CHANNEL_MAP).index(x))
+        logger.info(f"Channel selection ({len(sel_sorted)}): {sel_sorted}")
+
+    tasks = []
+    kept_rows = skipped_unknown = skipped_not_selected = 0
+
+    for _, row in df.iterrows():
+        case_id = row['Case-ID']
+        CH = str(row['Channel']).strip()
+        FOLDER = (row['Folder'] if 'Folder' in row and pd.notna(row['Folder']) else None)
+        FILE = str(row['File']).strip()
+
+        if not case_id or str(case_id).lower() in {'nan', '<na>'}:
+            continue
+        if CH not in CHANNEL_MAP:
+            skipped_unknown += 1
+            continue
+        if channel_flag is not None and CH not in channel_flag:
+            skipped_not_selected += 1
+            continue
+
+        kept_rows += 1
+        sample_dir = Path(out_dir) / case_id
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        for j in range(1, 26):
+            tasks.append((folder, FOLDER, FILE, j, CH, str(sample_dir), case_id))
+
+    logger.info(
+        f"Manifest rows → kept: {kept_rows}, "
+        f"skipped_unknown_channel: {skipped_unknown}, "
+        f"skipped_not_selected: {skipped_not_selected}"
+    )
+
+    if not tasks:
+        logger.error("No valid channels found after parsing selection.")
         return
+
+    workers = jobs if (jobs and jobs > 0) else min(8, (os.cpu_count() or 4))
+    logger.info(f"Launching parallel processing with {workers} workers for {len(tasks)} parts...")
+    status_counts = {}
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_process_part_task, t) for t in tasks]
+        for fut in as_completed(futures):
+            status, case_id, part_num, info = fut.result()
+            status_counts[status] = status_counts.get(status, 0) + 1
+            if status in ("missing", "read_error", "channel_index_error", "unexpected_error", "empty"):
+                logger.warning(f"[{status}] {case_id} part {part_num}: {info}")
+
+    logger.info("Parallel prep complete. " + ", ".join(f"{k}={v}" for k, v in status_counts.items()))
+
 
     # --- LOG the final selection up front ---
     if selected is None:
@@ -355,46 +411,40 @@ def parse_args():
     p.add_argument('--manifest', required=True,
                    help="TSV/CSV with columns: [Folder?] File, Case-ID, Channel")
     p.add_argument('--out_dir', required=True)
-    p.add_argument(
-        '--channel',
-        required=True,
-        help=("Channel(s) to process. Accepts:"
-              " 'all', a single channel (e.g. 130N),"
-              " comma-separated (127N,128N,129N),"
-              " or space-separated (127N 128N 129N).")
-    )
+   p.add_argument(
+    '--channel', required=True,
+    help=("Channel(s): 'all', a single (e.g. 130N), "
+          "comma-separated (127N,128N,129N), or space-separated (127N 128N 129N).")
     p.add_argument('--step', required=True, help="all | split | prep | join")
     p.add_argument('--jobs', type=int, default=None)
     return p.parse_args()
 
+
 def main():
     args = parse_args()
-    channels = args.channel
-    if len(channels) == 1 and channels[0].lower() == 'all':
-        channel_flag = 'all'
-    else:
-        channel_flag = [c for c in channels if c in CHANNEL_MAP]
-        if not channel_flag:
-            raise SystemExit(f"No valid channels found in {channels}")
-    if args.channel.lower() != 'all' and args.channel not in CHANNEL_MAP:
-        raise SystemExit(f"--channel must be one of {list(CHANNEL_MAP)} or 'all'")
+    # Normalize channels robustly (handles string OR list from argparse)
+    selected, bad, raw = parse_channels(args.channel)
+    logger.info(f"--channel raw: {repr(args.channel)}  parsed: {raw}")
+    if bad:
+        logger.warning(f"Ignoring unrecognized channels: {bad}")
+    # channel_flag is either None ('all') or a set of valid channels
+    channel_flag = selected  # None means 'all'
 
     step = args.step.lower()
     manifest = args.manifest
     folder = args.folder
     out = args.out_dir
     jobs = args.jobs
-
-    # Ensure output root exists early
     Path(out).mkdir(parents=True, exist_ok=True)
 
     if step in ('all', 'split'):
         split_channels(manifest, out)
     if step in ('all', 'prep'):
         index_dirs(out, manifest)
-        prep_data(folder, manifest, out, args.channel, jobs=jobs)
+        prep_data(folder, manifest, out, channel_flag, jobs=jobs)
     if step in ('all', 'join'):
         join_parts(out, manifest, out)
+
 
 if __name__ == '__main__':
     main()
