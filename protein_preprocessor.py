@@ -609,7 +609,7 @@ def main():
     
     if args.cleanup:
       manifest_path = Path(args.manifest)         
-      base_dir     = Path(args.folder)           
+      base_dir     = Path(args.in_dir)           
       out_dir      = Path(args.out_dir)          
       cleanup_parts_folders(
           manifest_path=manifest_path,
