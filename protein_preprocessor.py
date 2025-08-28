@@ -3,7 +3,9 @@
 """
 PROTEIN PREPROCESSOR
 
-This script creates per-case protein CSVs under 'protein/{Case-ID}.csv' that can be used in multiomic integration. Output csvs will have PSM columns listed per case-id: NP (protein accessions), SEQ (peptide sequence), EV (reliability of match), INT (intensity for the selected channel).
+This script creates per-case protein CSVs under 'protein/{Case-ID}.csv' that can be used in multiomic integration. 
+Note if the flat directory flag was used in downloading CPTAC data, you can leave the folder section blank on your manifest.
+Output csvs will have PSM columns listed per case-id: NP (protein accessions), SEQ (peptide sequence), EV (reliability of match), INT (intensity for the selected channel).
 
 This script processes protein PSM files by:
 1. Splitting a sample manifest into channels.
