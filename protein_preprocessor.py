@@ -342,10 +342,8 @@ def parse_args():
     p.add_argument('--folder', required=True, help="Root directory containing raw data (e.g., .../P##/FilefXX.psm)")
     p.add_argument('--manifest', required=True, help="TSV/CSV with columns: [Folder?] File, Case-ID, Channel")
     p.add_argument('--out_dir', required=True)
-    p.add_argument(
-        '--channel', required=True, nargs='+',
-        help="One or more channels (e.g. 127N 128N) or 'all'"
-    )
+    p.add_argument('--channel', required=True,
+               help="One or more channels, e.g. '127N,128N' or '127N 128N' or 'all'")
     p.add_argument('--step', required=True, help="all | split | prep | join")
     p.add_argument('--jobs', type=int, default=None)
     return p.parse_args()
