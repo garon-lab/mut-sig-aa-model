@@ -64,6 +64,17 @@ CHANNEL_MAP = {
     '129N': 27, '129C': 28, '130N': 29, '130C': 30, '131': 31
 }
 
+CASE_ID_RE = re.compile(r"^(?:C3[NL]-\d{5}|[A-Z0-9]{3,}[-_]?[A-Z0-9]{2,})$")
+
+# files considered *intermediate / parts*
+PART_FILE_RE = re.compile(
+    r".*(?:_f\d{2}\.(?:psm|raw|mzML(?:\.gz)?|mzid(?:\.gz)?)|\.part$|\.tmp$|\.idx$|\.lock$)",
+    re.IGNORECASE,
+)
+# subfolders considered *transient*
+TRANSIENT_DIR_NAMES = {"parts", "tmp", "scratch", "intermediate", "chunks", ".ipynb_checkpoints"}
+
+
 def parse_channels(arg):
     """
     Accepts 'all', a single channel, comma/space separated string,
@@ -117,92 +128,85 @@ def _all_case_outputs_exist(case_ids, out_dir: Path):
             missing.append((cid, expected))
     return ok, missing
 
+def _is_case_dir(p: Path) -> bool:
+    return p.is_dir() and CASE_ID_RE.match(p.name) is not None
 
-def cleanup_parts_folders(manifest_path: Path, base_dir: Path, out_dir: Path, dry_run: bool = True):
+def _list_rel_files(root: Path):
+    return [Path(dp, fn).relative_to(root) for dp,_,fns in os.walk(root) for fn in fns]
+
+def _all_files_are_parts(files):
+    if not files:
+        return False
+    for rel in files:
+        # if any non-part-looking file is present, it's not "parts-only"
+        if not PART_FILE_RE.match(rel.name) and rel.parts[0].lower() not in TRANSIENT_DIR_NAMES:
+            return False
+    return True
+
+def _safe_remove_dir(path: Path, dry_run=True, trash_dir: Path | None = None):
+    if dry_run:
+        print(f"  - DRY-RUN would remove: {path}")
+        return
+    if trash_dir:
+        trash_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        dest = trash_dir / f"{path.name}.{stamp}"
+        shutil.move(str(path), str(dest))
+        print(f"  - moved to trash: {path} -> {dest}")
+    else:
+        shutil.rmtree(path)
+        print(f"  - deleted: {path}")
+
+def cleanup_case_dirs(out_dir: str | Path,
+                      mode: str = "parts-only",
+                      dry_run: bool = True,
+                      trash: str | Path | None = None,
+                      yes_i_am_sure: bool = False):
     """
-    Read your manifest, build a map RunFolder -> {Case-IDs}, and delete per-run parts if
-    every dependent case has its expected final output in out_dir.
-
-    Manifest must contain columns:
-      - 'Folder' (run folder like 10CPTAC_LSCC_W_BI_20190726_KL_)
-      - 'Case-ID' (your case IDs)
-    If your column names differ, rename below.
+    mode:
+      - 'empty'       : remove case dirs with no files
+      - 'parts-only'  : remove case dirs containing only part/temp files
+      - 'all'         : remove all case dirs (requires yes_i_am_sure=True)
     """
-    df = pd.read_table(manifest_path, dtype=str).fillna("")
-    # normalize likely columns
-    col_folder = None
-    for c in df.columns:
-        if c.strip().lower() == "folder":
-            col_folder = c
-            break
-    col_case = None
-    for c in df.columns:
-        if c.strip().lower() in {"case-id", "case id"}:
-            col_case = c
-            break
-
-    if col_folder is None or col_case is None:
-        print("[cleanup] Could not find required columns 'Folder' and 'Case-ID' in manifest.")
+    out_dir = Path(out_dir)
+    trash_dir = Path(trash) if trash else None
+    if not out_dir.exists():
+        print(f"[cleanup-cases] out_dir not found: {out_dir}")
         return
 
-    # Build mapping RunFolder -> set(Case-ID)
-    mapping = {}
-    for _, row in df.iterrows():
-        folder = (row[col_folder] or "").strip()
-        cid = (row[col_case] or "").strip()
-        if not folder or not cid:
-            continue
-        mapping.setdefault(folder, set()).add(cid)
+    case_dirs = [p for p in out_dir.iterdir() if _is_case_dir(p)]
+    print(f"[cleanup-cases] Found {len(case_dirs)} candidate case folders in {out_dir}")
 
-    print(f"[cleanup] Found {len(mapping)} run folders in manifest.")
+    removed = 0
+    for cdir in sorted(case_dirs, key=lambda p: p.name):
+        files = _list_rel_files(cdir)
 
-    total_deleted = 0
-    for folder, case_ids in sorted(mapping.items()):
-        run_dir = base_dir / folder
-        if not run_dir.is_dir():
-            print(f"[cleanup] Skip (not a directory): {run_dir}")
-            continue
+        if mode == "empty":
+            if len(files) == 0:
+                print(f"[cleanup-cases] {cdir.name}: empty")
+                _safe_remove_dir(cdir, dry_run=dry_run, trash_dir=trash_dir)
+                removed += 1
 
-        ok, missing = _all_case_outputs_exist(case_ids, out_dir)
-        if not ok:
-            # Skip deleting if not all dependent cases wrote outputs
-            miss_text = "; ".join([f"{cid} -> {p.name}" for cid, p in missing[:5]])
-            more = "" if len(missing) <= 5 else f" (+{len(missing)-5} more)"
-            print(f"[cleanup] Hold: outputs missing for {len(missing)} case(s) in {folder}: {miss_text}{more}")
-            continue
+        elif mode == "parts-only":
+            if _all_files_are_parts(files):
+                print(f"[cleanup-cases] {cdir.name}: parts-only ({len(files)} files)")
+                _safe_remove_dir(cdir, dry_run=dry_run, trash_dir=trash_dir)
+                removed += 1
 
-        parts = _glob_psm_parts(run_dir)
-        if not parts:
-            # Nothing to delete; optionally remove folder if empty
-            try:
-                if not any(run_dir.iterdir()):
-                    print(f"[cleanup] Empty folder -> rmdir {run_dir}")
-                    if not dry_run:
-                        run_dir.rmdir()
-            except Exception as e:
-                print(f"[cleanup] Could not rmdir {run_dir}: {e}")
-            continue
+        elif mode == "all":
+            if not yes_i_am_sure:
+                print("[cleanup-cases] Skipping 'all' (set yes_i_am_sure=True to enable).")
+                break
+            print(f"[cleanup-cases] {cdir.name}: removing (all)")
+            _safe_remove_dir(cdir, dry_run=dry_run, trash_dir=trash_dir)
+            removed += 1
 
-        print(f"[cleanup] Ready to delete {len(parts)} parts in {run_dir.name}: "
-              f"{', '.join([p.name for p in parts[:6]])}{' ...' if len(parts)>6 else ''}")
+        else:
+            print(f"[cleanup-cases] Unknown mode: {mode!r}")
+            break
 
-        if not dry_run:
-            # Delete part files
-            for p in parts:
-                try:
-                    p.unlink()
-                except Exception as e:
-                    print(f"[cleanup] Could not delete {p}: {e}")
-            # If directory becomes empty, remove it
-            try:
-                if not any(run_dir.iterdir()):
-                    run_dir.rmdir()
-            except Exception as e:
-                print(f"[cleanup] Could not rmdir {run_dir}: {e}")
+    print(f"[cleanup-cases] Done. {'Would remove' if dry_run else 'Removed'} {removed} case folders.")
 
-            total_deleted += len(parts)
-
-    print(f"[cleanup] Done. Deleted {total_deleted} part files{' (dry-run)' if dry_run else ''}.")
 
 
 # ---------- Flexible manifest + fallback path helpers ----------
@@ -570,10 +574,17 @@ def parse_args():
     p.add_argument('--step', default="all", help="all | split | prep | join (default: all)")
     p.add_argument('--jobs', type=int, default=None, help="Number of parallel workers (default: min(8,CPU count))")
     # after your existing argparse arguments:
-    p.add_argument("--cleanup", action="store_true",
-                    help="After processing, remove per-run parts (e.g., *_f??.psm) when all cases depending on a run folder are complete.")
-    p.add_argument("--cleanup-dry-run", action="store_true",
-                    help="Show what would be deleted without actually deleting.")
+    parser.add_argument("--cleanup-cases", action="store_true",
+                    help="Clean case-ID folders under out_dir")
+    parser.add_argument("--cleanup-cases-mode", default="parts-only",
+                        choices=["empty","parts-only","all"],
+                        help="What to remove")
+    parser.add_argument("--cases-dry-run", action="store_true",
+                        help="Show what would be removed (default if flag omitted)")
+    parser.add_argument("--cases-trash", default=None,
+                        help="Optional trash/quarantine dir; if set, folders are moved there")
+    parser.add_argument("--yes-i-am-sure", action="store_true",
+                        help="Required when --cleanup-cases-mode=all")
 
     return p.parse_args()
 
@@ -607,17 +618,16 @@ def main():
     if step in ('all', 'join'):
         join_parts(out, manifest, out)
     
-    if args.cleanup:
-      manifest_path = Path(args.manifest)         
-      base_dir     = Path(args.in_dir)           
-      out_dir      = Path(args.out_dir)          
-      cleanup_parts_folders(
-          manifest_path=manifest_path,
-          base_dir=base_dir,
-          out_dir=out_dir,
-          dry_run=args.cleanup_dry_run
-      )
-
+    if args.cleanup_cases:
+    # default to dry-run unless user says otherwise
+    dry = True if args.cases_dry_run or args.cases_dry_run is None else args.cases_dry_run
+    cleanup_case_dirs(
+        out_dir=args.out_dir,
+        mode=args.cleanup_cases_mode,
+        dry_run=dry,
+        trash=args.cases_trash,
+        yes_i_am_sure=args.yes_i_am_sure,
+    )
 
 
 if __name__ == '__main__':
