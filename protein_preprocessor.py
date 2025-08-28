@@ -96,9 +96,9 @@ def normalize_plex_name(name: str) -> str:
         return f"P{int(m.group(1)):02d}"
     return s
 
-  def _glob_psm_parts(run_dir: Path):
-    # Matches ..._fXX.psm
-    return sorted(run_dir.glob("*_f[0-9][0-9].psm"))
+    def _glob_psm_parts(run_dir: Path):
+      # Matches ..._fXX.psm
+      return sorted(run_dir.glob("*_f[0-9][0-9].psm"))
 
 def _all_case_outputs_exist(case_ids, out_dir: Path):
     """
