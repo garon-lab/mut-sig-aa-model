@@ -199,7 +199,7 @@ def index_dirs(out_dir: str | Path, manifest_path: str | Path):
 
 def _process_part_task(task):
     """
-    Try folder path first; if missing, search the whole tree for the part filename.
+    Try folder path first; if missing, search anywhere under root by filename.
     """
     folder_root, folder_name, file_prefix, part_num, ch_key, sample_dir, case_id = task
     try:
@@ -214,42 +214,132 @@ def _process_part_task(task):
                 ps_file = guess
 
         if ps_file is None:
-            # Fallback: search anywhere under root by filename only
             cands = list(folder_root.rglob(base))
             if cands:
                 ps_file = cands[0]
             else:
                 return ("missing", case_id, part_num, str((folder_root / (folder_n or '') / base)))
 
+        # ---- read once ----
         try:
             df1 = _read_psm(ps_file)
         except Exception as e:
             return ("read_error", case_id, part_num, f"{ps_file}: {e}")
 
-        # Extract columns
+        if df1 is None or df1.empty:
+            return ("empty", case_id, part_num, str(ps_file))
         df1 = df1.copy()
-        df1['S1'] = df1.iloc[:, 13].astype(str).str[:2]
-        df1 = df1[df1['S1'] == 'NP']
-        if df1.empty:
+
+        # header normalization helper
+        def _norm(s: str) -> str:
+            return re.sub(r'[\s_]+', '', str(s).lower())
+
+        # Helper: find a column by candidate names (case/space insensitive)
+        def find_col(candidates):
+            cols_norm = {_norm(c): c for c in df1.columns}
+            for cand in candidates:
+                key = _norm(cand)
+                if key in cols_norm:
+                    return cols_norm[key]
+            # partial contains match fallback
+            for c in df1.columns:
+                if any(_norm(k) in _norm(c) for k in candidates):
+                    return c
+            return None
+
+        # 1) Protein accession column
+        acc_col = find_col([
+            "Protein Accession","Master Protein Accessions","Accessions","Protein","Accession","ProteinAccession"
+        ])
+        if acc_col is None:
+            # cautious hard-index fallback
+            if df1.shape[1] > 13:
+                acc_col = df1.columns[13]
+            else:
+                return ("read_error", case_id, part_num, f"{ps_file}: could not locate accession column")
+
+        # 2) Peptide sequence column
+        seq_col = find_col(["Sequence","Peptide Sequence","Peptide"])
+        if seq_col is None:
+            seq_col = df1.columns[11] if df1.shape[1] > 11 else None
+
+        # 3) Score / EV column (optional)
+        ev_col = find_col(["XCorr","Score","Expectation","EValue","EV"])
+        if ev_col is None and df1.shape[1] > 16:
+            ev_col = df1.columns[16]
+
+        # 4) Gentle NP filter; if empty, keep all
+        s_acc_all = df1[acc_col].astype(str)
+        df_np = df1[s_acc_all.str.startswith("NP")]
+        if df_np.empty:
+            df_np = df1
+            s_acc = s_acc_all
+        else:
+            s_acc = df_np[acc_col].astype(str)
+
+        # 5) Parse columns
+        NP = s_acc.str.partition('(')[0]
+        if seq_col and seq_col in df_np.columns:
+            SEQ = (df_np[seq_col].astype(str)
+                     .str.split('+', n=1, regex=False).str.get(1)
+                     .fillna('')
+                     .str.strip()
+                     .str[7:])
+        else:
+            SEQ = ""
+
+        EV = df_np[ev_col] if (ev_col and ev_col in df_np.columns) else ""
+
+        # 6) Intensity column by channel name
+        def find_intensity_col(ch_key: str) -> str | None:
+            targets = {
+                "126":  ["126","tmt126"],
+                "127N": ["127n","127 n","tmt127n"],
+                "127C": ["127c","127 c","tmt127c"],
+                "128N": ["128n","tmt128n"],
+                "128C": ["128c","tmt128c"],
+                "129N": ["129n","tmt129n"],
+                "129C": ["129c","tmt129c"],
+                "130N": ["130n","tmt130n"],
+                "130C": ["130c","tmt130c"],
+                "131":  ["131","131n","131c","tmt131"],
+            }[ch_key]
+            for c in df_np.columns:
+                lc = _norm(c)
+                if any(tok in lc for tok in targets):
+                    return c
+            return None
+
+        int_col = find_intensity_col(ch_key)
+        if not int_col:
+            # last resort: index-based fallback if shape allows
+            try:
+                idx = CHANNEL_MAP[ch_key]
+                if idx < df_np.shape[1]:
+                    int_col = df_np.columns[idx]
+            except Exception:
+                pass
+        if not int_col or int_col not in df_np.columns:
+            return ("channel_index_error", case_id, part_num,
+                    f"{ps_file}: could not locate intensity for {ch_key}")
+
+        OV = df_np[int_col]
+
+        # 7) Build output
+        df_out = pd.DataFrame({"NP": NP.values, "SEQ": SEQ if isinstance(SEQ, pd.Series) else ["" ]*len(NP),
+                               "EV": EV if isinstance(EV, pd.Series) else ["" ]*len(NP),
+                               "INT": OV.values})
+        if df_out.empty:
             return ("empty", case_id, part_num, str(ps_file))
 
-        NP = df1.iloc[:, 13].astype(str).str.partition('(')[0]
-        EV = df1.iloc[:, 16]
-        PS = (df1.iloc[:, 11].astype(str)
-              .str.split('+', n=1, regex=False).str.get(1).fillna('')
-              .str.strip().str[7:])
-
-        try:
-            OV = df1.iloc[:, CHANNEL_MAP[ch_key]]
-        except Exception as e:
-            return ("channel_index_error", case_id, part_num, f"{ps_file}: {e}")
-
-        df_out = pd.DataFrame({'NP': NP, 'SEQ': PS, 'EV': EV, 'INT': OV})
         part_file = Path(sample_dir) / f"part-{part_num}.csv"
         _write_part(df_out, part_file)
         return ("ok", case_id, part_num, str(part_file))
+
     except Exception as e:
         return ("unexpected_error", case_id, part_num, str(e))
+
+
 
 def prep_data(folder, manifest_path, out_dir, channel_flag, jobs=None):
     """
