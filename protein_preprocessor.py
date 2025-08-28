@@ -171,11 +171,11 @@ def cleanup_case_dirs(out_dir: str | Path,
     out_dir = Path(out_dir)
     trash_dir = Path(trash) if trash else None
     if not out_dir.exists():
-        print(f"[cleanup-cases] out_dir not found: {out_dir}")
+        print(f"[cleanup] out_dir not found: {out_dir}")
         return
 
     case_dirs = [p for p in out_dir.iterdir() if _is_case_dir(p)]
-    print(f"[cleanup-cases] Found {len(case_dirs)} candidate case folders in {out_dir}")
+    print(f"[cleanup] Found {len(case_dirs)} candidate case folders in {out_dir}")
 
     removed = 0
     for cdir in sorted(case_dirs, key=lambda p: p.name):
@@ -183,29 +183,29 @@ def cleanup_case_dirs(out_dir: str | Path,
 
         if mode == "empty":
             if len(files) == 0:
-                print(f"[cleanup-cases] {cdir.name}: empty")
+                print(f"[cleanup] {cdir.name}: empty")
                 _safe_remove_dir(cdir, dry_run=dry_run, trash_dir=trash_dir)
                 removed += 1
 
         elif mode == "parts-only":
             if _all_files_are_parts(files):
-                print(f"[cleanup-cases] {cdir.name}: parts-only ({len(files)} files)")
+                print(f"[cleanup] {cdir.name}: parts-only ({len(files)} files)")
                 _safe_remove_dir(cdir, dry_run=dry_run, trash_dir=trash_dir)
                 removed += 1
 
         elif mode == "all":
             if not yes_i_am_sure:
-                print("[cleanup-cases] Skipping 'all' (set yes_i_am_sure=True to enable).")
+                print("[cleanup] Skipping 'all' (set yes_i_am_sure=True to enable).")
                 break
-            print(f"[cleanup-cases] {cdir.name}: removing (all)")
+            print(f"[cleanup] {cdir.name}: removing (all)")
             _safe_remove_dir(cdir, dry_run=dry_run, trash_dir=trash_dir)
             removed += 1
 
         else:
-            print(f"[cleanup-cases] Unknown mode: {mode!r}")
+            print(f"[cleanup] Unknown mode: {mode!r}")
             break
 
-    print(f"[cleanup-cases] Done. {'Would remove' if dry_run else 'Removed'} {removed} case folders.")
+    print(f"[cleanup] Done. {'Would remove' if dry_run else 'Removed'} {removed} case folders.")
 
 
 
@@ -574,9 +574,9 @@ def parse_args():
     p.add_argument('--step', default="all", help="all | split | prep | join (default: all)")
     p.add_argument('--jobs', type=int, default=None, help="Number of parallel workers (default: min(8,CPU count))")
     # after your existing argparse arguments:
-    p.add_argument("--cleanup-cases", action="store_true",
+    p.add_argument("--cleanup", action="store_true",
                     help="Clean case-ID folders under out_dir")
-    p.add_argument("--cleanup-cases-mode", default="parts-only",
+    p.add_argument("--cleanup-mode", default="parts-only",
                         choices=["empty","parts-only","all"],
                         help="What to remove")
     p.add_argument("--cases-dry-run", action="store_true",
@@ -584,7 +584,7 @@ def parse_args():
     p.add_argument("--cases-trash", default=None,
                         help="Optional trash/quarantine dir; if set, folders are moved there")
     p.add_argument("--yes-i-am-sure", action="store_true",
-                        help="Required when --cleanup-cases-mode=all")
+                        help="Required when --cleanup-mode=all")
 
     return p.parse_args()
 
