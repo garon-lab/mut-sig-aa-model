@@ -620,14 +620,14 @@ def main():
     
     if args.cleanup_cases:
     # default to dry-run unless user says otherwise
-    dry = True if args.cases_dry_run or args.cases_dry_run is None else args.cases_dry_run
-    cleanup_case_dirs(
-        out_dir=args.out_dir,
-        mode=args.cleanup_cases_mode,
-        dry_run=dry,
-        trash=args.cases_trash,
-        yes_i_am_sure=args.yes_i_am_sure,
-    )
+        dry = True if args.cases_dry_run or args.cases_dry_run is None else args.cases_dry_run
+        cleanup_case_dirs(
+            out_dir=args.out_dir,
+            mode=args.cleanup_cases_mode,
+            dry_run=dry,
+            trash=args.cases_trash,
+            yes_i_am_sure=args.yes_i_am_sure,
+        )
 
 
 if __name__ == '__main__':
