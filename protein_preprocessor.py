@@ -575,18 +575,10 @@ def parse_args():
     )
     p.add_argument('--step', default="all", help="all | split | prep | join (default: all)")
     p.add_argument('--jobs', type=int, default=None, help="Number of parallel workers (default: min(8,CPU count))")
-    # after your existing argparse arguments:
     p.add_argument("--cleanup", action="store_true",
-                    help="Clean case-ID folders under out_dir")
-    p.add_argument("--cleanup-mode", default="parts-only",
-                        choices=["empty","parts-only","all"],
-                        help="What to remove")
-    p.add_argument("--cases-dry-run", action="store_true",
-                        help="Show what would be removed (default if flag omitted)")
-    p.add_argument("--cases-trash", default=None,
-                        help="Optional trash/quarantine dir; if set, folders are moved there")
-    p.add_argument("--yes-i-am-sure", action="store_true",
-                        help="Required when --cleanup-mode=all")
+               help="Clean case-ID folders under out_dir")
+    p.add_argument("--dry-run", action="store_true",
+               help="Show what would be removed (no deletions)")
 
     return p.parse_args()
 
@@ -621,17 +613,12 @@ def main():
         join_parts(out, manifest, out)
     
     if args.cleanup:
-    # default to dry-run unless user says otherwise
-        dry = True if args.dry_run or args.dry_run is None else args.cases_dry_run
         cleanup_case_dirs(
-            out_dir=args.out_dir,
-            mode=args.cleanup_mode,
-            dry_run=dry,
-            trash=args.cases_trash,
-            yes_i_am_sure=args.yes_i_am_sure,
+            out_dir=out,             
+            dry_run=args.dry_run,  
         )
 
-
+       
 if __name__ == '__main__':
     main()
 
