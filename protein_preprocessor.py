@@ -42,21 +42,23 @@ Troubleshooting
 2. IF you see "Unrecognizaed channel", confirm the Channel matches one of the listed values.
 3. For I/O-heavy runs on fast storage, slightly increasing --jobs over core count can help; reduce if you observe disk contention or high memory.
 """
+
 import argparse
 import logging
 import os
 import re
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
-
 import pandas as pd
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # Channel → column index in PSMs
-CHANNEL_MAP = {'126':22,'127N':23,'127C':24,'128N':25,'128C':26,
-               '129N':27,'129C':28,'130N':29,'130C':30,'131':31}
+CHANNEL_MAP = {
+    '126': 22, '127N': 23, '127C': 24, '128N': 25, '128C': 26,
+    '129N': 27, '129C': 28, '130N': 29, '130C': 30, '131': 31
+}
 
 def normalize_plex_name(name: str) -> str:
     if not isinstance(name, str):
@@ -67,47 +69,88 @@ def normalize_plex_name(name: str) -> str:
         return f"P{int(m.group(1)):02d}"
     return s
 
-def read_manifest(manifest):
-    df = pd.read_csv(manifest, sep=None, engine='python', dtype=str, keep_default_na=False)
-    cols = [c.strip() for c in df.columns.tolist()]
-    df.columns = cols
-    need = {'Case-ID','Channel','Folder','File'}
-    # Back-compat: if legacy 'ID' present, rename to 'Case-ID'
-    if 'Case-ID' not in df.columns and 'ID' in df.columns:
-        df = df.rename(columns={'ID':'Case-ID'})
-    if not need.issubset(set(cols)):
-        if len(cols) >= 4:
-            rename_map = {cols[0]:'Case-ID', cols[1]:'Channel', cols[2]:'Folder', cols[3]:'File'}
-            df = df.rename(columns=rename_map)
-    for c in ['Case-ID','Channel','Folder','File']:
-        if c not in df.columns:
-            raise ValueError(f"Manifest missing required column '{c}'. Got: {df.columns.tolist()}")
-    for c in ['Case-ID','Channel','Folder','File','Type']:
-        if c in df.columns:
-            df[c] = df[c].astype(str).str.strip()
-    return df
+# ---------- Flexible manifest + fallback path helpers ----------
 
-def index_dirs(folder, manifest, out_dir):
-    logger.info("Creating index directories...")
-    df = read_manifest(manifest)
-    for case_id in df['Case-ID']:
-        if not case_id or str(case_id).lower() in {'nan','<na>'}:
-            continue
-        Path(out_dir, case_id).mkdir(parents=True, exist_ok=True)
+def read_manifest_flexible(path: str | Path) -> pd.DataFrame:
+    """
+    Read a protein manifest, accepting multiple header variants and delimiters.
+    Canonical columns: 'Folder' (optional), 'File', 'Case-ID', 'Channel'.
+    - Accepts 'ID' or 'Case-ID'
+    - Accepts 'File' or 'Filename'
+    - Accepts tabs or commas
+    - Strips whitespace
+    """
+    path = Path(path)
+    df = pd.read_csv(path, sep=None, engine="python")  # auto-detect delimiter
+
+    def norm(s: str) -> str:
+        return re.sub(r'[\s_\-]+', '-', str(s).strip().lower())
+
+    normalized = {c: norm(c) for c in df.columns}
+    df = df.rename(columns=normalized)
+
+    # Map synonyms -> canonical
+    synonym_map = {
+        'id': 'Case-ID', 'case-id': 'Case-ID', 'caseid': 'Case-ID',
+        'file': 'File', 'filename': 'File',
+        'folder': 'Folder',
+        'channel': 'Channel'
+    }
+
+    # Coalesce duplicates like case-id, case-id.1, ...
+    def coalesce_dupes(base: str) -> None:
+        cols = [c for c in df.columns if c == base or c.startswith(base + ".")]
+        if not cols:
+            return
+        if len(cols) == 1:
+            tgt = synonym_map.get(cols[0], None)
+            if tgt:
+                df.rename(columns={cols[0]: tgt}, inplace=True)
+            return
+        combined = df[cols].bfill(axis=1).iloc[:, 0]
+        tgt = synonym_map.get(base, base)
+        df[tgt] = combined
+        for c in cols:
+            if c != tgt:
+                df.drop(columns=c, inplace=True, errors="ignore")
+
+    for base in ("case-id", "file", "folder", "channel"):
+        coalesce_dupes(base)
+
+    # Final rename pass
+    for c in list(df.columns):
+        if c in synonym_map and synonym_map[c] not in df.columns:
+            df.rename(columns={c: synonym_map[c]}, inplace=True)
+
+    # Strip whitespace
+    for col in ("Folder", "File", "Case-ID", "Channel"):
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
+
+    # Validate required core columns ('Folder' is optional)
+    required_core = ["File", "Case-ID", "Channel"]
+    missing = [c for c in required_core if c not in df.columns]
+    if missing:
+        raise ValueError(f"Manifest missing required column(s): {missing}. Got: {list(df.columns)}")
+
+    keep = [c for c in ("Folder", "File", "Case-ID", "Channel") if c in df.columns]
+    return df[keep].copy()
+
+# Alias for the rest of the code
+read_manifest = read_manifest_flexible
 
 def _read_psm(ps_path: Path) -> pd.DataFrame:
-    # PSMs are TSV; be forgiving if not
+    # PSMs are typically TSV
     try:
         return pd.read_table(ps_path)
     except Exception:
         return pd.read_csv(ps_path, sep=None, engine='python')
 
 def _write_part(df_part: pd.DataFrame, path: Path) -> None:
-    # Write TSV to avoid comma/quote issues
     df_part.to_csv(path, sep='\t', index=False)
 
 def _read_part(path: Path) -> pd.DataFrame:
-    # Robust read for join: try TSV then sniff; tolerate bad lines
+    # Robust read for join
     try:
         df = pd.read_csv(path, sep='\t', engine='python', dtype=str)
         if df.shape[1] >= 4:
@@ -115,76 +158,99 @@ def _read_part(path: Path) -> pd.DataFrame:
     except Exception:
         pass
     try:
-        df = pd.read_csv(path, sep=None, engine='python', dtype=str, on_bad_lines='skip')
-        return df
+        return pd.read_csv(path, sep=None, engine='python', dtype=str, on_bad_lines='skip')
     except TypeError:
-        # older pandas: on_bad_lines might not exist
-        df = pd.read_csv(path, sep=None, engine='python', dtype=str)
-        return df
+        return pd.read_csv(path, sep=None, engine='python', dtype=str)
+
+def index_dirs(out_dir: str | Path, manifest_path: str | Path):
+    logger.info("Creating index directories...")
+    df = read_manifest(manifest_path)
+    for case_id in df['Case-ID']:
+        if not case_id or str(case_id).lower() in {'nan', '<na>'}:
+            continue
+        Path(out_dir, case_id).mkdir(parents=True, exist_ok=True)
 
 def _process_part_task(task):
+    """
+    Try folder path first; if missing, search the whole tree for the part filename.
+    """
     folder_root, folder_name, file_prefix, part_num, ch_key, sample_dir, case_id = task
     try:
-        folder_n = normalize_plex_name(folder_name)
+        folder_root = Path(folder_root)
+        folder_n = normalize_plex_name(folder_name) if folder_name else None
         base = f"{file_prefix}f{part_num:02d}.psm"
-        ps_file = Path(folder_root) / folder_n / base
-        if not ps_file.exists():
-            # Glob fallback
-            folder_dir = Path(folder_root) / folder_n
-            cands = sorted(folder_dir.glob(f"{file_prefix}*f{part_num:02d}.psm"))
+
+        ps_file = None
+        if folder_n:
+            guess = folder_root / folder_n / base
+            if guess.exists():
+                ps_file = guess
+
+        if ps_file is None:
+            # Fallback: search anywhere under root by filename only
+            cands = list(folder_root.rglob(base))
             if cands:
                 ps_file = cands[0]
             else:
-                return ("missing", case_id, part_num, str(ps_file))
+                return ("missing", case_id, part_num, str((folder_root / (folder_n or '') / base)))
 
         try:
             df1 = _read_psm(ps_file)
         except Exception as e:
             return ("read_error", case_id, part_num, f"{ps_file}: {e}")
 
-        # Filter and extract
+        # Extract columns
         df1 = df1.copy()
-        df1['S1'] = df1.iloc[:,13].astype(str).str[:2]
+        df1['S1'] = df1.iloc[:, 13].astype(str).str[:2]
         df1 = df1[df1['S1'] == 'NP']
         if df1.empty:
             return ("empty", case_id, part_num, str(ps_file))
 
-        NP = df1.iloc[:,13].astype(str).str.partition('(')[0]
-        EV = df1.iloc[:,16]
-        PS = df1.iloc[:,11].astype(str).str.split('+', n=1, regex=False).str.get(1).fillna('').str.strip().str[7:]
+        NP = df1.iloc[:, 13].astype(str).str.partition('(')[0]
+        EV = df1.iloc[:, 16]
+        PS = (df1.iloc[:, 11].astype(str)
+              .str.split('+', n=1, regex=False).str.get(1).fillna('')
+              .str.strip().str[7:])
+
         try:
             OV = df1.iloc[:, CHANNEL_MAP[ch_key]]
         except Exception as e:
             return ("channel_index_error", case_id, part_num, f"{ps_file}: {e}")
 
-        df_out = pd.DataFrame({'NP':NP, 'SEQ':PS, 'EV':EV, 'INT':OV})
+        df_out = pd.DataFrame({'NP': NP, 'SEQ': PS, 'EV': EV, 'INT': OV})
         part_file = Path(sample_dir) / f"part-{part_num}.csv"
         _write_part(df_out, part_file)
         return ("ok", case_id, part_num, str(part_file))
     except Exception as e:
         return ("unexpected_error", case_id, part_num, str(e))
 
-def prep_data(folder, manifest, out_dir, channel_flag, jobs=None):
+def prep_data(folder, manifest_path, out_dir, channel_flag, jobs=None):
     logger.info("Filtering and organizing PSMs by channel...")
-    df = read_manifest(manifest)
+    df = read_manifest(manifest_path)
 
     tasks = []
     for _, row in df.iterrows():
-        case_id = row['Case-ID']; CH = row['Channel']; FOLDER = row['Folder']; FILE = row['File']
-        if not case_id or str(case_id).lower() in {'nan','<na>'}:
+        case_id = row['Case-ID']
+        CH = row['Channel']
+        FOLDER = row['Folder'] if 'Folder' in row and pd.notna(row['Folder']) else None
+        FILE = row['File']
+
+        if not case_id or str(case_id).lower() in {'nan', '<na>'}:
             continue
+
         # honor --channel all vs explicit channel
-        if isinstance(channel_flag, str) and channel_flag.lower() == 'all':
-            ch_key = CH
-        else:
-            ch_key = channel_flag
-        if CH and ch_key and (isinstance(channel_flag, str) and channel_flag.lower() != 'all') and (CH != ch_key):
+        ch_key = CH if (isinstance(channel_flag, str) and channel_flag.lower() == 'all') else channel_flag
+        if (isinstance(channel_flag, str) and channel_flag.lower() != 'all') and (CH != ch_key):
             continue
+
         if ch_key not in CHANNEL_MAP:
             logger.warning(f"[prep] Unrecognized channel '{ch_key}' for Case-ID {case_id}; skipping sample.")
             continue
+
         sample_dir = Path(out_dir) / case_id
         sample_dir.mkdir(parents=True, exist_ok=True)
+
+        # Build 25 part tasks; worker will locate each part with folder-first, then filename-only fallback
         for j in range(1, 26):
             tasks.append((folder, FOLDER, FILE, j, ch_key, str(sample_dir), case_id))
 
@@ -192,7 +258,7 @@ def prep_data(folder, manifest, out_dir, channel_flag, jobs=None):
         logger.warning("No tasks to run (check manifest or channel selection).")
         return
 
-    workers = jobs if (jobs and jobs > 0) else (os.cpu_count() or 4)
+    workers = jobs if (jobs and jobs > 0) else min(8, (os.cpu_count() or 4))
     logger.info(f"Launching parallel processing with {workers} workers for {len(tasks)} parts...")
     status_counts = {}
     with ProcessPoolExecutor(max_workers=workers) as ex:
@@ -200,20 +266,20 @@ def prep_data(folder, manifest, out_dir, channel_flag, jobs=None):
         for fut in as_completed(futures):
             status, case_id, part_num, info = fut.result()
             status_counts[status] = status_counts.get(status, 0) + 1
-            if status in ("missing","read_error","channel_index_error","unexpected_error","empty"):
+            if status in ("missing", "read_error", "channel_index_error", "unexpected_error", "empty"):
                 logger.warning(f"[{status}] {case_id} part {part_num}: {info}")
 
-    logger.info("Parallel prep complete. Status summary: " + ", ".join(f"{k}={v}" for k,v in status_counts.items()))
+    logger.info("Parallel prep complete. " + ", ".join(f"{k}={v}" for k, v in status_counts.items()))
 
-def join_parts(parts_root, manifest, out_dir):
+def join_parts(parts_root, manifest_path, out_dir):
     logger.info("Joining processed parts...")
-    df = read_manifest(manifest)
+    df = read_manifest(manifest_path)
     ids = sorted(set(df['Case-ID']))
     for case_id in ids:
-        if not case_id or str(case_id).lower() in {'nan','<na>'}:
+        if not case_id or str(case_id).lower() in {'nan', '<na>'}:
             continue
         part_dir = Path(parts_root) / case_id
-        parts = [part_dir / f"part-{j}.csv" for j in range(1,26)]
+        parts = [part_dir / f"part-{j}.csv" for j in range(1, 26)]
         dfs = []
         for p in parts:
             if p.exists():
@@ -227,9 +293,9 @@ def join_parts(parts_root, manifest, out_dir):
         else:
             logger.warning(f"No parts found for {case_id}")
 
-def split_channels(folder, manifest, out_dir, channel_flag):
-    logger.info("Splitting manifest into channels (optional utility)...")
-    df = read_manifest(manifest)
+def split_channels(manifest_path, out_dir):
+    logger.info("Splitting manifest into channels...")
+    df = read_manifest(manifest_path)
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     for ch in CHANNEL_MAP.keys():
         path = out_dir / f"channel_{ch}.txt"
@@ -237,31 +303,38 @@ def split_channels(folder, manifest, out_dir, channel_flag):
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--folder', required=True)
-    p.add_argument('--manifest', required=True)
+    p.add_argument('--folder', required=True, help="Root directory containing raw data (e.g., .../P##/FilefXX.psm)")
+    p.add_argument('--manifest', required=True, help="TSV/CSV with columns: [Folder?] File, Case-ID, Channel")
     p.add_argument('--out_dir', required=True)
-    p.add_argument('--channel', required=True, help="e.g., 126,127N,... or 'all'")
+    p.add_argument('--channel', required=True, help="126,127N,... or 'all'")
     p.add_argument('--step', required=True, help="all | split | prep | join")
     p.add_argument('--jobs', type=int, default=None)
     return p.parse_args()
 
 def main():
     args = parse_args()
-    folder = args.folder
-    manifest = args.manifest
-    out = args.out_dir
+
+    # Validate channel input quickly
+    if args.channel.lower() != 'all' and args.channel not in CHANNEL_MAP:
+        raise SystemExit(f"--channel must be one of {list(CHANNEL_MAP)} or 'all'")
+
     step = args.step.lower()
-    channel_flag = args.channel
+    manifest = args.manifest
+    folder = args.folder
+    out = args.out_dir
     jobs = args.jobs
 
-    if step in ('all','split'):
-        split_channels(folder, manifest, out, channel_flag)
-    if step in ('all','prep'):
-        index_dirs(folder, manifest, out)
-        prep_data(folder, manifest, out, channel_flag, jobs=jobs)
-    if step in ('all','join'):
-        # IMPORTANT: join_parts expects its first argument to be the folder where parts live (== out)
+    # Ensure output root exists early
+    Path(out).mkdir(parents=True, exist_ok=True)
+
+    if step in ('all', 'split'):
+        split_channels(manifest, out)
+    if step in ('all', 'prep'):
+        index_dirs(out, manifest)
+        prep_data(folder, manifest, out, args.channel, jobs=jobs)
+    if step in ('all', 'join'):
         join_parts(out, manifest, out)
 
 if __name__ == '__main__':
     main()
+
