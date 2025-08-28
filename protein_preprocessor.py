@@ -37,7 +37,9 @@ Arguments:
                  *all runs split, then prep, then join
 
 General:
-   --jobs        Controls parallel execution, if not provided, script uses min(8, CPU count)
+   --jobs             Controls parallel execution, if not provided, script uses min(8, CPU count)
+   --cleanup          Deletes intermediate files
+   --cleanup-dry-run  Shows what files would be deleted by cleanup
 
 Troubleshooting
 1. If join says "No parts found", ensure prep ran and that FilefXX.psm were found for each ID.
