@@ -37,10 +37,10 @@ Arguments:
                  *all runs split, then prep, then join
 
 General:
-   --jobs             Controls parallel execution, if not provided, script uses min(8, CPU count)
-   --cleanup          Deletes intermediate files
-   --cleanup-dry-run  Shows what files would be deleted by cleanup
-   --skip-run         Lets cleanup run without re-running command
+   --jobs        Controls parallel execution, if not provided, script uses min(8, CPU count)
+   --cleanup     Deletes intermediate files
+   --dry-run     Shows what files would be deleted by cleanup
+   --skip-run    Lets cleanup run without re-running command
 
 Troubleshooting
 1. If join says "No parts found", ensure prep ran and that FilefXX.psm were found for each ID.
@@ -552,6 +552,9 @@ def main():
     if args.cleanup and args.skip_run:
         run_cleanup(args.out_dir, dry_run=args.dry_run, require_final_csv=True)
         return
+      
+    if not args.in_dir or not args.manifest or not args.channel:
+        raise SystemExit("--in_dir, --manifest, and --channel are required unless you use --cleanup --skip-run.")
 
     # Normalize channels
     selected, bad, raw = parse_channels(args.channel)
@@ -580,59 +583,9 @@ def main():
         join_parts(out, manifest, out)
     
     if args.cleanup:
-        if args.cleanup:
         run_cleanup(args.out_dir, dry_run=args.dry_run, require_final_csv=True)
 
-        final_csv = (root / f"{d.name}.csv")
-        if not final_csv.exists():
-            print(f"  skip: {d} (no final {final_csv.name})")
-            continue
 
-        root = Path(args.out_dir).expanduser().resolve()
-        if not root.exists():
-            print(f"[cleanup] out_dir not found: {root}")
-            return
-        if str(root) == "/":
-            raise SystemExit("Refusing to operate on '/'. Pick a specific out_dir.")
-
-        candidates = [d for d in root.iterdir() if d.is_dir() and CASE_ID_RE.match(d.name)]
-        print(f"[cleanup] Scanning {len(candidates)} case folders under {root}")
-
-        removed = 0
-        for d in sorted(candidates, key=lambda p: p.name):
-            if removable_case_dir(d):
-                if args["dry_run"]:
-                    print(f"  DRY-RUN would delete: {d}")
-                else:
-                    shutil.rmtree(d)
-                    print(f"  deleted: {d}")
-                    removed += 1
-
-        print(f"[cleanup] {'Would delete' if args.dry_run else 'Deleted'} {removed} case folders.")
-        return
-        root = Path(args.out_dir).expanduser().resolve()
-        if not root.exists():
-            print(f"[cleanup] out_dir not found: {root}")
-            return
-        if str(root) == "/":
-            raise SystemExit("Refusing to operate on '/'. Pick a specific out_dir.")
-    
-        candidates = [d for d in root.iterdir() if d.is_dir() and CASE_ID_RE.match(d.name)]
-        print(f"[cleanup] Scanning {len(candidates)} case folders under {root}")
-    
-        removed = 0
-        for d in sorted(candidates, key=lambda p: p.name):
-            if removable_case_dir(d):
-                if args.dry_run:
-                    print(f"  DRY-RUN would delete: {d}")
-                else:
-                    shutil.rmtree(d)
-                    print(f"  deleted: {d}")
-                    removed += 1
-    
-        print(f"[cleanup] {'Would delete' if args.dry_run else 'Deleted'} {removed} case folders.")
-
-       
 if __name__ == '__main__':
     main()
 
