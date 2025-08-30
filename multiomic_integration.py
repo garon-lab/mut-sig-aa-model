@@ -136,6 +136,17 @@ QC & Logging
     --keep-join-cols      [off|on] On keeps the linker mapping in the final output csv (default = off)
 
 """
+import argparse
+import gzip
+import logging
+import os
+import re
+import shutil
+import tempfile
+import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
+from typing import List, Optional, Tuple
 import pandas as pd
 
 logging.basicConfig(level=logging.INFO, format='[multiomic_integration] %(levelname)s %(message)s')
