@@ -20,7 +20,7 @@ Usage:
         --integrated_dir <directory of integrated CSVs> \
         --manifest <path to case-ids> \
         --out_dir <output directory> \
-        --ref_zip <path to reference files>
+        --ref_zip <path to reference files> \
         --make_plots --emit_substitutions \
         --cohort_plots --cohort_plots_by_protein \
         --jobs 8 --log_level INFO
@@ -719,7 +719,7 @@ def _process_case_worker(fp_str: str,
         df = pd.read_csv(fp, sep=",", dtype=str, low_memory=False)
         cols = _detect_cols_expanded(df)
 
-                # --- LUNG ANNOTATION MERGE ---
+        # --- LUNG ANNOTATION MERGE ---
         # Prefer annotation merge over boolean set membership.
         lung_df = _get_lung_df_cached(opts.get("lung_tsv"), opts.get("lung_gene_col"))
         if cols["symbol"] and lung_df is not None and not lung_df.empty:
@@ -996,19 +996,19 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
         "prot_no":  {"snv_genes": set(), "plots_dir": root_dir / "prot_no"},
     }
 
-    # 1) Identify SNV-harboring genes within each stratum
+        # 1) Identify SNV-harboring genes within each stratum
     for f in per_case_files:
         try:
             df = pd.read_csv(f, dtype=str, low_memory=False)
             cols = _detect_cols_expanded(df)
             sym_col = cols.get("symbol")
-            pro_t = cols.get("pro_t")
-            if not sym_col or not pro_t or pro_t not in df.columns:
+            if not sym_col:
                 continue
-            # protein presence mask from tumor protein column
-            present_t, _present_n = _protein_presence_masks(df, cols)
-            mask = present_t if name == "prot_yes" else ~present_t
 
+            # protein presence mask from explicit booleans if present; else fallback
+            present_t, _present_n = _protein_presence_masks(df, cols)
+            mask_yes = present_t
+            mask_no  = ~present_t
 
             # collect SNV genes for each stratum
             if mask_yes.any():
@@ -1034,20 +1034,18 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
             logging.warning(f"[analysis] No SNV genes for {name}; skipping")
             continue
 
-        # Aggregate tumor/normal values for boxplots within stratum
+                # Aggregate tumor/normal values for boxplots within stratum
         layer_data = {L: {"tumor": [], "normal": []} for L in layers}
         for f in per_case_files:
             try:
                 df = pd.read_csv(f, dtype=str, low_memory=False)
                 cols = _detect_cols_expanded(df)
                 sym_col = cols.get("symbol")
-                pro_t = cols.get("pro_t")
-                if not sym_col or not pro_t or pro_t not in df.columns:
+                if not sym_col:
                     continue
 
                 present_t, _present_n = _protein_presence_masks(df, cols)
                 mask = present_t if name == "prot_yes" else ~present_t
-
                 if not mask.any():
                     continue
 
@@ -1071,6 +1069,7 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
                 if verbose:
                     print(f"[analysis] {name} aggregation failed for {f}: {e}")
 
+
         # Make boxplots
         for L in layers:
             tvals = layer_data[L]["tumor"]
@@ -1084,24 +1083,19 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
             fig.savefig(plots_dir / f"cohort_boxplot_{L}_{name}.png", dpi=150, bbox_inches="tight")
             plt.close(fig)
 
-        # Volcano per stratum
+                # Volcano per stratum
         for L, col in layer_l2fc_cols.items():
             rows = []
             for f in per_case_files:
                 try:
                     df = pd.read_csv(f, dtype=str, low_memory=False)
-                                cols = _detect_cols_expanded(df)
+                    cols = _detect_cols_expanded(df)
                     sym_col = cols.get("symbol")
-                    if not sym_col:
+                    if not sym_col or col not in df.columns:
                         continue
-        
-                    present_t, _present_n = _protein_presence_masks(df, cols)
-                    mask_yes = present_t
-                    mask_no  = ~present_t
 
                     present_t, _present_n = _protein_presence_masks(df, cols)
                     mask = present_t if name == "prot_yes" else ~present_t
-
 
                     sdf = df.loc[mask, [sym_col, col]].copy()
                     sdf[sym_col] = sdf[sym_col].astype(str).str.strip().str.upper()
@@ -1115,6 +1109,7 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
                         print(f"[analysis] {name} volcano input failed for {f}: {e}")
             if not rows:
                 continue
+
             big = pd.concat(rows, ignore_index=True)
             agg = big.groupby("Gene")[col].apply(list).reset_index(name="vals")
 
@@ -1137,6 +1132,7 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
                         p = 1.0
                 xs.append(mean)
                 ys.append(-np.log10(max(p, 1e-300)))
+
             if not xs:
                 continue
             fig = plt.figure()
