@@ -18,7 +18,7 @@ Dependencies: pandas, numpy, matplotlib, scipy (optional: statistics, clustering
 Usage:
     python multiomic_analysis.py \
         --integrated_dir <directory of integrated CSVs> \
-        --manifest <path to case-ids>
+        --manifest <path to case-ids> \
         --out_dir <output directory> \
         --ref_zip <path to reference files>
         --make_plots --emit_substitutions \
