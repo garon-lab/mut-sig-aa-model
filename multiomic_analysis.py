@@ -315,6 +315,28 @@ def _load_lung_table_robust(lung_tsv: Path, gene_col_hint: Optional[str] = None)
     out = out.drop_duplicates(subset=["Gene"])
     return out
 
+def _protein_presence_masks(df: pd.DataFrame, cols: Dict[str, Optional[str]]) -> tuple[pd.Series, pd.Series]:
+    """
+    Return (present_tumor, present_normal) boolean Series for protein presence.
+    Prefers explicit boolean columns Protein_Present_Tumor / Protein_Present_Normal if they exist.
+    Otherwise falls back to non-null checks on pro_t / pro_n columns.
+    """
+    if "Protein_Present_Tumor" in df.columns:
+        present_t = df["Protein_Present_Tumor"].astype(bool)
+    else:
+        present_t = pd.Series(False, index=df.index)
+        if cols.get("pro_t") and cols["pro_t"] in df.columns:
+            present_t = df[cols["pro_t"]].notna()
+
+    if "Protein_Present_Normal" in df.columns:
+        present_n = df["Protein_Present_Normal"].astype(bool)
+    else:
+        present_n = pd.Series(False, index=df.index)
+        if cols.get("pro_n") and cols["pro_n"] in df.columns:
+            present_n = df[cols["pro_n"]].notna()
+
+    return present_t, present_n
+    
 
 # ---------- Analysis helpers ----------
 def _extract_ion_firstnum(val: pd.Series, min_first: float = 10.0) -> pd.Series:
@@ -486,7 +508,11 @@ def _extract_substitutions(case_id: str, df: pd.DataFrame, cols: Dict[str, Optio
         "Log2FC_RNA": df.get("Log2FC_RNA", np.nan),
         "Log2FC_CNV": df.get("Log2FC_CNV", np.nan),
         "Log2FC_CH3": df.get("Log2FC_CH3", np.nan),
-        "Protein_Present": df[cols["pro_t"]].notna() if cols["pro_t"] else False,
+        "Protein_Present": (
+            df["Protein_Present_Tumor"].astype(bool)
+            if "Protein_Present_Tumor" in df.columns
+            else (df[cols["pro_t"]].notna() if cols["pro_t"] else False)
+        ),
     })
     # clean: drop NA substitutions or ones like '>' only
     mask = aa.notna() & (aa.str.len() >= 2) & (subst != ">")
@@ -980,9 +1006,9 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
             if not sym_col or not pro_t or pro_t not in df.columns:
                 continue
             # protein presence mask from tumor protein column
-            prot_vals = pd.to_numeric(df[pro_t], errors="coerce")
-            mask_yes = prot_vals.notna()
-            mask_no  = ~mask_yes
+            present_t, _present_n = _protein_presence_masks(df, cols)
+            mask = present_t if name == "prot_yes" else ~present_t
+
 
             # collect SNV genes for each stratum
             if mask_yes.any():
@@ -1019,8 +1045,9 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
                 if not sym_col or not pro_t or pro_t not in df.columns:
                     continue
 
-                prot_vals = pd.to_numeric(df[pro_t], errors="coerce")
-                mask = prot_vals.notna() if name == "prot_yes" else prot_vals.isna()
+                present_t, _present_n = _protein_presence_masks(df, cols)
+                mask = present_t if name == "prot_yes" else ~present_t
+
                 if not mask.any():
                     continue
 
@@ -1063,13 +1090,19 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
             for f in per_case_files:
                 try:
                     df = pd.read_csv(f, dtype=str, low_memory=False)
-                    cols = _detect_cols_expanded(df)
+                                cols = _detect_cols_expanded(df)
                     sym_col = cols.get("symbol")
-                    pro_t = cols.get("pro_t")
-                    if not sym_col or pro_t not in df.columns or col not in df.columns:
+                    if not sym_col:
                         continue
-                    prot_vals = pd.to_numeric(df[pro_t], errors="coerce")
-                    mask = prot_vals.notna() if name == "prot_yes" else prot_vals.isna()
+        
+                    present_t, _present_n = _protein_presence_masks(df, cols)
+                    mask_yes = present_t
+                    mask_no  = ~present_t
+
+                    present_t, _present_n = _protein_presence_masks(df, cols)
+                    mask = present_t if name == "prot_yes" else ~present_t
+
+
                     sdf = df.loc[mask, [sym_col, col]].copy()
                     sdf[sym_col] = sdf[sym_col].astype(str).str.strip().str.upper()
                     sdf = sdf[sdf[sym_col].isin(snv_genes)]
