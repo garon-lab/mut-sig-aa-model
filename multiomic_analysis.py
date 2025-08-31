@@ -205,6 +205,25 @@ def _load_lung_table_robust(lung_tsv: Path, gene_col_hint: Optional[str] = None)
     out["reliability"] = df_sym[rel_col] if rel_col else np.nan
     return out.drop_duplicates(subset=["Gene"])
 
+def _read_manifest_cases(path: Path) -> list[str]:
+    """
+    Read a manifest of case IDs (first column).
+    Supports TSV/CSV/TXT with or without header.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"Manifest not found: {path}")
+    sep = _sniff_sep_from_path(path, fallback="\t")
+    try:
+        df = pd.read_csv(path, sep=sep, dtype=str)
+        first_col = df.columns[0]
+        ids = df[first_col].astype(str).str.strip()
+    except Exception:
+        # Fallback: simple line-by-line
+        ids = pd.Series(
+            [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        )
+    ids = ids[ids != ""].dropna().unique().tolist()
+    return ids
 
 # ---------------- Analysis helpers ----------------
 
