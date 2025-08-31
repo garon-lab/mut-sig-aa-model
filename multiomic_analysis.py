@@ -1472,7 +1472,7 @@ def main():
     if summaries:
         summary_df = pd.DataFrame(summaries).sort_values("case_id")
         summary_df.to_csv(cohort_dir / "analysis_summary.csv", index=False)
-        logging.info(f"Wrote cohort summary -> {out_dir/'analysis_summary.csv'}")
+        logging.info(f"Wrote cohort summary -> {cohort_dir/'analysis_summary.csv'}")
     else:
         logging.warning("No per-case summaries produced.")
 
@@ -1500,7 +1500,7 @@ def main():
                 protein_hit_cases=("Protein_Present", lambda s: int(pd.Series(s).fillna(False).astype(bool).sum())),
             ).reset_index()
             grouped.to_csv(cohort_dir / "substitutions_summary.tsv", sep="\t", index=False)
-            logging.info(f"Wrote substitutions summary -> {out_dir/'substitutions_summary.tsv'}")
+            logging.info(f"Wrote substitutions summary -> {cohort_dir/'substitutions_summary.tsv'}")
         else:
             logging.info("No per-case substitution files found; skipped substitutions_summary.tsv")
 
