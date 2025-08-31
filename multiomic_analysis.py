@@ -76,33 +76,30 @@ Output:
 │   ├── C3L-00001_rna_merge.csv
 │   └── ...
 │
-├── plots/                           # visualization outputs (if --make_plots)
-│   ├── cohort_boxplot_RNA.png
-│   ├── cohort_boxplot_CNV.png
-│   ├── cohort_boxplot_CH3.png
-│   ├── cohort_boxplot_Protein.png
-│   ├── cohort_volcano_RNA.png
-│   ├── cohort_volcano_CNV.png
-│   ├── cohort_volcano_CH3.png
-│   ├── cohort_volcano_Protein.png
-│   └── cohort_by_protein/           # stratified results
-│       ├── prot_yes/
+├── cohorts/                           # visualization outputs (if --make_plots)
+│   ├── analysis_summary.csv
+│   ├── substitutions_summary.tsv
+│   └── plots/
+│       ├── cohort/
 │       │   ├── cohort_boxplot_RNA.png
 │       │   ├── cohort_volcano_RNA.png
 │       │   └── ...
-│       └── prot_no/
-│           ├── cohort_boxplot_RNA.png
-│           ├── cohort_volcano_RNA.png
-│           └── ...
+│       ├── cohort_by_protein/
+│       │   ├── prot_yes/
+│       │   │   ├── cohort_boxplot_RNA_prot_yes.png
+│       │   │   └── ...
+│       │   └── prot_no/
+│       │       ├── cohort_boxplot_RNA_prot_no.png
+│       │       └── ...
+│       └── volcano_yes_vs_no_RNA.png
+│           volcano_yes_vs_no_CNV.png
+│           volcano_yes_vs_no_CH3.png
 │
 ├── metadata/
 │   └── ref_cache/                   # extracted reference files
 │       ├── lung-only.tsv
 │       └── gene-reads.gct
 │
-├── analysis_summary.csv             # cohort-level integrated summary
-├── substitutions_summary.tsv        # cohort-wide substitution summary (if --emit_substitutions)
-├── omic_statistics.csv              # descriptive stats for all omic layers
 └── multiomic_run.log                # log file
 
 """
@@ -550,7 +547,7 @@ def _make_volcano_protein_yes_vs_no(per_case_dir: Path, integrated_dir: Path, ou
     y-axis: -log10(p-value) from two-sample test (Welch's t-test if SciPy present)
     Uses SNV-harboring genes to match other cohort plots.
     """
-    root = out_dir / "plots" / "cohort_by_protein"
+    root = cohort_dir / "plots" / "cohort_by_protein"
     root.mkdir(parents=True, exist_ok=True)
 
     # Gather per-case files (prefer per_case, fall back to integrated)
@@ -970,7 +967,7 @@ def _layer_cols_from_detect(cols: dict, base: str) -> tuple[str, str]:
     return None, None
 
 def _make_cohort_boxplots_and_volcano(per_case_dir: Path, integrated_dir: Path, out_dir: Path, verbose: bool = False):
-    plots_dir = out_dir / "plots" / "cohort"
+    plots_dir = cohort_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     snv_genes = set()
@@ -1100,7 +1097,7 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
         - prot_yes: rows where the tumor protein column (SEQ/Protein_SEQ) is not NA
         - prot_no:  rows where it is NA
     """
-    root_dir = out_dir / "plots" / "cohort_by_protein"
+    root_dir = cohorts_dir / "plots" / "cohort_by_protein"
     (root_dir / "prot_yes").mkdir(parents=True, exist_ok=True)
     (root_dir / "prot_no").mkdir(parents=True, exist_ok=True)
 
@@ -1378,6 +1375,8 @@ def _resolve_refs(args) -> dict:
 def main():
     args = parse_args()
     out_dir = Path(args.out_dir); _ensure_dir(out_dir)
+    cohort_dir = out_dir / "cohorts"
+    _ensure_dir(cohort_dir)
 
     # Set up dual logging (console + file)
     _setup_logging(out_dir, args.log_level)
@@ -1472,7 +1471,7 @@ def main():
     # Cohort summary
     if summaries:
         summary_df = pd.DataFrame(summaries).sort_values("case_id")
-        summary_df.to_csv(out_dir / "analysis_summary.csv", index=False)
+        summary_df.to_csv(cohort_dir / "analysis_summary.csv", index=False)
         logging.info(f"Wrote cohort summary -> {out_dir/'analysis_summary.csv'}")
     else:
         logging.warning("No per-case summaries produced.")
@@ -1500,7 +1499,7 @@ def main():
                 mean_Log2FC_CH3=("Log2FC_CH3","mean"),
                 protein_hit_cases=("Protein_Present", lambda s: int(pd.Series(s).fillna(False).astype(bool).sum())),
             ).reset_index()
-            grouped.to_csv(out_dir / "substitutions_summary.tsv", sep="\t", index=False)
+            grouped.to_csv(cohort_dir / "substitutions_summary.tsv", sep="\t", index=False)
             logging.info(f"Wrote substitutions summary -> {out_dir/'substitutions_summary.tsv'}")
         else:
             logging.info("No per-case substitution files found; skipped substitutions_summary.tsv")
@@ -1508,17 +1507,17 @@ def main():
     # Cohort plots
     if args.cohort_plots:
         try:
-            _make_cohort_boxplots_and_volcano(out_dir / "per_case", Path(args.integrated_dir), out_dir, verbose=args.verbose)
+            _make_cohort_boxplots_and_volcano(cohort_dir / "per_case", Path(args.integrated_dir), out_dir, verbose=args.verbose)
         except Exception as e:
             logging.warning(f"Cohort plots failed: {e}")
 
     if args.cohort_plots_by_protein:
         try:
-            _make_cohort_boxplots_and_volcano_by_protein(out_dir / "per_case", Path(args.integrated_dir), out_dir, verbose=args.verbose)
+            _make_cohort_boxplots_and_volcano_by_protein(cohort_dir / "per_case", Path(args.integrated_dir), out_dir, verbose=args.verbose)
         except Exception as e:
             logging.warning(f"[analysis] cohort-by-protein boxplots/volcano failed: {e}")
         try:
-            _make_volcano_protein_yes_vs_no(out_dir / "per_case", Path(args.integrated_dir), out_dir, verbose=args.verbose)
+            _make_volcano_protein_yes_vs_no(cohort_dir / "per_case", Path(args.integrated_dir), out_dir, verbose=args.verbose)
         except Exception as e:
             logging.warning(f"[analysis] protein yes/no volcano failed: {e}")
 
