@@ -76,24 +76,23 @@ Output:
 │   ├── C3L-00001_rna_merge.csv
 │   └── ...
 │
-├── cohort/                           # visualization outputs (if --make_plots)
+├── cohort/
 │   ├── analysis_summary.csv
 │   ├── substitutions_summary.tsv
-│   └── plots/
-│       ├── cohort/
-│       │   ├── cohort_boxplot_RNA.png
-│       │   ├── cohort_volcano_RNA.png
-│       │   └── ...
-│       ├── cohort_by_protein/
-│       │   ├── prot_yes/
-│       │   │   ├── cohort_boxplot_RNA_prot_yes.png
-│       │   │   └── ...
-│       │   └── prot_no/
-│       │       ├── cohort_boxplot_RNA_prot_no.png
-│       │       └── ...
-│       └── volcano_yes_vs_no_RNA.png
-│           volcano_yes_vs_no_CNV.png
-│           volcano_yes_vs_no_CH3.png
+│   ├── cohort_boxplot_RNA.png
+│   ├── cohort_boxplot_CNV.png
+│   ├── cohort_boxplot_CH3.png
+│   ├── cohort_boxplot_Protein.png
+│   ├── cohort_volcano_RNA.png
+│   ├── cohort_volcano_CNV.png
+│   ├── cohort_volcano_CH3.png
+│   ├── cohort_volcano_Protein.png
+│   └── cohort_by_protein/
+│       ├── prot_yes/...
+│       ├── prot_no/...
+│       ├── volcano_yes_vs_no_RNA.png
+│       ├── volcano_yes_vs_no_CNV.png
+│       └── volcano_yes_vs_no_CH3.png
 │
 ├── metadata/
 │   └── ref_cache/                   # extracted reference files
@@ -227,34 +226,6 @@ def _read_manifest_cases(path: Path) -> list[str]:
 
 # ---------------- Analysis helpers ----------------
 
-def _extract_ion_firstnum(val: pd.Series, min_first: float = 10.0) -> pd.Series:
-    s = val.astype(str)
-    first = s.str.split("/", n=1, expand=True).iloc[:, 0]
-    x = pd.to_numeric(first, errors="coerce")
-    return x.where(x >= min_first, np.nan)
-
-
-def _add_log2fc_protein_from_ion(df: pd.DataFrame, pseudocount: float) -> pd.DataFrame:
-    """
-    Compute Delta_Protein and Log2FC_Protein using Ion (tumor) and Ion-Normal (normal).
-    If Ion columns are absent or all-NaN, fill with NaN and leave columns present.
-    """
-    t_col, n_col = "Ion", "Ion-Normal"
-    if t_col in df.columns and n_col in df.columns:
-        t = pd.to_numeric(df[t_col], errors="coerce")
-        n = pd.to_numeric(df[n_col], errors="coerce")
-        df["Delta_Protein"]  = t - n
-        df["Log2FC_Protein"] = np.log2((t + pseudocount) / (n + pseudocount))
-    else:
-        # Ensure columns exist even if we can't compute them
-        df["Delta_Protein"]  = np.nan
-        df["Log2FC_Protein"] = np.nan
-    if not (("Ion" in df.columns) and ("Ion-Normal" in df.columns)):
-        logging.warning(f"[{case_id}] Ion/Ion-Normal not available — Log2FC_Protein set to NaN")
-
-    return df
-
-
 def _case_id_from_path(p: Path) -> str:
     name = p.name
     return name[:-len("_integrated.csv")] if name.endswith("_integrated.csv") else name.replace(".csv","")
@@ -326,20 +297,27 @@ def _signature12_from_ref_alt(ref: pd.Series, alt: pd.Series) -> pd.Series:
             sig[k] = int(v)
     return sig
 
-
-def _add_delta_log2fc(df: pd.DataFrame, t_col: Optional[str], n_col: Optional[str],
-                      base_name: str, pseudocount: float) -> pd.DataFrame:
-    if not t_col or not n_col or t_col not in df.columns or n_col not in df.columns:
-        df[f"Delta_{base_name}"] = np.nan; df[f"Log2FC_{base_name}"] = np.nan; return df
-    t = _coerce_numeric(df[t_col]); n = _coerce_numeric(df[n_col])
-    df[f"Delta_{base_name}"] = t - n
-    df[f"Log2FC_{base_name}"] = np.log2((t + pseudocount) / (n + pseudocount))
+# --- Protein LFC from Ion ---
+def _add_log2fc_protein_from_ion(df: pd.DataFrame, pseudocount: float, case_id: Optional[str] = None) -> pd.DataFrame:
+    t_col, n_col = "Ion", "Ion-Normal"
+    if t_col in df.columns and n_col in df.columns:
+        t = pd.to_numeric(df[t_col], errors="coerce")
+        n = pd.to_numeric(df[n_col], errors="coerce")
+        df["Delta_Protein"]  = t - n
+        df["Log2FC_Protein"] = np.log2((t + pseudocount) / (n + pseudocount))
+    else:
+        df["Delta_Protein"]  = np.nan
+        df["Log2FC_Protein"] = np.nan
+        if case_id is not None:
+            logging.warning(f"[{case_id}] Ion/Ion-Normal not available — Log2FC_Protein set to NaN")
     return df
 
+# --- Small utilities ---
 def _count_up_down(df: pd.DataFrame, col: str, thr: float) -> Tuple[int,int,int]:
     s = pd.to_numeric(df[col], errors="coerce")
     return int((s >= thr).sum()), int((s <= -thr).sum()), int(s.notna().sum())
 
+# --- gene_reads matching helpers ---
 def _auto_pick_gene_reads_id(df: pd.DataFrame) -> tuple[str, str]:
     for c in ["ENSG","ENSGene","ENSGene_core","gene_id","ensembl","Ensembl","Ensembl_ID"]:
         if c in df.columns: return c, "ensg"
@@ -351,9 +329,9 @@ def _select_gene_reads_key_cols_robust(df: pd.DataFrame, match_key: str, value_c
     if match_key == "auto":
         id_col, key_type = _auto_pick_gene_reads_id(df)
     elif match_key == "ensg":
-        id_col, key_type = next((c, "ensg") for c in ["ENSG","ENSGene","ENSGene_core","gene_id","ensembl","Ensembl","Ensembl_ID"] if c in df.columns) or (df.columns[0], "ensg")
+        id_col, key_type = next(((c, "ensg") for c in ["ENSG","ENSGene","ENSGene_core","gene_id","ensembl","Ensembl","Ensembl_ID"] if c in df.columns), (df.columns[0], "ensg"))
     else:
-        id_col, key_type = next((c, "symbol") for c in ["Gene","gene","symbol","Symbol","Gene_Symbol","HGNC","hgnc","Name","NAME"] if c in df.columns) or (df.columns[0], "symbol")
+        id_col, key_type = next(((c, "symbol") for c in ["Gene","gene","symbol","Symbol","Gene_Symbol","HGNC","hgnc","Name","NAME"] if c in df.columns), (df.columns[0], "symbol"))
     if value_col and value_col in df.columns:
         val_col = value_col
     elif "__TOTAL__" in df.columns:
@@ -378,8 +356,7 @@ def _merge_rna_vs_gene_reads_dual(case_df: pd.DataFrame, cols: Dict[str, Optiona
         left = pd.DataFrame({"key": left_key, "RNA_Count": pd.to_numeric(case_df[cols["rna_t"]], errors="coerce")})
         right = pd.DataFrame({"key": right_key, "gene_reads": pd.to_numeric(gene_reads_df[vcol], errors="coerce")})
         merged = left.merge(right, on="key", how="inner").dropna(subset=["RNA_Count","gene_reads"])
-        if merged.empty:
-            return merged, dict(n=0, pearson=np.nan, spearman=np.nan)
+        if merged.empty: return merged, dict(n=0, pearson=np.nan, spearman=np.nan)
         return merged, dict(
             n=int(len(merged)),
             pearson=float(merged[["RNA_Count","gene_reads"]].corr(method="pearson").iloc[0,1]),
@@ -393,6 +370,7 @@ def _merge_rna_vs_gene_reads_dual(case_df: pd.DataFrame, cols: Dict[str, Optiona
         stats["used_key"] = desired_key
     return merged, stats
 
+# --- protein presence masks ---
 def _protein_presence_masks(df: pd.DataFrame, cols: Dict[str, Optional[str]]) -> tuple[pd.Series, pd.Series]:
     if "Protein_Present_Tumor" in df.columns:
         present_t = df["Protein_Present_Tumor"].astype(bool)
@@ -408,48 +386,35 @@ def _protein_presence_masks(df: pd.DataFrame, cols: Dict[str, Optional[str]]) ->
             present_n = df[cols["pro_n"]].notna()
     return present_t, present_n
 
+# --- cohort substitutions packages (SNV/SNP) ---
 def _build_cohort_substitution_packages(per_case_dir: Path, integrated_dir: Path, cohort_dir: Path,
                                         labels: Tuple[str,str] = ("SNV","SNP"), verbose: bool = False):
     """Create cohort-level SNV/ and SNP/ packages under <cohort_dir>/substitutions/:
        - substitutions_{label}.tsv (with Ion & Ion-Normal if present)
        - aa_matrix_{label}.csv (21x21)
        - signature12_{label}.csv (12-channel REF→ALT)"""
-
     base_out = cohort_dir / "substitutions"
-    (base_out).mkdir(parents=True, exist_ok=True)
-
+    base_out.mkdir(parents=True, exist_ok=True)
     files = sorted(per_case_dir.glob("*_analysis.csv")) or sorted(integrated_dir.glob("*_integrated.csv"))
     if not files:
         logging.warning("[analysis] No per-case files for cohort substitutions packaging")
         return
-
-    # accumulate per-label rows and AA pairs
     per_label_rows = {labels[0]: [], labels[1]: []}
     per_label_pairs = {labels[0]: [], labels[1]: []}
     per_label_sig = {labels[0]: None, labels[1]: None}
-
     for f in files:
         try:
             df = pd.read_csv(f, dtype=str, low_memory=False).fillna("")
             cols = _detect_cols_expanded(df)
-
-            # AA field from INFO (pipe-field 16) for AA matrix
             info = df.get(cols.get("info"), pd.Series("", index=df.index)).astype(str)
             aa_field = info.str.split("|", expand=True)
             aa_col = aa_field.iloc[:,15] if aa_field.shape[1] > 15 else pd.Series("", index=df.index)
-            aa_start = aa_col.str.slice(0,1)
-            aa_end = aa_col.str.slice(-1)
-
-            # classify SNV vs SNP (matches dna_analysis default behavior)  :contentReference[oaicite:3]{index=3}
+            aa_start = aa_col.str.slice(0,1); aa_end = aa_col.str.slice(-1)
             lab = _classify_label(df, labels=labels)
-
-            # compute 12-channel signature from REF/ALT for *all* rows in each label
             if "REF" in df.columns and "ALT" in df.columns:
                 for lbl in labels:
                     sig = _signature12_from_ref_alt(df.loc[lab==lbl, "REF"], df.loc[lab==lbl, "ALT"])
                     per_label_sig[lbl] = (per_label_sig[lbl] + sig) if per_label_sig[lbl] is not None else sig.copy()
-
-            # stash rows (carry Ion/Ion-Normal; Protein_Present if available)
             for lbl in labels:
                 mask = (lab == lbl)
                 if not mask.any(): continue
@@ -470,39 +435,25 @@ def _build_cohort_substitution_packages(per_case_dir: Path, integrated_dir: Path
                     "Ion": df["Ion"] if "Ion" in df.columns else np.nan,
                     "Ion-Normal": df["Ion-Normal"] if "Ion-Normal" in df.columns else np.nan,
                 })
-                # keep only rows where we actually have an AA call (avoid '>' only)
                 keep = tmp["Substitution"].astype(str) != ">"
                 per_label_rows[lbl].append(tmp[keep])
-
-                # accumulate AA pairs for 21x21 matrix
                 pairs = list(zip(aa_start[mask & keep], aa_end[mask & keep]))
                 per_label_pairs[lbl].extend([(str(a), str(b)) for a,b in pairs if isinstance(a,str) and isinstance(b,str)])
-
         except Exception as e:
             if verbose:
                 print(f"[analysis] cohort substitutions scan failed for {f}: {e}")
-
-    # write outputs for each label
     for lbl in labels:
         out_dir = base_out / lbl
         out_dir.mkdir(parents=True, exist_ok=True)
-
-        # substitutions table (cohort)
         if per_label_rows[lbl]:
-            subs = pd.concat(per_label_rows[lbl], ignore_index=True)
-            subs.to_csv(out_dir / f"substitutions_{lbl}.tsv", sep="\t", index=False)
+            pd.concat(per_label_rows[lbl], ignore_index=True).to_csv(out_dir / f"substitutions_{lbl}.tsv", sep="\t", index=False)
         else:
             pd.DataFrame(columns=["case_id","Gene","AA_start","AA_end","Substitution","REF","ALT",
                                   "Log2FC_RNA","Log2FC_CNV","Log2FC_CH3","Protein_Present","Ion","Ion-Normal"]
                         ).to_csv(out_dir / f"substitutions_{lbl}.tsv", sep="\t", index=False)
-
-        # 21×21 AA matrix
-        mat = _aa_matrix_from_pairs(per_label_pairs[lbl])
-        mat.to_csv(out_dir / f"aa_matrix_{lbl}.csv")
-
-        # 12-channel signature
-        sig = per_label_sig[lbl] if per_label_sig[lbl] is not None else pd.Series(0, index=_SUBS12, dtype=int)
-        sig.to_csv(out_dir / f"signature12_{lbl}.csv", header=["count"])
+        _aa_matrix_from_pairs(per_label_pairs[lbl]).to_csv(out_dir / f"aa_matrix_{lbl}.csv")
+        (per_label_sig[lbl] if per_label_sig[lbl] is not None else pd.Series(0, index=_SUBS12, dtype=int)) \
+            .to_csv(out_dir / f"signature12_{lbl}.csv", header=["count"])
 
 
 # ---------------- Per-case worker ----------------
@@ -635,7 +586,7 @@ def _process_case_worker(fp_str: str, out_dir_str: str, opts: dict) -> dict:
         df = _add_delta_log2fc(df, cols["rna_t"], cols["rna_n"], "RNA", pseudocount)
         df = _add_delta_log2fc(df, cols["cn_t"], cols["cn_n"], "CNV", pseudocount)
         df = _add_delta_log2fc(df, cols["ch3_t"], cols["ch3_n"], "CH3", pseudocount)
-        df = _add_log2fc_protein_from_ion(df, pseudocount)
+        df = _add_log2fc_protein_from_ion(df, pseudocount, case_id=case_id)
 
 
         # Per-case summary row
