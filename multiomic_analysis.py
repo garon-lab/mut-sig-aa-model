@@ -6,7 +6,7 @@ This script provides downstream analysis for integrated multi-omic data generate
 It processes per-case inputs, generates substitution-level outputs, aggregates cohort-wide summaries, and creates diagnostic plots.
 
 Features:
-1. Parallelized per-case analyis using ProcessPoolExecutor.
+1. Parallelized per-case analysis using ProcessPoolExecutor.
 2. Statistical summaries of each omic layer across samples.
 3. Substitution extraction for comparison with dna-analysis.
 4. Gene annotation based on presence in healthy lung tissue using the Human Protein Atlas.
@@ -17,19 +17,18 @@ Dependencies: pandas, numpy, matplotlib, scipy (optional: statistics, clustering
 
 Usage:
     python multiomic_analysis.py \
-        --in_dir <directory of integrated CSVs> \
-        --manifest <manifest file> \
+        --integrated_dir <directory of integrated CSVs> \
+        --manifest <path to case-ids>
         --out_dir <output directory> \
         --ref_zip <path to reference files>
 
 Arguments:
-    --in_dir                 Directory containing per-sample integrated CSV files
+    --integrated_dir         Directory containing per-sample integrated CSV files
     --manifest               Tab-delimited manifest file listing sample IDs in the first column
     --out_dir                Directory to write analysis outputs
     --jobs                   Number of parallel workers
-    --emit_substitutions     Generates per-case substitutional tables and a combined substitution summary
+    --emit_substitutions     Generates per-case substitution tables and a combined substitution summary
     --make_plots             Generates QC histograms, scatter plots, boxplots, and volcano plots
-    --log_level              Sets logging level (DEBUG, INFO, WARNING, ERROR - default: INFO
 
 Output:
 <out_dir>/                           # user-specified output directory
@@ -77,33 +76,6 @@ Output:
 └── multiomic_run.log                # log file
 
 """
-
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Multiomic Analysis (extended)
-
-Parallelized per-case processing with --jobs (uses ProcessPoolExecutor)
-
-New in this version:
-  1) Reference ZIP discovery: looks for hard-coded files inside --ref_zip
-       - lung-only.tsv (or lung_only.tsv)
-       - gene-reads.gct (preferred; any *.gct considered)
-     The needed files are extracted to: <out_dir>/metadata/ref_cache/
-  2) Substitution summary (similar to dna_analysis):
-       Parses the 16th VEP pipe-field from INFO (info.split('|')[15]) per row,
-       derives amino-acid start/end (first/last char), and produces one line of
-       multi-omic information per unique substitution across the cohort.
-
-Outputs:
-  out_dir/per_case/{case}_analysis.csv
-  out_dir/analysis_summary.csv
-  out_dir/rna_vs_gene_reads/{case}_rna_merge.csv   (if gene_reads provided)
-  out_dir/substitutions/{case}_substitutions.tsv   (if --emit_substitutions)
-  out_dir/substitutions_summary.tsv                (if --emit_substitutions)
-  out_dir/plots/...                                (if --make_plots)
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -135,6 +107,51 @@ def _load_refs_from_json(p: Path) -> dict:
     import json
     with p.open("r", encoding="utf-8") as fh:
         return json.load(fh)
+
+# ---------- Logging helpers ----------
+
+def _setup_logging(out_dir: Path, level_name: str = "INFO") -> None:
+    """Set up console + file logging to <out_dir>/multiomic_run.log."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = out_dir / "multiomic_run.log"
+
+    level = getattr(logging, str(level_name).upper(), logging.INFO)
+
+    # Clear existing handlers to avoid duplicate logs on re-run
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+    fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    fh.setLevel(level)
+    fh.setFormatter(fmt)
+
+    ch = logging.StreamHandler()
+    ch.setLevel(level)
+    ch.setFormatter(fmt)
+
+    root.setLevel(level)
+    root.addHandler(fh)
+    root.addHandler(ch)
+
+def _read_manifest_cases(path: Path) -> list[str]:
+    """Read a manifest of case IDs (first column). Supports TSV/CSV/TXT with or without header."""
+    if not path.exists():
+        raise FileNotFoundError(f"Manifest not found: {path}")
+    sep = _sniff_sep_from_path(path, fallback="\t")
+    try:
+        df = pd.read_csv(path, sep=sep, dtype=str)
+        # If single column with header or no header, take the first col
+        first_col = df.columns[0]
+        ids = df[first_col].astype(str).str.strip()
+    except Exception:
+        # Fallback: simple line-by-line
+        ids = pd.Series([line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()])
+    # Normalize case IDs (keep original form, just strip)
+    ids = ids[ids != ""].dropna().unique().tolist()
+    return ids
 
 # ---------- Reference discovery helpers ----------
 
@@ -976,6 +993,9 @@ def parse_args():
     p.add_argument("--plot_ext", default="png", choices=["png","pdf","svg"], help="Plot file format (default: png)")
     p.add_argument("--integrated_dir", required=True, help="Directory containing *_integrated.csv files")
     p.add_argument("--out_dir", required=True, help="Directory for analysis outputs")
+    p.add_argument("--manifest", default=None, help="TSV/CSV/TXT file listing expected case IDs in the first column")
+    p.add_argument("--log_level", default="INFO", choices=["DEBUG","INFO","WARNING","ERROR","CRITICAL"],
+                   help="Logging level for console and multiomic_run.log (default: INFO)")
 
     # Reference discovery
     p.add_argument("--ref_zip", default=None, help="Path to reference.zip containing lung-only.tsv and gene-reads.gct")
@@ -1002,6 +1022,7 @@ def parse_args():
     p.add_argument("--jobs", type=int, default=None, help="Max parallel workers (default: CPU cores; 0/None = auto)")
 
     return p.parse_args()
+
 
 def _validate_refs(refs: dict, strict: bool = False) -> None:
     missing = []
@@ -1080,9 +1101,13 @@ def _resolve_refs(args) -> dict:
     return refs
 
 def main():
-    logging.basicConfig(level=logging.INFO, format='[analysis] %(message)s')
     args = parse_args()
     out_dir = Path(args.out_dir); _ensure_dir(out_dir)
+
+    # Set up dual logging (console + file)
+    _setup_logging(out_dir, args.log_level)
+
+    # Ensure common subdirs exist
     per_case_dir = out_dir / "per_case"; _ensure_dir(per_case_dir)
     rna_cmp_dir = out_dir / "rna_vs_gene_reads"; _ensure_dir(rna_cmp_dir)
     subs_dir = out_dir / "substitutions"
@@ -1091,20 +1116,55 @@ def main():
 
     # Resolve references (includes ref_zip)
     refs = _resolve_refs(args)
-    _validate_refs(refs, strict=args.strict_refs)
-    if args.verbose:
-        print(f"[analysis] refs: {refs}")
-
-    summaries = []
-    subs_rows = []
-    legacy_data = {}
-
-    # ---- Parallel per-case processing ----
-    files = sorted(Path(args.integrated_dir).glob("*_integrated.csv"))
-    if not files:
-        print(f"[analysis] No *_integrated.csv files in: {args.integrated_dir}")
+    try:
+        _validate_refs(refs, strict=args.strict_refs)
+    except Exception as e:
+        logging.error(f"Reference validation failed: {e}")
         return 1
 
+    if args.verbose:
+        logging.info(f"Resolved references: {refs}")
+
+    # ---- Build file list (respect manifest if provided) ----
+    integrated_dir = Path(args.integrated_dir)
+    globbed = sorted(integrated_dir.glob("*_integrated.csv"))
+    files: list[Path] = []
+
+    if args.manifest:
+        manifest_path = Path(args.manifest)
+        try:
+            case_ids = _read_manifest_cases(manifest_path)
+        except Exception as e:
+            logging.error(f"Failed to read manifest: {e}")
+            return 1
+
+        expected = {cid: integrated_dir / f"{cid}_integrated.csv" for cid in case_ids}
+        missing = [cid for cid, p in expected.items() if not p.exists()]
+        files = [p for p in expected.values() if p.exists()]
+
+        # Extra files present in directory but not in manifest
+        manifest_set = set(case_ids)
+        extra = [p for p in globbed if _case_id_from_path(p) not in manifest_set]
+
+        if missing:
+            logging.warning(f"{len(missing)} case(s) listed in manifest but missing *_integrated.csv: {', '.join(sorted(missing)[:25])}" +
+                            (" ..." if len(missing) > 25 else ""))
+        if extra:
+            logging.info(f"{len(extra)} extra *_integrated.csv file(s) not in manifest (will be ignored): " +
+                         ", ".join(sorted(p.name for p in extra)[:25]) + (" ..." if len(extra) > 25 else ""))
+    else:
+        files = globbed
+        if not files:
+            logging.error(f"No *_integrated.csv files found in: {integrated_dir}")
+            return 1
+
+    if not files:
+        logging.error("No files to process after applying manifest filtering.")
+        return 1
+
+    logging.info(f"Processing {len(files)} file(s). Output -> {out_dir}")
+
+    # ---- Options bag for worker processes ----
     desired_key = (refs.get('match_key') or args.match_key) if (refs.get('match_key') or args.match_key) != 'auto' else 'symbol'
     opts = {
         "lung_tsv": refs.get('lung_tsv'),
@@ -1122,13 +1182,15 @@ def main():
 
     from concurrent.futures import ProcessPoolExecutor, as_completed
     summaries = []
+
     # Treat jobs <= 0 or None as "auto"
-    with ProcessPoolExecutor(max_workers=(args.jobs if args.jobs and args.jobs > 0 else None)) as ex:
+    max_workers = args.jobs if (args.jobs and args.jobs > 0) else None
+    with ProcessPoolExecutor(max_workers=max_workers) as ex:
         futs = {ex.submit(_process_case_worker, str(fp), str(out_dir), opts): fp for fp in files}
         for fut in as_completed(futs):
             res = fut.result()
             if 'error' in res:
-                logging.warning(f"[analysis] {res.get('case_id')}: worker error: {res['error']}")
+                logging.warning(f"{res.get('case_id')}: worker error: {res['error']}")
             else:
                 summaries.append(res)
 
@@ -1136,22 +1198,22 @@ def main():
     if summaries:
         summary_df = pd.DataFrame(summaries).sort_values("case_id")
         summary_df.to_csv(out_dir / "analysis_summary.csv", index=False)
+        logging.info(f"Wrote cohort summary -> {out_dir/'analysis_summary.csv'}")
+    else:
+        logging.warning("No per-case summaries produced.")
 
     # Cohort substitutions summary
     if args.emit_substitutions:
-        subs_dir = out_dir / "substitutions"
-        sub_files = sorted(subs_dir.glob("*_substitutions.tsv"))
+        sub_files = sorted((out_dir / "substitutions").glob("*_substitutions.tsv"))
         subs_rows = []
         for sf in sub_files:
             try:
                 subs_rows.append(pd.read_csv(sf, sep='\t', dtype=str))
             except Exception as e:
-                logging.warning(f"[analysis] read substitutions failed for {sf}: {e}")
+                logging.warning(f"Read substitutions failed for {sf.name}: {e}")
         if subs_rows:
             all_subs = pd.concat(subs_rows, ignore_index=True)
-            # Aggregate: per (Gene, Substitution)
             agg = all_subs.copy()
-            # Numeric conversions
             for c in ["Log2FC_RNA","Log2FC_CNV","Log2FC_CH3"]:
                 if c in agg.columns:
                     agg[c] = pd.to_numeric(agg[c], errors="coerce")
@@ -1164,38 +1226,27 @@ def main():
                 protein_hit_cases=("Protein_Present", lambda s: int(pd.Series(s).fillna(False).astype(bool).sum())),
             ).reset_index()
             grouped.to_csv(out_dir / "substitutions_summary.tsv", sep="\t", index=False)
-
-    # ---- Legacy analysis steps (run after plus step) ----
-    try:
-        if legacy_data:
-            compute_statistics(legacy_data, out_dir)
-            generate_plots(legacy_data, out_dir)
-            if linkage is not None and dendrogram is not None:
-                clustering_analysis(legacy_data, out_dir)
-            else:
-                logging.warning("SciPy not available; skipping clustering_analysis")
-            protein_only(legacy_data, out_dir)
-            no_protein(legacy_data, out_dir)
+            logging.info(f"Wrote substitutions summary -> {out_dir/'substitutions_summary.tsv'}")
         else:
-            logging.warning("No legacy data collected; skipping legacy analyses")
-    except Exception as e:
-        logging.warning(f"Legacy analyses encountered an error: {e}")
+            logging.info("No per-case substitution files found; skipped substitutions_summary.tsv")
 
     # Cohort plots
     if args.cohort_plots:
         try:
             _make_cohort_boxplots_and_volcano(out_dir / "per_case", Path(args.integrated_dir), out_dir, verbose=args.verbose)
         except Exception as e:
-            logging.warning(f"[analysis] cohort plots failed: {e}")
+            logging.warning(f"Cohort plots failed: {e}")
 
     if args.cohort_plots_by_protein:
         try:
             _make_cohort_boxplots_and_volcano_by_protein(out_dir / "per_case", Path(args.integrated_dir), out_dir, verbose=args.verbose)
         except Exception as e:
-            logging.warning(f"[analysis] cohort-by-protein plots failed: {e}")
+            logging.warning(f"Cohort-by-protein plots failed: {e}")
 
+    logging.info("Done.")
     print(f"[analysis] Done. Outputs under: {out_dir}")
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
