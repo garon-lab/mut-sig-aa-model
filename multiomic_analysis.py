@@ -543,6 +543,124 @@ def _save_scatter(x: pd.Series, y: pd.Series, title: str, xlabel: str, ylabel: s
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
+def _make_volcano_protein_yes_vs_no(per_case_dir: Path, integrated_dir: Path, out_dir: Path, verbose: bool = False):
+    """
+    Build volcano plots comparing Protein-Yes vs Protein-No strata for each layer (RNA, CNV, CH3).
+    x-axis: mean(Protein-Yes) - mean(Protein-No) of log2FC    (i.e., effect size)
+    y-axis: -log10(p-value) from two-sample test (Welch's t-test if SciPy present)
+    Uses SNV-harboring genes to match other cohort plots.
+    """
+    root = out_dir / "plots" / "cohort_by_protein"
+    root.mkdir(parents=True, exist_ok=True)
+
+    # Gather per-case files (prefer per_case, fall back to integrated)
+    per_case_files = sorted(per_case_dir.glob("*_analysis.csv"))
+    if not per_case_files:
+        per_case_files = sorted(integrated_dir.glob("*_integrated.csv"))
+    if not per_case_files:
+        logging.warning("[analysis] No per-case files for protein yes/no volcano.")
+        return
+
+    # 1) Identify union of SNV-harboring genes in the cohort
+    snv_genes = set()
+    for f in per_case_files:
+        try:
+            df = pd.read_csv(f, dtype=str, low_memory=False)
+            cols = _detect_cols_expanded(df)
+            sym_col = cols.get("symbol")
+            if sym_col:
+                snv_genes.update(_collect_snv_genes_from_case(df, sym_col))
+        except Exception as e:
+            if verbose:
+                print(f"[analysis] SNV scan failed for {f}: {e}")
+    if not snv_genes:
+        logging.warning("[analysis] No SNV genes detected; skipping protein yes/no volcano.")
+        return
+
+    # 2) For each layer, collect per-gene values in Protein-Yes and Protein-No strata
+    layers = {
+        "RNA": "Log2FC_RNA",
+        "CNV": "Log2FC_CNV",
+        "CH3": "Log2FC_CH3",
+    }
+
+    for L, col in layers.items():
+        # per gene -> list of values by stratum
+        yes_vals = {}
+        no_vals = {}
+
+        for f in per_case_files:
+            try:
+                df = pd.read_csv(f, dtype=str, low_memory=False)
+                cols = _detect_cols_expanded(df)
+                sym_col = cols.get("symbol")
+                if not sym_col or col not in df.columns:
+                    continue
+
+                # Protein presence (tumor) mask
+                present_t, _ = _protein_presence_masks(df, cols)
+
+                # Filter rows to SNV genes and numeric values
+                sdf = df[[sym_col, col]].copy()
+                sdf[sym_col] = sdf[sym_col].astype(str).str.strip().str.upper()
+                sdf = sdf[sdf[sym_col].isin(snv_genes)]
+                sdf[col] = pd.to_numeric(sdf[col], errors="coerce")
+                sdf_yes = sdf.loc[present_t, :].dropna(subset=[col])
+                sdf_no  = sdf.loc[~present_t, :].dropna(subset=[col])
+
+                # Append into maps
+                for _, r in sdf_yes.iterrows():
+                    g = r[sym_col]; v = r[col]
+                    yes_vals.setdefault(g, []).append(float(v))
+                for _, r in sdf_no.iterrows():
+                    g = r[sym_col]; v = r[col]
+                    no_vals.setdefault(g, []).append(float(v))
+            except Exception as e:
+                if verbose:
+                    print(f"[analysis] protein yes/no collect failed for {f}: {e}")
+
+        # 3) Compute effect size and p-values per gene
+        xs, ys = [], []
+        for g in sorted(snv_genes):
+            a = yes_vals.get(g, [])
+            b = no_vals.get(g, [])
+            if len(a) < 1 or len(b) < 1:
+                continue
+            m_a = float(np.mean(a))
+            m_b = float(np.mean(b))
+            diff = m_a - m_b
+
+            if _scistats is not None and len(a) > 1 and len(b) > 1:
+                try:
+                    ttest = _scistats.ttest_ind(a, b, equal_var=False, nan_policy="omit")
+                    p = float(ttest.pvalue) if hasattr(ttest, "pvalue") else float(ttest[1])
+                except Exception:
+                    # Fallback: conservative p if scipy fails
+                    p = 1.0
+            else:
+                # Fallback: conservative p
+                p = 1.0
+
+            xs.append(diff)
+            ys.append(-np.log10(max(p, 1e-300)))
+
+        if not xs:
+            if verbose:
+                print(f"[analysis] protein yes/no volcano empty for {L}")
+            continue
+
+        # 4) Plot
+        fig = plt.figure()
+        plt.scatter(xs, ys, s=8)
+        plt.axvline(0.0, linestyle="--", linewidth=0.8)
+        plt.title(f"Protein Yes vs No — {L}")
+        plt.xlabel("Mean difference (Yes − No)")
+        plt.ylabel("-log10 p")
+        outp = root / f"volcano_yes_vs_no_{L}.png"
+        fig.savefig(outp, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+
 # ---------- CLI & main ----------
 
 def compute_statistics(data, out_dir):
@@ -1398,7 +1516,12 @@ def main():
         try:
             _make_cohort_boxplots_and_volcano_by_protein(out_dir / "per_case", Path(args.integrated_dir), out_dir, verbose=args.verbose)
         except Exception as e:
-            logging.warning(f"Cohort-by-protein plots failed: {e}")
+            logging.warning(f"[analysis] cohort-by-protein boxplots/volcano failed: {e}")
+        try:
+            _make_volcano_protein_yes_vs_no(out_dir / "per_case", Path(args.integrated_dir), out_dir, verbose=args.verbose)
+        except Exception as e:
+            logging.warning(f"[analysis] protein yes/no volcano failed: {e}")
+
 
     logging.info("Done.")
     print(f"[analysis] Done. Outputs under: {out_dir}")
