@@ -275,8 +275,57 @@ def _read_gene_reads_table(path: Path) -> pd.DataFrame:
     else:
         sep = _sniff_sep_from_path(path)
         return pd.read_csv(path, sep=sep, dtype=str)
+        
+def _load_lung_table_robust(lung_tsv: Path, gene_col_hint: Optional[str] = None) -> Optional[pd.DataFrame]:
+    """
+    Load lung_only.tsv (or equivalent) and standardize:
+      - gene symbol column -> 'Gene' (uppercased for matching)
+      - keep annotation columns if present: cell type/Cell type, level/Level, reliability/Reliability
+      - return columns: ['Gene','cell_type','level','reliability'] (missing filled with NaN)
+    """
+    if not lung_tsv or not Path(lung_tsv).exists():
+        return None
+    sep = _sniff_sep_from_path(lung_tsv)
+    df = pd.read_csv(lung_tsv, sep=sep, dtype=str)
+
+    # Candidate symbol columns (prefer "Gene name" if present)
+    candidates = []
+    if gene_col_hint: candidates.append(gene_col_hint)
+    candidates += ["Gene name","Gene Name","Gene_name","Gene","symbol","Symbol","Gene_Symbol","HGNC symbol"]
+    sym_col = next((c for c in candidates if c in df.columns), None)
+    if sym_col is None:
+        # Fallback to first column
+        sym_col = df.columns[0]
+
+    # Normalize symbol column and pick annotation columns if they exist
+    df_sym = df.copy()
+    df_sym["Gene"] = df_sym[sym_col].astype(str).str.strip().str.upper()
+
+    # Map a few possible header variants
+    ct_col = next((c for c in ["cell type","Cell type","cell_type","Cell_type"] if c in df.columns), None)
+    lv_col = next((c for c in ["level","Level"] if c in df.columns), None)
+    rel_col = next((c for c in ["reliability","Reliability"] if c in df.columns), None)
+
+    out = pd.DataFrame({"Gene": df_sym["Gene"]})
+    out["cell_type"] = df_sym[ct_col] if ct_col else np.nan
+    out["level"] = df_sym[lv_col] if lv_col else np.nan
+    out["reliability"] = df_sym[rel_col] if rel_col else np.nan
+
+    # De-duplicate by Gene (keep the first)
+    out = out.drop_duplicates(subset=["Gene"])
+    return out
+
 
 # ---------- Analysis helpers ----------
+def _extract_ion_firstnum(val: pd.Series, min_first: float = 10.0) -> pd.Series:
+    """
+    For values like '12/34', return the first numeric part iff first >= min_first, else NaN.
+    Non-string or malformed values -> NaN.
+    """
+    s = val.astype(str)
+    first = s.str.split("/", n=1, expand=True).iloc[:, 0]
+    x = pd.to_numeric(first, errors="coerce")
+    return x.where(x >= min_first, np.nan)
 
 def _case_id_from_path(p: Path) -> str:
     name = p.name
@@ -299,8 +348,10 @@ def _detect_cols_expanded(df: pd.DataFrame) -> Dict[str, Optional[str]]:
         cn_n   = has_any(["Normal_copy_number","Normal_CNV_Count"]),
         ch3_t  = has_any(["CH3_Beta"]),
         ch3_n  = has_any(["Normal_CH3_Beta"]),
-        pro_t  = has_any(["SEQ","Protein_SEQ"]),
-        pro_n  = has_any(["Normal_SEQ","Normal_Protein_SEQ"]),
+        pro_t  = has_any(["SEQ","Protein_SEQ"]),                    # tumor protein “present” column
+        pro_n  = has_any(["Normal_SEQ","Normal_Protein_SEQ"]),      # normal protein “present” column
+        pro_int_t = has_any(["INT","Protein_INT","Ion_T","Ion"]),   # tumor intensity like "12/34"
+        pro_int_n = has_any(["Normal-INT","Normal_INT","Ion-Normal","Ion_Normal","Normal_Protein_INT"]),  # normal intensity "12/34"
         info   = has_any(["INFO","Info","info"]),
     )
 
@@ -581,6 +632,8 @@ _worker_cache = {
     "lung_path": None,
     "lung_col": None,
     "lung_syms": None,
+    "lung_df_path": None,
+    "lung_df": None,
     "gene_reads_key": None,   # (path, sep) tuple
     "gene_reads_df": None,
 }
@@ -594,6 +647,17 @@ def _get_lung_syms_cached(lung_path: Optional[str], lung_col: Optional[str]) -> 
         _worker_cache["lung_path"] = lp
         _worker_cache["lung_col"] = lung_col or ""
     return _worker_cache["lung_syms"] or set()
+
+def _get_lung_df_cached(lung_path: Optional[str], lung_col: Optional[str]) -> Optional[pd.DataFrame]:
+    if not lung_path:
+        return None
+    lp = str(lung_path)
+    key = (lp, lung_col or "")
+    if _worker_cache.get("lung_df_path") != key:
+        df = _load_lung_table_robust(Path(lp), lung_col)
+        _worker_cache["lung_df"] = df
+        _worker_cache["lung_df_path"] = key
+    return _worker_cache["lung_df"]
 
 def _get_gene_reads_cached(gr_path: Optional[str], sep: Optional[str] = None) -> Optional[pd.DataFrame]:
     if not gr_path:
@@ -629,9 +693,43 @@ def _process_case_worker(fp_str: str,
         df = pd.read_csv(fp, sep=",", dtype=str, low_memory=False)
         cols = _detect_cols_expanded(df)
 
-        # Lung flags
-        lung_syms = _get_lung_syms_cached(opts.get("lung_tsv"), opts.get("lung_gene_col"))
-        df = _add_lung_flag(df, cols["symbol"], lung_syms)
+                # --- LUNG ANNOTATION MERGE ---
+        # Prefer annotation merge over boolean set membership.
+        lung_df = _get_lung_df_cached(opts.get("lung_tsv"), opts.get("lung_gene_col"))
+        if cols["symbol"] and lung_df is not None and not lung_df.empty:
+            sym_norm = df[cols["symbol"]].astype(str).str.strip().str.upper()
+            merged = pd.DataFrame({"__sym__": sym_norm})
+            # Left join by Gene (uppercased)
+            lung_df2 = lung_df.copy()
+            lung_df2["Gene"] = lung_df2["Gene"].astype(str).str.strip().str.upper()
+            merged = merged.merge(lung_df2, left_on="__sym__", right_on="Gene", how="left")
+            df["Lung_Present"] = merged["Gene"].notna()
+            # Carry over annotations
+            if "cell_type" in merged.columns: df["Lung_cell_type"] = merged["cell_type"]
+            if "level" in merged.columns:     df["Lung_level"]      = merged["level"]
+            if "reliability" in merged.columns: df["Lung_reliability"] = merged["reliability"]
+        else:
+            # Fallback to legacy boolean if lung list not available
+            lung_syms = _get_lung_syms_cached(opts.get("lung_tsv"), opts.get("lung_gene_col"))
+            df = _add_lung_flag(df, cols["symbol"], lung_syms)
+
+        # --- PROTEIN PRESENCE + ION EXTRACTION ---
+        # Only apply to files that have at least one SEQ value (tumor)
+        has_any_seq = bool(cols["pro_t"]) and df[cols["pro_t"]].notna().any()
+        if has_any_seq:
+            # Per-row presence flags for tumor and normal
+            df["Protein_Present_Tumor"]  = df[cols["pro_t"]].notna() if cols["pro_t"] else False
+            df["Protein_Present_Normal"] = df[cols["pro_n"]].notna() if cols["pro_n"] else False
+
+            # Ion/Ion-Normal from INT/Normal-INT when present; keep first number iff >=10 else NaN
+            if cols.get("pro_int_t") and cols["pro_int_t"] in df.columns:
+                ion_t = _extract_ion_firstnum(df[cols["pro_int_t"]], min_first=10.0)
+                # Only retain when protein is present on that row
+                df["Ion"] = ion_t.where(df["Protein_Present_Tumor"], np.nan)
+            if cols.get("pro_int_n") and cols["pro_int_n"] in df.columns:
+                ion_n = _extract_ion_firstnum(df[cols["pro_int_n"]], min_first=10.0)
+                df["Ion-Normal"] = ion_n.where(df["Protein_Present_Normal"], np.nan)
+
 
         # Deltas & log2FCs
         pseudocount = float(opts.get("pseudocount", 1.0))
