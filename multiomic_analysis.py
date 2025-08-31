@@ -296,6 +296,33 @@ def _signature12_from_ref_alt(ref: pd.Series, alt: pd.Series) -> pd.Series:
         if k in sig.index:
             sig[k] = int(v)
     return sig
+    
+def _extract_ion_firstnum(val: pd.Series, min_first: float = 10.0) -> pd.Series:
+    """
+    For values like '12/34', return the first numeric part iff first >= min_first, else NaN.
+    Non-string or malformed values -> NaN.
+    """
+    s = val.astype(str)
+    first = s.str.split("/", n=1, expand=True).iloc[:, 0]
+    x = pd.to_numeric(first, errors="coerce")
+    return x.where(x >= min_first, np.nan)
+
+
+def _add_delta_log2fc(df: pd.DataFrame, t_col: Optional[str], n_col: Optional[str],
+                      base_name: str, pseudocount: float) -> pd.DataFrame:
+    """
+    Generic Δ and log2FC on two numeric columns. Creates
+    Delta_{base_name} and Log2FC_{base_name} (NaN if columns missing).
+    """
+    if not t_col or not n_col or t_col not in df.columns or n_col not in df.columns:
+        df[f"Delta_{base_name}"] = np.nan
+        df[f"Log2FC_{base_name}"] = np.nan
+        return df
+    t = pd.to_numeric(df[t_col], errors="coerce")
+    n = pd.to_numeric(df[n_col], errors="coerce")
+    df[f"Delta_{base_name}"] = t - n
+    df[f"Log2FC_{base_name}"] = np.log2((t + pseudocount) / (n + pseudocount))
+    return df
 
 # --- Protein LFC from Ion ---
 def _add_log2fc_protein_from_ion(df: pd.DataFrame, pseudocount: float, case_id: Optional[str] = None) -> pd.DataFrame:
