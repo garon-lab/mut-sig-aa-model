@@ -11,7 +11,7 @@ Features:
 3. Substitution extraction for comparison with dna-analysis.
 4. Gene annotation based on presence in healthy lung tissue using the Human Protein Atlas.
 5. Plot generation (e.g., boxplots, scatter plots, volcano plots) for visualization.
-6. Cohort-level statistics and protein-expression centered summarization.
+6. Cohort-level statistics and plots stratified by protein-expression.
 
 Dependencies: pandas, numpy, matplotlib, scipy (optional: statistics, clustering)
 
@@ -21,14 +21,44 @@ Usage:
         --manifest <path to case-ids>
         --out_dir <output directory> \
         --ref_zip <path to reference files>
+        --make_plots --emit_substitutions \
+        --cohort_plots --cohort_plots_by_protein \
+        --jobs 8 --log_level INFO
 
 Arguments:
+Required
     --integrated_dir         Directory containing per-sample integrated CSV files
-    --manifest               Tab-delimited manifest file listing sample IDs in the first column
     --out_dir                Directory to write analysis outputs
+
+Recommended
+    --manifest               Tab-delimited manifest file listing sample IDs in the first column
+    --log_level              Logging level for console and file (DEBUG|INFO|WARNING|ERROR|CRITICAL; default: INFO)
     --jobs                   Number of parallel workers
     --emit_substitutions     Generates per-case substitution tables and a combined substitution summary
     --make_plots             Generates QC histograms, scatter plots, boxplots, and volcano plots
+
+Optional
+Reference discovery (any combination)
+  --ref_zip                 reference.zip containing lung-only.tsv and/or gene-reads.gct
+  --refs_dir                Directory to search by name (e.g., lung-only.tsv, gene-reads.gct)
+  --lung_tsv                TSV/CSV list of lung-expressed genes (column auto-detected or --lung_gene_col)
+  --gene_reads              Gene-reads table (TSV/CSV or GCT; GCT totals auto-summed to __TOTAL__)
+  --lung_gene_col           Column name in lung TSV (default: auto)
+  --gene_reads_sep          Delimiter for --gene_reads (auto by extension if omitted)
+  --gene_reads_value_col    Numeric value column for --gene_reads (default: first numeric; GCT uses __TOTAL__)
+  --refs                    JSON pinned references (overrides CLI)
+  --no_json                 Disable JSON auto pick-up
+  --strict_refs             Error if any referenced files are missing
+
+Analysis/plots
+  --emit_substitutions      Emit per-case substitution TSVs and a cohort substitutions_summary.tsv
+  --make_plots              Generate per-case histograms/scatter and cohort plots
+  --cohort_plots            Make cohort boxplots/volcano for SNV-harboring genes
+  --cohort_plots_by_protein Also stratify cohort plots by protein presence vs absence
+  --log2fc_thr              Threshold for up/down calling on Log2FC (default: 1.0)
+  --pseudocount             Pseudocount for Log2FC computation (default: 1.0)
+  --plot_ext                Plot format: png|pdf|svg (default: png)
+
 
 Output:
 <out_dir>/                           # user-specified output directory
