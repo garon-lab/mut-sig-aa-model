@@ -482,6 +482,36 @@ def _build_cohort_substitution_packages(per_case_dir: Path, integrated_dir: Path
         (per_label_sig[lbl] if per_label_sig[lbl] is not None else pd.Series(0, index=_SUBS12, dtype=int)) \
             .to_csv(out_dir / f"signature12_{lbl}.csv", header=["count"])
 
+def _make_boxplots_protein_yes_vs_no(per_case_dir: Path, integrated_dir: Path, out_dir: Path, verbose: bool = False):
+    root = out_dir / "cohort_by_protein"
+    root.mkdir(parents=True, exist_ok=True)
+    per_case_files = sorted(per_case_dir.glob("*_analysis.csv")) or sorted(integrated_dir.glob("*_integrated.csv"))
+    if not per_case_files:
+        logging.warning("[analysis] No per-case files for protein yes/no boxplots.")
+        return
+
+    layers = {"RNA":"Log2FC_RNA","CNV":"Log2FC_CNV","CH3":"Log2FC_CH3"}
+    for L, col in layers.items():
+        yes_vals, no_vals = [], []
+        for f in per_case_files:
+            try:
+                df = pd.read_csv(f, dtype=str, low_memory=False)
+                cols = _detect_cols_expanded(df)
+                if col not in df.columns: continue
+                present_t, _ = _protein_presence_masks(df, cols)
+                vals = pd.to_numeric(df[col], errors="coerce")
+                yes_vals.extend(vals[present_t].dropna().tolist())
+                no_vals.extend(vals[~present_t].dropna().tolist())
+            except Exception as e:
+                if verbose: print(f"[analysis] protein yes/no collect failed for {f}: {e}")
+
+        if yes_vals and no_vals:
+            fig = plt.figure()
+            plt.boxplot([no_vals, yes_vals], labels=["Protein No","Protein Yes"], showfliers=False)
+            plt.title(f"Protein Yes vs No — {L}")
+            plt.ylabel(f"{L} log2FC")
+            fig.savefig(root / f"boxplot_yes_vs_no_{L}.png", dpi=150, bbox_inches="tight")
+            plt.close(fig)
 
 # ---------------- Per-case worker ----------------
 
