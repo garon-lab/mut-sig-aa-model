@@ -76,7 +76,7 @@ Output:
 │   ├── C3L-00001_rna_merge.csv
 │   └── ...
 │
-├── cohorts/                           # visualization outputs (if --make_plots)
+├── cohort/                           # visualization outputs (if --make_plots)
 │   ├── analysis_summary.csv
 │   ├── substitutions_summary.tsv
 │   └── plots/
@@ -547,7 +547,7 @@ def _make_volcano_protein_yes_vs_no(per_case_dir: Path, integrated_dir: Path, ou
     y-axis: -log10(p-value) from two-sample test (Welch's t-test if SciPy present)
     Uses SNV-harboring genes to match other cohort plots.
     """
-    root = cohort_dir / "plots" / "cohort_by_protein"
+    root = out_dir / "plots" / "cohort_by_protein"
     root.mkdir(parents=True, exist_ok=True)
 
     # Gather per-case files (prefer per_case, fall back to integrated)
@@ -967,7 +967,7 @@ def _layer_cols_from_detect(cols: dict, base: str) -> tuple[str, str]:
     return None, None
 
 def _make_cohort_boxplots_and_volcano(per_case_dir: Path, integrated_dir: Path, out_dir: Path, verbose: bool = False):
-    plots_dir = cohort_dir / "plots"
+    plots_dir = out_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     snv_genes = set()
@@ -1097,7 +1097,7 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
         - prot_yes: rows where the tumor protein column (SEQ/Protein_SEQ) is not NA
         - prot_no:  rows where it is NA
     """
-    root_dir = cohorts_dir / "plots" / "cohort_by_protein"
+    root_dir = out_dir / "plots" / "cohort_by_protein"
     (root_dir / "prot_yes").mkdir(parents=True, exist_ok=True)
     (root_dir / "prot_no").mkdir(parents=True, exist_ok=True)
 
@@ -1375,7 +1375,7 @@ def _resolve_refs(args) -> dict:
 def main():
     args = parse_args()
     out_dir = Path(args.out_dir); _ensure_dir(out_dir)
-    cohort_dir = out_dir / "cohorts"
+    cohort_dir = out_dir / "cohort"
     _ensure_dir(cohort_dir)
 
     # Set up dual logging (console + file)
