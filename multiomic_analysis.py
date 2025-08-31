@@ -109,9 +109,6 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import zipfile
-import math
-import shutil
-
 import numpy as np
 import pandas as pd
 
@@ -726,9 +723,10 @@ def _layer_cols_from_detect(cols: dict, base: str) -> tuple[str, str]:
     if base == "CH3":
         return cols.get("ch3_t"), cols.get("ch3_n")
     if base == "Protein":
-        # Prefer Ion / Ion-Normal for protein intensity boxplots
-        return ("Ion", "Ion-Normal") if "Ion" in cols or "Ion-Normal" in cols else (cols.get("pro_t"), cols.get("pro_n"))
+        # Prefer Ion intensity columns; downstream code will verify presence in df
+        return ("Ion", "Ion-Normal")
     return None, None
+
 
 def _make_cohort_boxplots_and_volcano(per_case_dir: Path, integrated_dir: Path, out_dir: Path, verbose: bool = False):
     plots_dir = out_dir  # <out_dir>=cohort_dir; write images directly into cohort/
@@ -1222,15 +1220,20 @@ def main():
         except Exception as e:
             logging.warning(f"Cohort plots failed: {e}")
 
-    if args.cohort_plots_by_protein:
-        try:
-            _make_cohort_boxplots_and_volcano_by_protein(out_dir / "per_case", Path(args.integrated_dir), cohort_dir, verbose=args.verbose)
-        except Exception as e:
-            logging.warning(f"Cohort-by-protein plots failed: {e}")
-        try:
-            _make_volcano_protein_yes_vs_no(out_dir / "per_case", Path(args.integrated_dir), cohort_dir, verbose=args.verbose)
-        except Exception as e:
-            logging.warning(f"Protein yes/no volcano failed: {e}")
+        if args.cohort_plots_by_protein:
+            try:
+                _make_cohort_boxplots_and_volcano_by_protein(out_dir / "per_case", Path(args.integrated_dir), cohort_dir, verbose=args.verbose)
+            except Exception as e:
+                logging.warning(f"Cohort-by-protein plots failed: {e}")
+            try:
+                _make_volcano_protein_yes_vs_no(out_dir / "per_case", Path(args.integrated_dir), cohort_dir, verbose=args.verbose)
+            except Exception as e:
+                logging.warning(f"Protein yes/no volcano failed: {e}")
+            try:
+                _make_boxplots_protein_yes_vs_no(out_dir / "per_case", Path(args.integrated_dir), cohort_dir, verbose=args.verbose)
+            except Exception as e:
+                logging.warning(f"Protein yes/no boxplots failed: {e}")
+
 
     logging.info("Done.")
     print(f"[analysis] Done. Outputs under: {out_dir}")
