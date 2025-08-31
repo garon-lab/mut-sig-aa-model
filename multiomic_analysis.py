@@ -967,7 +967,7 @@ def _layer_cols_from_detect(cols: dict, base: str) -> tuple[str, str]:
     return None, None
 
 def _make_cohort_boxplots_and_volcano(per_case_dir: Path, integrated_dir: Path, out_dir: Path, verbose: bool = False):
-    plots_dir = out_dir / "plots"
+    plots_dir = out_dir / "plots" / "cohort"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     snv_genes = set()
@@ -1149,7 +1149,7 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
             logging.warning(f"[analysis] No SNV genes for {name}; skipping")
             continue
 
-                # Aggregate tumor/normal values for boxplots within stratum
+        # Aggregate tumor/normal values for boxplots within stratum
         layer_data = {L: {"tumor": [], "normal": []} for L in layers}
         for f in per_case_files:
             try:
@@ -1198,7 +1198,7 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
             fig.savefig(plots_dir / f"cohort_boxplot_{L}_{name}.png", dpi=150, bbox_inches="tight")
             plt.close(fig)
 
-                # Volcano per stratum
+        # Volcano per stratum
         for L, col in layer_l2fc_cols.items():
             rows = []
             for f in per_case_files:
@@ -1507,20 +1507,19 @@ def main():
     # Cohort plots
     if args.cohort_plots:
         try:
-            _make_cohort_boxplots_and_volcano(cohort_dir / "per_case", Path(args.integrated_dir), out_dir, verbose=args.verbose)
+            _make_cohort_boxplots_and_volcano(out_dir / "per_case", Path(args.integrated_dir), cohort_dir, verbose=args.verbose)
         except Exception as e:
             logging.warning(f"Cohort plots failed: {e}")
-
+    
     if args.cohort_plots_by_protein:
         try:
-            _make_cohort_boxplots_and_volcano_by_protein(cohort_dir / "per_case", Path(args.integrated_dir), out_dir, verbose=args.verbose)
+            _make_cohort_boxplots_and_volcano_by_protein(out_dir / "per_case", Path(args.integrated_dir), cohort_dir, verbose=args.verbose)
         except Exception as e:
             logging.warning(f"[analysis] cohort-by-protein boxplots/volcano failed: {e}")
         try:
-            _make_volcano_protein_yes_vs_no(cohort_dir / "per_case", Path(args.integrated_dir), out_dir, verbose=args.verbose)
+            _make_volcano_protein_yes_vs_no(out_dir / "per_case", Path(args.integrated_dir), cohort_dir, verbose=args.verbose)
         except Exception as e:
             logging.warning(f"[analysis] protein yes/no volcano failed: {e}")
-
 
     logging.info("Done.")
     print(f"[analysis] Done. Outputs under: {out_dir}")
