@@ -662,10 +662,15 @@ def _collect_snv_genes_from_case(df: pd.DataFrame, sym_col: str) -> set:
     return set(df.loc[snv_mask, sym_col].astype(str).str.strip().str.upper().unique().tolist())
 
 def _layer_cols_from_detect(cols: dict, base: str) -> tuple[str, str]:
-    if base == "RNA": return cols.get("rna_t"), cols.get("rna_n")
-    if base == "CNV": return cols.get("cn_t"), cols.get("cn_n")
-    if base == "CH3": return cols.get("ch3_t"), cols.get("ch3_n")
-    if base == "Protein": return cols.get("pro_t"), cols.get("pro_n")
+    if base == "RNA":
+        return cols.get("rna_t"), cols.get("rna_n")
+    if base == "CNV":
+        return cols.get("cn_t"), cols.get("cn_n")
+    if base == "CH3":
+        return cols.get("ch3_t"), cols.get("ch3_n")
+    if base == "Protein":
+        # Prefer Ion / Ion-Normal for protein intensity boxplots
+        return ("Ion", "Ion-Normal") if "Ion" in cols or "Ion-Normal" in cols else (cols.get("pro_t"), cols.get("pro_n"))
     return None, None
 
 def _make_cohort_boxplots_and_volcano(per_case_dir: Path, integrated_dir: Path, out_dir: Path, verbose: bool = False):
