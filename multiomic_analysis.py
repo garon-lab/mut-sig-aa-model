@@ -1111,7 +1111,7 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
         "prot_no":  {"snv_genes": set(), "plots_dir": root_dir / "prot_no"},
     }
 
-        # 1) Identify SNV-harboring genes within each stratum
+    # 1) Identify SNV-harboring genes within each stratum
     for f in per_case_files:
         try:
             df = pd.read_csv(f, dtype=str, low_memory=False)
