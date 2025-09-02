@@ -663,7 +663,7 @@ def build_expected(df):
 
 
 def plot_heatmap(exp_df, out_dir, *, cmap, figsize, annot, linewidths, linecolor, vmin, vmax):
-    """Plot heatmap of expected substitution profiles using CLI-configurable options."""
+    """Plot heatmap of expected substitution profiles (no clustering)."""
     fig, ax = plt.subplots(figsize=figsize)
     sb.heatmap(
         exp_df.astype(float),
@@ -678,12 +678,61 @@ def plot_heatmap(exp_df, out_dir, *, cmap, figsize, annot, linewidths, linecolor
     plt.tight_layout()
     path = Path(out_dir) / 'expected_heatmap.png'
     try:
-        fig.savefig(path)
-    except PermissionError:
-        logging.error(f"Permission denied: cannot write heatmap to {path}")
-        return
-    plt.close(fig)
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+    finally:
+        plt.close(fig)
     logging.info(f"Saved heatmap to {path}")
+
+def plot_heatmap_clustered(
+    exp_df,
+    out_dir,
+    *,
+    cmap="viridis",
+    figsize=(12,8),
+    vmin=None,
+    vmax=None,
+    cluster="both",                 # 'none','rows','cols','both'
+    method="average",               # linkage
+    metric="euclidean",             # distance metric
+    standardize="none"              # 'none','row','col'
+):
+    """
+    Clustered heatmap using seaborn.clustermap with proper figure closing.
+    Writes 'expected_heatmap_clustered.png'.
+    """
+    # Map standardize -> seaborn params
+    cg_kwargs = {}
+    if standardize == "row":
+        cg_kwargs["standard_scale"] = 1
+    elif standardize == "col":
+        cg_kwargs["standard_scale"] = 0
+    # cluster None/rows/cols/both
+    row_cluster = cluster in ("rows","both")
+    col_cluster = cluster in ("cols","both")
+
+    # clustermap manages its own fig; ensure we close it
+    g = sb.clustermap(
+        exp_df.astype(float),
+        cmap=cmap,
+        vmin=vmin, vmax=vmax,
+        method=method,
+        metric=metric,
+        row_cluster=row_cluster,
+        col_cluster=col_cluster,
+        figsize=figsize,
+        **cg_kwargs
+    )
+    # Tidy labels
+    g.ax_heatmap.set_xlabel("Substitution (21×21 flattened)")
+    g.ax_heatmap.set_ylabel("Samples")
+    g.fig.tight_layout()
+    out_path = Path(out_dir) / "expected_heatmap_clustered.png"
+    try:
+        g.fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    finally:
+        plt.close(g.fig)
+    logging.info(f"Saved clustered heatmap to {out_path}")
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="Signature-Based AA Variant Modeling")
@@ -737,6 +786,20 @@ def parse_args():
     p.add_argument('--vmax', type=float, default=None,
                         help='Heatmap upper color bound')
 
+    # clustering controls
+    p.add_argument('--cluster', choices=['none','rows','cols','both'], default='both',
+                   help='Hierarchical clustering for expected heatmap (default: both).')
+    p.add_argument('--cluster_method', default='average',
+                   choices=['average','complete','single','ward','weighted','centroid','median'],
+                   help='Linkage method for clustering (default: average).')
+    p.add_argument('--cluster_metric', default='euclidean',
+                   choices=['euclidean','correlation','cosine','cityblock','chebyshev'],
+                   help='Distance metric for clustering (default: euclidean).')
+    p.add_argument('--cluster_standardize', default='none',
+                   choices=['none','row','col'],
+                   help='Standardize values across rows or cols before clustering (default: none).')
+
+
     # optional: change output CSV filename
     p.add_argument('--out_csv', default='expected_vectors.csv',
                         help='Filename for expected vectors CSV inside --out_dir')
@@ -752,8 +815,7 @@ def main():
     except PermissionError:
         logging.error(f"Permission denied: cannot create output directory {out}")
         return
-
-    # Read signature vector
+        
     # Read signature vector
     try:
         if args.cosmic:
@@ -781,7 +843,7 @@ def main():
     except ValueError as e:
         logging.error(e)
         return
-
+    
     # If we need to build the model, do it and write expected vectors
     if args.step in ['model', 'both']:
         exp_df = build_expected(df)
@@ -802,11 +864,12 @@ def main():
             logging.error(f"Permission denied: cannot write {csv_path}")
             return
 
-    # If we need the heatmap, load (or reuse) expected vectors and plot
+        # If we need the heatmap, load (or reuse) expected vectors and plot
     if args.step in ['heatmap', 'both'] and not args.no_plot:
         try:
             if 'exp_df' not in locals():
                 exp_df = pd.read_csv(out / args.out_csv)
+            # Non-clustered (kept for convenience)
             plot_heatmap(
                 exp_df.set_index('ID'), out,
                 cmap=args.cmap,
@@ -817,10 +880,23 @@ def main():
                 vmin=args.vmin,
                 vmax=args.vmax,
             )
+            # Clustered
+            plot_heatmap_clustered(
+                exp_df.set_index('ID'), out,
+                cmap=args.cmap,
+                figsize=_parse_figsize(args.figsize),
+                vmin=args.vmin,
+                vmax=args.vmax,
+                cluster=args.cluster,
+                method=args.cluster_method,
+                metric=args.cluster_metric,
+                standardize=args.cluster_standardize,
+            )
         except FileNotFoundError:
             logging.error(f"{args.out_csv} not found; run with --step model or --step both first.")
         except Exception as e:
             logging.error(f"Heatmap failed: {e}")
+
 
     # --- Optional: compare observed vectors to COSMIC signatures and make a heatmap ---
     if args.compare_to_cosmic and args.observed_csv:
