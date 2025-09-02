@@ -709,8 +709,7 @@ def plot_heatmap_clustered(
     - If both disabled, fall back to a plain heatmap.
     Writes 'expected_heatmap_clustered.png'.
     """
-    import seaborn as sns
-    import matplotlib.pyplot as plt
+    logging.info(f"[cluster] expected heatmap shape = {exp_df.shape}")
 
     # Determine requested clustering
     req_row = cluster in ("rows","both")
