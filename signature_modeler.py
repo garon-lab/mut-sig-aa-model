@@ -42,6 +42,12 @@ import matplotlib.pyplot as plt
 import re
 import seaborn as sb
 
+try:
+    import scipy
+except ImportError:
+    logging.error("SciPy is required for clustering; install with `pip install scipy`.")
+    return
+
 
 _SIX = ["C>A","C>G","C>T","T>A","T>C","T>G"]
 _TWELVE = ["AC","AG","AT","CA","CG","CT","GA","GC","GT","TA","TC","TG"]
