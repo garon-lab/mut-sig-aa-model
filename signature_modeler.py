@@ -751,7 +751,7 @@ def plot_heatmap_clustered(
         cg_kwargs["standard_scale"] = 0
 
     # clustermap (ensure we close the fig to avoid figure leaks)
-    g = sns.clustermap(
+    g = sb.clustermap(
         exp_df.astype(float),
         cmap=cmap,
         vmin=vmin, vmax=vmax,
