@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 Signature-Based AA Variant Modeling (Vectorized)
 
@@ -6,11 +7,11 @@ This script takes a 12-element vector of mutational signature (context) proporti
 expected amino acid substitution profiles based on embedded base matrices.
 
 Features:
-  * Input CSV: ID + 12 signature proportions (AC, AG, AT, CA, CG, CT, GA, GC, GT, TA, TC, TG).
-  * Base substitution matrices are embedded as NumPy arrays—no external files needed.
-  * Computes weighted sums, scaling, and row-wise normalization to amino-acid frequency targets using vectorized operations.
-  * Flattens 21×21 expected matrices into vectors for downstream analysis.
-  * Optionally plots the expected matrix as a heatmap with customizable appearance.
+1. Input CSV: ID + 12 signature proportions (AC, AG, AT, CA, CG, CT, GA, GC, GT, TA, TC, TG) OR COSMIC signature table with flag.
+2. Base substitution matrices are embedded as NumPy arrays—no external files needed.
+3. Computes weighted sums, scaling, and row-wise normalization to amino-acid frequency targets using vectorized operations.
+4. Flattens 21×21 expected matrices into vectors for downstream analysis.
+5. Optionally plots the expected matrix as a heatmap with customizable appearance.
 
 Usage:
     python signature_modeling.py \
@@ -20,24 +21,72 @@ Usage:
         [--log_level DEBUG|INFO|WARNING|ERROR]
 
 Arguments:
-    --signature_vector  CSV with columns: ID, AC, AG, AT, CA, CG, CT, GA, GC, GT, TA, TC, TG
-    --out_dir         Directory to write expected vectors and heatmap
-    --step            Step to run: model, heatmap, or both (default: both)
-    --log_level       Logging level (default: INFO)
+    --signature_vector   CSV with columns: ID, AC, AG, AT, CA, CG, CT, GA, GC, GT, TA, TC, TG or COSMIC signature table.
+    --out_dir            Directory to write expected vectors and heatmap
+    --step               Step to run: model, heatmap, or both (default: both)
+    --log_level          Logging level (default: INFO)
 
 Dependencies:
     pandas, numpy, matplotlib, seaborn
 """
+
 import argparse
 import logging
 from pathlib import Path
 
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import re
 import seaborn as sb
 
+
+_SIX = ["C>A","C>G","C>T","T>A","T>C","T>G"]
+_TWELVE = ["AC","AG","AT","CA","CG","CT","GA","GC","GT","TA","TC","TG"]
+# Map 6 to 12 by distributing the pyrimidine-centered classes:
+_SIX_TO_TWELVE = {
+    "C>A": ["CA","GT"],
+    "C>G": ["CG","GC"],
+    "C>T": ["CT","GA"],
+    "T>A": ["TA","AT"],
+    "T>C": ["TC","AG"],
+    "T>G": ["TG","AC"],
+}
+
+def cosmic96_to_12(s96: pd.Series) -> pd.Series:
+    """
+    s96: Series indexed by 96 'Type' contexts like A[C>A]A with values.
+    Returns a 12-channel Series (AC..TG) normalized to sum==1 if input sums to 1.
+    """
+    # collapse 96 -> 6 by extracting the middle base change inside [X>Y]
+    six = pd.Series(0.0, index=_SIX, dtype=float)
+    for ctx, v in s96.items():
+        m = re.search(r"\[([ACGT]>\w)\]", ctx)
+        if not m:
+            continue
+        mid = m.group(1).upper()        # e.g., C>A
+        if mid in six.index:
+            six[mid] += float(v) if pd.notna(v) else 0.0
+    # distribute 6 -> 12 by splitting evenly into the paired 12 slots
+    twelve = pd.Series(0.0, index=_TWELVE, dtype=float)
+    for k, dests in _SIX_TO_TWELVE.items():
+        portion = six[k] / len(dests) if len(dests) else 0.0
+        for d in dests:
+            twelve[d] += portion
+    return twelve
+ 
 # Plot customization constants
+def _parse_figsize(s: str):
+    s = (s or "12x8").lower().replace(" ", "").replace(",", "x")
+    try:
+        w, h = s.split("x")
+        return (float(w), float(h))
+    except Exception:
+        logging.warning(f"Bad --figsize '{s}', falling back to 12x8")
+        return (12.0, 8.0)
+
 FIGSIZE = (12, 8)
 COLORMAP = 'viridis'
 HEATMAP_KWARGS = {
@@ -55,14 +104,169 @@ def init_logging(level_str):
     logging.basicConfig(level=level, format='%(asctime)s %(levelname)s: %(message)s')
 
 # Helpers
+def validate_context_df(df):
+    cols = set(df.columns)
+    extras = [c for c in cols - set(CONTEXTS) if c.lower() not in {"id","sample","sample_id"}]
+    missing = [c for c in CONTEXTS if c not in cols]
+    if missing or extras:
+        msg = []
+        if missing: msg.append(f"Missing: {', '.join(missing)}")
+        if extras:  msg.append(f"Unexpected: {', '.join(extras)}")
+        raise ValueError("Signature validation error: " + "; ".join(msg))
+    logging.info("Signature vector validated.")
 
+def load_cosmic_signature_table(path: str | Path) -> tuple[str, pd.Series]:
+    """
+    Load a COSMIC-style signature .txt file where the first row has headers like:
+        Type <TAB> SBS4
+    and subsequent rows look like:
+        A[C>A]A <TAB> 0.042...
+    Returns (signature_name, Series(index=context, values=float)).
+    """
+    path = Path(path)
+    df = pd.read_csv(path, sep=r"\t", engine="python", dtype=str, comment="#").rename(
+        columns=lambda c: c.strip()
+    )
+    # Identify the single non-'Type' column
+    cols = [c for c in df.columns if c.lower() != "type"]
+    if len(cols) != 1:
+        # Fall back to filename stem if odd formatting
+        sig_name = path.stem
+        # If there are multiple non-Type columns, just pick the last one
+        sig_col = cols[-1] if cols else None
+    else:
+        sig_name = cols[0]
+        sig_col  = cols[0]
+    if sig_col is None or "Type" not in df.columns:
+        raise ValueError(f"Could not parse signature file: {path}")
+    df["Type"] = df["Type"].astype(str).str.strip()
+    s = pd.to_numeric(df[sig_col], errors="coerce")
+    sig = pd.Series(s.values, index=df["Type"].values, dtype=float).dropna()
+    return sig_name, sig
+
+def load_signatures_from_path(p: str | Path) -> dict[str, pd.Series]:
+    """
+    If 'p' is a file: load that one signature.
+    If 'p' is a directory: load all *.txt files inside.
+    Returns dict[name] -> Series(context->value).
+    """
+    p = Path(p)
+    sigs: dict[str, pd.Series] = {}
+    files = [p] if p.is_file() else sorted(p.glob("*.txt"))
+    if not files:
+        raise FileNotFoundError(f"No signature file(s) found at: {p}")
+    for f in files:
+        name, sig = load_cosmic_signature_table(f)
+        # If duplicate names, disambiguate with filename
+        if name in sigs:
+            name = f.stem
+        sigs[name] = sig
+    return sigs
+
+def _normalize_nonnegative(x: pd.Series | np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    arr = np.asarray(x, dtype=float)
+    arr[np.isnan(arr)] = 0.0
+    arr[arr < 0]      = 0.0
+    s = arr.sum()
+    return arr / (s + eps)
+
+def _cosine_sim(a: np.ndarray, b: np.ndarray, eps: float = 1e-12) -> float:
+    num = float(np.dot(a, b))
+    den = float(np.linalg.norm(a) * np.linalg.norm(b)) + eps
+    return num / den
+
+def _pearson(a: np.ndarray, b: np.ndarray, eps: float = 1e-12) -> float:
+    a = a - a.mean()
+    b = b - b.mean()
+    num = float(np.dot(a, b))
+    den = float(np.linalg.norm(a) * np.linalg.norm(b)) + eps
+    return num / den
+
+def _l1(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.sum(np.abs(a - b)))
+
+def _l2(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.linalg.norm(a - b))
+
+def compare_signatures_heatmap(
+    observed: pd.DataFrame,
+    signatures: dict[str, pd.Series],
+    out_png: str | Path,
+    out_csv: str | Path,
+    *,
+    metric: str = "cosine",
+    normalize_observed: bool = True,
+    normalize_signatures: bool = True,
+    title: str = "Observed vs Signatures"
+) -> pd.DataFrame:
+    """
+    Compare observed vectors (rows = samples, columns = contexts like A[C>A]A)
+    against signatures (Series, index=contexts). Saves heatmap PNG + CSV.
+    Returns the score matrix DataFrame (n_samples x n_signatures).
+    """
+    # Build full context set
+    all_contexts = set(observed.columns)
+    for sig in signatures.values():
+        all_contexts |= set(sig.index)
+    contexts = sorted(all_contexts)
+
+    obs = observed.copy().reindex(columns=contexts, fill_value=0.0)
+
+    sig_mat = {}
+    for name, sig in signatures.items():
+        s = sig.reindex(index=contexts, fill_value=0.0)
+        if normalize_signatures:
+            s = pd.Series(_normalize_nonnegative(s), index=s.index)
+        sig_mat[name] = s.values
+    sig_names = list(sig_mat.keys())
+    S = np.vstack([sig_mat[n] for n in sig_names])  # (k, d)
+
+    X = obs.values.astype(float)
+    if normalize_observed:
+        row_sums = X.sum(axis=1, keepdims=True) + 1e-12
+        X = np.clip(X, 0, None) / row_sums
+
+    m = metric.lower()
+    if m == "cosine":
+        scorer, is_similarity = _cosine_sim, True
+    elif m == "pearson":
+        scorer, is_similarity = _pearson, True
+    elif m == "l1":
+        scorer, is_similarity = _l1, False
+    elif m == "l2":
+        scorer, is_similarity = _l2, False
+    else:
+        raise ValueError("metric must be one of: cosine, pearson, l1, l2")
+
+    scores = np.zeros((X.shape[0], S.shape[0]), dtype=float)
+    for i in range(X.shape[0]):
+        xi = X[i]
+        for j in range(S.shape[0]):
+            sj = S[j]
+            scores[i, j] = scorer(xi, sj)
+
+    out_df = pd.DataFrame(scores, index=obs.index, columns=sig_names)
+    out_csv = Path(out_csv); out_df.to_csv(out_csv)
+
+    # Heatmap (closed properly to avoid >20 open figs)
+    fig, ax = plt.subplots(figsize=(max(6, 0.5*len(sig_names)+2), max(4, 0.4*len(obs.index)+2)))
+    try:
+        im = ax.imshow(out_df.values, aspect="auto", interpolation="nearest",
+                       cmap=("viridis" if is_similarity else "magma"))
+        ax.set_xticks(range(len(sig_names))); ax.set_xticklabels(sig_names, rotation=45, ha="right")
+        ax.set_yticks(range(len(out_df.index))); ax.set_yticklabels(out_df.index)
+        ax.set_xlabel("Signatures"); ax.set_ylabel("Observed (samples)")
+        ax.set_title(f"{title} — {metric}")
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label("similarity" if is_similarity else "distance")
+        fig.tight_layout()
+        out_png = Path(out_png); fig.savefig(out_png, dpi=150, bbox_inches="tight")
+    finally:
+        plt.close(fig)
+
+    return out_df
+ 
 # ---- helpers for plotting CLI ----
-def _parse_figsize(s: str):
-    # accepts "12x8" or "12,8"
-    s = s.lower().replace(" ", "").replace(",", "x")
-    w, h = s.split("x")
-    return (float(w), float(h))
-
 AA_ORDER = ["A","R","N","D","C","Q","E","G","H","I",
             "L","K","M","F","P","S","T","W","Y","V","*"]
 
@@ -443,18 +647,6 @@ BASE_STACK = np.stack([base_matrices[k] for k in CONTEXT_ORDER], axis=0)
 if BASE_STACK.shape != (12, 21, 21):
     raise ValueError(f"BASE_STACK shape is {BASE_STACK.shape}, expected (12, 21, 21)")
 
-def validate_context_df(df):
-    missing = [c for c in CONTEXTS if c not in df.columns]
-    extra = [c for c in df.columns if c not in CONTEXTS]
-    if missing or extra:
-        msg = []
-        if missing:
-            msg.append(f"Missing: {', '.join(missing)}")
-        if extra:
-            msg.append(f"Unexpected: {', '.join(extra)}")
-        raise ValueError("Signature validation error: " + "; ".join(msg))
-    logging.info("Signature vector validated.")
-
 def build_expected(df):
     """Vectorized expected matrix computation."""
     # weights shape: (N, 12) using the same CONTEXT_ORDER as BASE_STACK
@@ -494,38 +686,61 @@ def plot_heatmap(exp_df, out_dir, *, cmap, figsize, annot, linewidths, linecolor
     logging.info(f"Saved heatmap to {path}")
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Signature-Based AA Variant Modeling")
-    parser.add_argument('--signature_vector', required=True,
+    p = argparse.ArgumentParser(description="Signature-Based AA Variant Modeling")
+    p.add_argument('--signature_vector', required=True,
                         help='CSV: ID + 12 signature proportions')
-    parser.add_argument('--out_dir', required=True,
+    p.add_argument('--cosmic', action='store_true',
+               help='Treat --signature_vector as a COSMIC 96-context table (Type + one signature column).')
+    p.add_argument('--out_dir', required=True,
                         help='Directory for outputs')
-    parser.add_argument('--step', choices=['model','heatmap','both'], default='both',
+    p.add_argument('--step', choices=['model','heatmap','both'], default='both',
                         help='Step to run')
-    parser.add_argument('--log_level', choices=['DEBUG','INFO','WARNING','ERROR'], default='INFO',
+    p.add_argument('--log_level', choices=['DEBUG','INFO','WARNING','ERROR'], default='INFO',
                         help='Logging level')
-
+ 
+    # Signature comparison flags
+    p.add_argument(
+        "--compare_to_cosmic",
+        help="Path to a COSMIC signature .txt file OR a folder of such files (e.g., COSMIC_v3.4_*_GRCh38.txt)."
+    )
+    p.add_argument(
+        "--observed_csv",
+        help="CSV with rows = samples, columns = mutation contexts (e.g., 96 SBS contexts like A[C>A]A)."
+    )
+    p.add_argument(
+        "--heatmap_metric",
+        default="cosine",
+        choices=["cosine","pearson","l1","l2"],
+        help="Similarity/distance metric for the heatmap (default: cosine)."
+    )
+    p.add_argument(
+        "--heatmap_title",
+        default="Observed vs COSMIC",
+        help="Title for the heatmap."
+    )
+ 
     # ---- plotting controls ----
-    parser.add_argument('--no-plot', action='store_true',
+    p.add_argument('--no-plot', action='store_true',
                         help='Skip heatmap even if step includes heatmap')
-    parser.add_argument('--cmap', default='viridis',
+    p.add_argument('--cmap', default='viridis',
                         help='Matplotlib/Seaborn colormap name (e.g., viridis, magma, coolwarm)')
-    parser.add_argument('--figsize', default='12x8',
+    p.add_argument('--figsize', default='12x8',
                         help='Figure size WxH (e.g., "12x8" or "12,8")')
-    parser.add_argument('--annot', action='store_true',
+    p.add_argument('--annot', action='store_true',
                         help='Annotate heatmap cells with values')
-    parser.add_argument('--linewidths', type=float, default=0.5,
+    p.add_argument('--linewidths', type=float, default=0.5,
                         help='Heatmap grid line width')
-    parser.add_argument('--linecolor', default='gray',
+    p.add_argument('--linecolor', default='gray',
                         help='Heatmap grid line color')
-    parser.add_argument('--vmin', type=float, default=None,
+    p.add_argument('--vmin', type=float, default=None,
                         help='Heatmap lower color bound')
-    parser.add_argument('--vmax', type=float, default=None,
+    p.add_argument('--vmax', type=float, default=None,
                         help='Heatmap upper color bound')
 
     # optional: change output CSV filename
-    parser.add_argument('--out_csv', default='expected_vectors.csv',
+    p.add_argument('--out_csv', default='expected_vectors.csv',
                         help='Filename for expected vectors CSV inside --out_dir')
-    return parser.parse_args()
+    return p.parse_args()
 
 
 def main():
@@ -539,11 +754,26 @@ def main():
         return
 
     # Read signature vector
+    # Read signature vector
     try:
-        df = pd.read_csv(args.signature_vector, index_col=0)
+        if args.cosmic:
+            # COSMIC: read raw (no index_col), then convert to 12-channel
+            raw = pd.read_csv(args.signature_vector, sep=r"\t", engine="python", dtype=str)
+            if "Type" in raw.columns and raw.shape[1] == 2:
+                value_col = [c for c in raw.columns if c.lower() != "type"][0]
+                s96 = pd.Series(pd.to_numeric(raw[value_col], errors="coerce").values,
+                                index=raw["Type"].astype(str).str.strip(), dtype=float).dropna()
+                twelve = cosmic96_to_12(s96)
+                df = pd.DataFrame([twelve.values], index=["COSMIC"], columns=_TWELVE)
+            else:
+                raise ValueError("--signature_vector with --cosmic must be a two-column table (Type + one signature).")
+        else:
+            # 12-channel CSV: ID is the index
+            df = pd.read_csv(args.signature_vector, index_col=0)
     except Exception as e:
         logging.error(f"Failed to read signature vector: {e}")
         return
+
 
     # Validate columns (must be the 12 contexts)
     try:
@@ -592,6 +822,40 @@ def main():
         except Exception as e:
             logging.error(f"Heatmap failed: {e}")
 
+    # --- Optional: compare observed vectors to COSMIC signatures and make a heatmap ---
+    if args.compare_to_cosmic and args.observed_csv:
+        try:
+            # Load observed
+            obs_path = Path(args.observed_csv)
+            if not obs_path.exists():
+                logging.error(f"[cosmic] observed CSV not found: {obs_path}")
+            else:
+                obs = pd.read_csv(obs_path, dtype=float)
+                # If first column is IDs, use it as index
+                if obs.columns[0].lower() in {"id","sample","sample_id","case","case_id"}:
+                    obs.set_index(obs.columns[0], inplace=True)
+                # Load signatures
+                sigs = load_signatures_from_path(args.compare_to_cosmic)
+                logging.info(f"[cosmic] Loaded {len(sigs)} signature(s) from {args.compare_to_cosmic}")
+    
+                out_png = Path(args.out_dir) / f"obs_vs_cosmic_{args.heatmap_metric}.png"
+                out_csv = Path(args.out_dir) / f"obs_vs_cosmic_{args.heatmap_metric}.csv"
+                compare_signatures_heatmap(
+                    observed=obs,
+                    signatures=sigs,
+                    out_png=out_png,
+                    out_csv=out_csv,
+                    metric=args.heatmap_metric,
+                    normalize_observed=True,
+                    normalize_signatures=True,
+                    title=args.heatmap_title,
+                )
+                logging.info(f"[cosmic] Wrote heatmap -> {out_png}")
+                logging.info(f"[cosmic] Wrote matrix  -> {out_csv}")
+        except Exception as e:
+            logging.warning(f"[cosmic] comparison failed: {e}")
+    elif args.compare_to_cosmic and not args.observed_csv:
+        logging.warning("[cosmic] --compare_to_cosmic was provided but --observed_csv was not.")
          
 
 if __name__=='__main__':
