@@ -707,15 +707,15 @@ def plot_heatmap_clustered(
     - If rows<2, row clustering is disabled.
     - If cols<2, column clustering is disabled.
     - If both disabled, fall back to a plain heatmap.
-    Writes 'expected_heatmap_clustered.png'.
+    Always writes:
+      - expected_heatmap_clustered.png
+      - cluster_row_order.csv
+      - cluster_col_order.csv
     """
-    logging.info(f"[cluster] expected heatmap shape = {exp_df.shape}")
-
-    # Determine requested clustering
+    out_dir = Path(out_dir)
+    n_rows, n_cols = exp_df.shape
     req_row = cluster in ("rows","both")
     req_col = cluster in ("cols","both")
-
-    n_rows, n_cols = exp_df.shape
     row_cluster = req_row and (n_rows >= 2)
     col_cluster = req_col and (n_cols >= 2)
 
@@ -724,7 +724,7 @@ def plot_heatmap_clustered(
     if not col_cluster and req_col:
         logging.warning("[cluster] Not clustering cols (need >=2 cols).")
 
-    # If nothing can be clustered, write a simple heatmap instead
+    # If nothing can be clustered, write a simple heatmap + identity orders
     if not row_cluster and not col_cluster and cluster != "none":
         logging.warning("[cluster] Neither axis can be clustered; falling back to non-clustered heatmap.")
         fig, ax = plt.subplots(figsize=figsize)
@@ -733,19 +733,16 @@ def plot_heatmap_clustered(
             ax.set_xlabel("Substitution (21×21 flattened)")
             ax.set_ylabel("Samples")
             fig.tight_layout()
-            out_path = Path(out_dir) / "expected_heatmap_clustered.png"
-            # Save cluster order for reference
-            row_order = g.dendrogram_row.reordered_ind
-            col_order = g.dendrogram_col.reordered_ind
-            pd.DataFrame({"row_index": row_order,
-                          "row_label": exp_df.index.to_numpy()[row_order]}).to_csv(out_dir / "cluster_row_order.csv", index=False)
-            pd.DataFrame({"col_index": col_order,
-                          "col_label": exp_df.columns.to_numpy()[col_order]}).to_csv(out_dir / "cluster_col_order.csv", index=False)
-            logging.info(f"Saved cluster order to cluster_row_order.csv and cluster_col_order.csv")
-
-            fig.savefig(out_path, dpi=150, bbox_inches="tight")
+            (out_dir / "expected_heatmap_clustered.png").parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(out_dir / "expected_heatmap_clustered.png", dpi=150, bbox_inches="tight")
         finally:
             plt.close(fig)
+        # Identity orders
+        pd.DataFrame({"row_index": np.arange(n_rows), "row_label": exp_df.index.to_numpy()}) \
+          .to_csv(out_dir / "cluster_row_order.csv", index=False)
+        pd.DataFrame({"col_index": np.arange(n_cols), "col_label": exp_df.columns.to_numpy()}) \
+          .to_csv(out_dir / "cluster_col_order.csv", index=False)
+        logging.info("Saved cluster order to cluster_row_order.csv and cluster_col_order.csv")
         return
 
     # Map standardize -> seaborn params
@@ -767,16 +764,37 @@ def plot_heatmap_clustered(
         figsize=figsize,
         **cg_kwargs
     )
-    g.ax_heatmap.set_xlabel("Substitution (21×21 flattened)")
-    g.ax_heatmap.set_ylabel("Samples")
-    g.fig.tight_layout()
-    out_path = Path(out_dir) / "expected_heatmap_clustered.png"
     try:
-        g.fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        # Derive orders (fallback to identity if dendrogram missing)
+        if row_cluster and hasattr(g, "dendrogram_row") and getattr(g.dendrogram_row, "reordered_ind", None) is not None:
+            row_order = np.asarray(g.dendrogram_row.reordered_ind, dtype=int)
+        else:
+            row_order = np.arange(n_rows, dtype=int)
+
+        if col_cluster and hasattr(g, "dendrogram_col") and getattr(g.dendrogram_col, "reordered_ind", None) is not None:
+            col_order = np.asarray(g.dendrogram_col.reordered_ind, dtype=int)
+        else:
+            col_order = np.arange(n_cols, dtype=int)
+
+        # Save cluster orders (labels mirrored to current df)
+        pd.DataFrame({
+            "row_index": row_order,
+            "row_label": exp_df.index.to_numpy()[row_order]
+        }).to_csv(out_dir / "cluster_row_order.csv", index=False)
+
+        pd.DataFrame({
+            "col_index": col_order,
+            "col_label": exp_df.columns.to_numpy()[col_order]
+        }).to_csv(out_dir / "cluster_col_order.csv", index=False)
+
+        g.ax_heatmap.set_xlabel("Substitution (21×21 flattened)")
+        g.ax_heatmap.set_ylabel("Samples")
+        g.fig.tight_layout()
+        g.fig.savefig(out_dir / "expected_heatmap_clustered.png", dpi=150, bbox_inches="tight")
+        logging.info("Saved clustered heatmap to expected_heatmap_clustered.png")
+        logging.info("Saved cluster order to cluster_row_order.csv and cluster_col_order.csv")
     finally:
         plt.close(g.fig)
-    logging.info(f"Saved clustered heatmap to {out_path}")
-
 
 
 def parse_args():
