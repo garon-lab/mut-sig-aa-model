@@ -727,7 +727,7 @@ def plot_heatmap_clustered(
         logging.warning("[cluster] Neither axis can be clustered; falling back to non-clustered heatmap.")
         fig, ax = plt.subplots(figsize=figsize)
         try:
-            sns.heatmap(exp_df.astype(float), ax=ax, cmap=cmap, vmin=vmin, vmax=vmax)
+            sb.heatmap(exp_df.astype(float), ax=ax, cmap=cmap, vmin=vmin, vmax=vmax)
             ax.set_xlabel("Substitution (21×21 flattened)")
             ax.set_ylabel("Samples")
             fig.tight_layout()
