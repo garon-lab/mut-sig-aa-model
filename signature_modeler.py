@@ -734,6 +734,15 @@ def plot_heatmap_clustered(
             ax.set_ylabel("Samples")
             fig.tight_layout()
             out_path = Path(out_dir) / "expected_heatmap_clustered.png"
+            # Save cluster order for reference
+            row_order = g.dendrogram_row.reordered_ind
+            col_order = g.dendrogram_col.reordered_ind
+            pd.DataFrame({"row_index": row_order,
+                          "row_label": exp_df.index.to_numpy()[row_order]}).to_csv(out_dir / "cluster_row_order.csv", index=False)
+            pd.DataFrame({"col_index": col_order,
+                          "col_label": exp_df.columns.to_numpy()[col_order]}).to_csv(out_dir / "cluster_col_order.csv", index=False)
+            logging.info(f"Saved cluster order to cluster_row_order.csv and cluster_col_order.csv")
+
             fig.savefig(out_path, dpi=150, bbox_inches="tight")
         finally:
             plt.close(fig)
