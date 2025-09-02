@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 Signature-Based AA Variant Modeling (Vectorized)
 
-This script takes a 12-element vector of mutational signature (context) proportions and produces
+This script takes a 12-element vector or COSMIC mutational signature (context proportions) and produces
 expected amino acid substitution profiles based on embedded base matrices.
 
 Features:
