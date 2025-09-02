@@ -703,21 +703,52 @@ def plot_heatmap_clustered(
     standardize="none"              # 'none','row','col'
 ):
     """
-    Clustered heatmap using seaborn.clustermap with proper figure closing.
+    Clustered heatmap using seaborn.clustermap with guards:
+    - If rows<2, row clustering is disabled.
+    - If cols<2, column clustering is disabled.
+    - If both disabled, fall back to a plain heatmap.
     Writes 'expected_heatmap_clustered.png'.
     """
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
+    # Determine requested clustering
+    req_row = cluster in ("rows","both")
+    req_col = cluster in ("cols","both")
+
+    n_rows, n_cols = exp_df.shape
+    row_cluster = req_row and (n_rows >= 2)
+    col_cluster = req_col and (n_cols >= 2)
+
+    if not row_cluster and req_row:
+        logging.warning("[cluster] Not clustering rows (need >=2 rows).")
+    if not col_cluster and req_col:
+        logging.warning("[cluster] Not clustering cols (need >=2 cols).")
+
+    # If nothing can be clustered, write a simple heatmap instead
+    if not row_cluster and not col_cluster and cluster != "none":
+        logging.warning("[cluster] Neither axis can be clustered; falling back to non-clustered heatmap.")
+        fig, ax = plt.subplots(figsize=figsize)
+        try:
+            sns.heatmap(exp_df.astype(float), ax=ax, cmap=cmap, vmin=vmin, vmax=vmax)
+            ax.set_xlabel("Substitution (21×21 flattened)")
+            ax.set_ylabel("Samples")
+            fig.tight_layout()
+            out_path = Path(out_dir) / "expected_heatmap_clustered.png"
+            fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        finally:
+            plt.close(fig)
+        return
+
     # Map standardize -> seaborn params
     cg_kwargs = {}
     if standardize == "row":
         cg_kwargs["standard_scale"] = 1
     elif standardize == "col":
         cg_kwargs["standard_scale"] = 0
-    # cluster None/rows/cols/both
-    row_cluster = cluster in ("rows","both")
-    col_cluster = cluster in ("cols","both")
 
-    # clustermap manages its own fig; ensure we close it
-    g = sb.clustermap(
+    # clustermap (ensure we close the fig to avoid figure leaks)
+    g = sns.clustermap(
         exp_df.astype(float),
         cmap=cmap,
         vmin=vmin, vmax=vmax,
@@ -728,7 +759,6 @@ def plot_heatmap_clustered(
         figsize=figsize,
         **cg_kwargs
     )
-    # Tidy labels
     g.ax_heatmap.set_xlabel("Substitution (21×21 flattened)")
     g.ax_heatmap.set_ylabel("Samples")
     g.fig.tight_layout()
@@ -738,6 +768,7 @@ def plot_heatmap_clustered(
     finally:
         plt.close(g.fig)
     logging.info(f"Saved clustered heatmap to {out_path}")
+
 
 
 def parse_args():
