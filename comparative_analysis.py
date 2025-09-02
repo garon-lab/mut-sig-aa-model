@@ -255,6 +255,7 @@ def summarize_dir(dir_path: str, manifest_path: str | None = None) -> pd.DataFra
         ids = pd.read_table(manifest_path, header=None).iloc[:,0].astype(str)
         df = df[df['ID'].astype(str).isin(set(ids))]
     return df
+
 def summarize_observed(observed_dir: str, out_dir: str, manifest_path: Optional[str]) -> pd.DataFrame:
     df = summarize_dir(observed_dir, manifest_path)
     out_path = Path(out_dir)/"summary.csv"
