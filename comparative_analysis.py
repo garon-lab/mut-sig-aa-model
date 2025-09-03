@@ -471,11 +471,28 @@ def single_file_compare(vector_file: str, comparison_dir: str, out_dir: str, com
 def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
     """
     Compare two 21×21 AA matrices:
-      • align and save counts for A and B
-      • compute A−B proportion difference and save plain + clustered heatmaps
+      • align and save counts for A and B (labeled by --label-a/--label-b)
+      • compute {label_a}−{label_b} proportion difference and save plain + clustered heatmaps
       • compute per-cell Fisher tests with BH-FDR
-    Outputs are written under <out_dir>/matrices/.
+    All outputs are written directly under out_dir.
     """
+    from pathlib import Path
+    import logging
+    import pandas as pd
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    # Optional deps
+    try:
+        from scipy.stats import fisher_exact
+    except Exception:
+        fisher_exact = None
+    try:
+        from scipy.cluster.hierarchy import linkage, leaves_list
+    except Exception:
+        linkage = None
+        leaves_list = None
+
     outp = Path(out_dir)
     outp.mkdir(parents=True, exist_ok=True)
 
@@ -488,21 +505,21 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
     B = B.reindex(index=idx, columns=cols, fill_value=0)
 
     # Save aligned counts
-    A_counts_fp = outp / f"{label_a}_counts.csv"
-    B_counts_fp = outp / f"{label_b}_counts.csv"
-    A.to_csv(A_counts_fp)
-    B.to_csv(B_counts_fp)
+    a_counts_fp = outp / f"{label_a}_counts.csv"
+    b_counts_fp = outp / f"{label_b}_counts.csv"
+    A.to_csv(a_counts_fp)
+    B.to_csv(b_counts_fp)
 
-    # Proportions & enrichment (A − B)
+    # Proportions & enrichment ({label_a} − {label_b})
     At = max(int(A.values.sum()), 1)
     Bt = max(int(B.values.sum()), 1)
     Ap = A / At
     Bp = B / Bt
     D = Ap - Bp
-    enrich_fp = outp / f"{label_a}_minus_{label_b}_enrichment.csv"
-    D.to_csv(enrich_fp)
+    enrich_csv_fp = outp / f"{label_a}_minus_{label_b}_enrichment.csv"
+    D.to_csv(enrich_csv_fp)
 
-    # Plain (unclustered) heatmap of A−B
+    # Plain (unclustered) heatmap
     vmax = float(np.nanmax(np.abs(D.values))) if np.isfinite(np.nanmax(np.abs(D.values))) else 1.0
     if vmax <= 0:
         vmax = 1.0
@@ -515,12 +532,15 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
     ax.set_yticklabels(D.index, fontsize=8)
     ax.set_title(f"{label_a} − {label_b} enrichment (proportion)")
     fig.tight_layout()
-    plain_png_fp = outp / f"{label_a}_minus_{label_b}_enrichment_heatmap.png"
-    fig.savefig(plain_png_fp, dpi=150)
+    enrich_png_fp = outp / f"{label_a}_minus_{label_b}_enrichment_heatmap.png"
+    fig.savefig(enrich_png_fp, dpi=150)
     plt.close(fig)
 
-    # Clustered heatmap of A−B (Ward; rows + cols)
+    # Clustered heatmap (Ward)
     clustered_png_fp = None
+    clustered_csv_fp = None
+    row_order_fp = None
+    col_order_fp = None
     if linkage is not None and leaves_list is not None:
         try:
             row_Z = linkage(D.values, method="ward", optimal_ordering=True)
@@ -551,13 +571,17 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
         except Exception as e:
             logging.warning(f"[matrix-compare] clustering failed: {e}")
 
-    # Per-cell stats (Fisher + BH-FDR)
+    # Per-cell stats (Fisher + BH-FDR) with labeled columns
     rows = []
     for i in idx:
         for j in cols:
-            a = int(A.loc[i, j]); b = int(B.loc[i, j])
-            c = int(At - a);      d = int(Bt - b)
-            a2, b2, c2, d2 = a + 0.5, b + 0.5, c + 0.5, d + 0.5
+            a = int(A.loc[i, j])
+            b = int(B.loc[i, j])
+            c = int(At - a)
+            d = int(Bt - b)
+
+            # Haldane–Anscombe correction for zeros
+            a2 = a + 0.5; b2 = b + 0.5; c2 = c + 0.5; d2 = d + 0.5
             if fisher_exact is not None:
                 try:
                     _, p = fisher_exact([[a2, c2], [b2, d2]], alternative="two-sided")
@@ -565,11 +589,15 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
                     p = 1.0
             else:
                 p = 1.0
+
             rows.append({
-                "AA_from": i, "AA_to": j,
-                "A_count": a, "B_count": b,
-                "A_prop": a / At, "B_prop": b / Bt,
-                "log2_enrichment": float(np.log2((a / At + 1e-12) / (b / Bt + 1e-12))),
+                "AA_from": i,
+                "AA_to": j,
+                f"{label_a}_count": a,
+                f"{label_b}_count": b,
+                f"{label_a}_prop": a / At,
+                f"{label_b}_prop": b / Bt,
+                f"log2_{label_a}_vs_{label_b}": float(np.log2((a / At + 1e-12) / (b / Bt + 1e-12))),
                 "pval": float(p),
             })
 
@@ -589,13 +617,17 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
     stats_df.to_csv(stats_fp, index=False)
 
     return {
-        f"{label_a}_counts": str(A_counts_fp.resolve()),
-        f"{label_b}_counts": str(B_counts_fp.resolve()),
-        f"{label_a}_minus_{label_b}_enrichment": str(enrich_fp.resolve()),
-        "enrichment_heatmap": str(plain_png_fp.resolve()),
+        f"{label_a}_counts": str(a_counts_fp.resolve()),
+        f"{label_b}_counts": str(b_counts_fp.resolve()),
+        f"{label_a}_minus_{label_b}_enrichment": str(enrich_csv_fp.resolve()),
+        "enrichment_heatmap": str(enrich_png_fp.resolve()),
         "enrichment_heatmap_clustered": str(clustered_png_fp.resolve()) if clustered_png_fp else None,
+        "enrichment_clustered_csv": str(clustered_csv_fp.resolve()) if clustered_csv_fp else None,
+        "row_order": str(row_order_fp.resolve()) if row_order_fp else None,
+        "col_order": str(col_order_fp.resolve()) if col_order_fp else None,
         "cell_stats": str(stats_fp.resolve()),
     }
+
 
 # ---------- CLI ----------
 
