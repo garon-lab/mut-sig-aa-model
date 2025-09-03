@@ -459,7 +459,7 @@ def single_file_compare(vector_file: str, comparison_dir: str, out_dir: str, com
     sim = compare_vectors(df, comp, out_dir, outfile="single_similarity.csv")
     plot_similarity_heatmap(sim, out_dir, name="single_similarity_heatmap.png")
 
-def compare_matrices(mat_a_path, mat_b_path, out_dir):
+def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
     """
     Compare two 21×21 AA matrices:
       • align and save counts for A and B
@@ -495,9 +495,9 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir):
     A = A.reindex(index=idx, columns=cols, fill_value=0)
     B = B.reindex(index=idx, columns=cols, fill_value=0)
 
-    # Save aligned counts
-    A.to_csv(mats / "A_counts.csv")
-    B.to_csv(mats / "B_counts.csv")
+        # Save aligned counts
+    A.to_csv(mats / f"{label_a}_counts.csv")
+    B.to_csv(mats / f"{label_b}_counts.csv")
 
     # Proportions & enrichment (A − B)
     At = max(int(A.values.sum()), 1)
@@ -505,7 +505,7 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir):
     Ap = A / At
     Bp = B / Bt
     D = Ap - Bp
-    D.to_csv(mats / "A_minus_B_enrichment.csv")
+    D.to_csv(mats / f"{label_a}_minus_{label_b}_enrichment.csv")
 
     # Plain (unclustered) heatmap of A−B
     vmax = float(np.nanmax(np.abs(D.values))) if np.isfinite(np.nanmax(np.abs(D.values))) else 1.0
@@ -518,9 +518,9 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir):
     ax.set_xticklabels(D.columns, rotation=90, fontsize=8)
     ax.set_yticks(range(len(D.index)))
     ax.set_yticklabels(D.index, fontsize=8)
-    ax.set_title("A − B enrichment (proportion)")
+    ax.set_title(f"{label_a} − {label_b} enrichment (proportion)")
     fig.tight_layout()
-    fig.savefig(mats / "A_minus_B_enrichment_heatmap.png", dpi=150)
+    fig.savefig(mats / f"{label_a}_minus_{label_b}_enrichment_heatmap.png", dpi=150)
     plt.close(fig)
 
     # Clustered heatmap of A−B (Ward; rows + cols)
@@ -533,9 +533,9 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir):
             D_ord = D.iloc[list(r_ord), list(c_ord)]
 
             # Save clustered CSV + orders
-            D_ord.to_csv(mats / "A_minus_B_enrichment.clustered.csv")
-            pd.Series(D_ord.index, name="row_order").to_csv(mats / "A_minus_B_row_order.csv", index=False)
-            pd.Series(D_ord.columns, name="col_order").to_csv(mats / "A_minus_B_col_order.csv", index=False)
+            D_ord.to_csv(mats / f"{label_a}_minus_{label_b}_enrichment.clustered.csv")
+            pd.Series(D_ord.index, name="row_order").to_csv(mats / f"{label_a}_minus_{label_b}_row_order.csv", index=False)
+            pd.Series(D_ord.columns, name="col_order").to_csv(mats / f"{label_a}_minus_{label_b}_col_order.csv", index=False)
 
             # Plot clustered heatmap
             fig2, ax2 = plt.subplots(figsize=(8, 6))
@@ -545,9 +545,9 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir):
             ax2.set_xticklabels(D_ord.columns, rotation=90, fontsize=8)
             ax2.set_yticks(range(len(D_ord.index)))
             ax2.set_yticklabels(D_ord.index, fontsize=8)
-            ax2.set_title("A − B enrichment (clustered)")
+            ax2.set_title(f"{label_a} − {label_b} enrichment (clustered)")
             fig2.tight_layout()
-            fig2.savefig(mats / "A_minus_B_enrichment_clustered.png", dpi=150)
+            fig2.savefig(mats / f"{label_a}_minus_{label_b}_enrichment_clustered.png", dpi=150)
             plt.close(fig2)
         except Exception as e:
             logging.warning(f"[matrix-compare] clustering failed: {e}")
@@ -597,9 +597,9 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir):
     df.to_csv(mats / "cell_stats.csv", index=False)
 
     return {
-        "A_counts": str((mats / "A_counts.csv").resolve()),
-        "B_counts": str((mats / "B_counts.csv").resolve()),
-        "A_minus_B_enrichment": str((mats / "A_minus_B_enrichment.csv").resolve()),
+        f"{label_a}_counts": str((mats / f"{label_a}_counts.csv").resolve()),
+        f"{label_b}_counts": str((mats / f"{label_b}_counts.csv").resolve()),
+        f"{label_a}_minus_{label_b}_enrichment": str((mats / f"{label_a}_minus_{label_b}_enrichment.csv").resolve()),
         "cell_stats": str((mats / "cell_stats.csv").resolve()),
     }
 
@@ -626,7 +626,9 @@ def parse_args():
                    default='cosine', help='Distance metric for clustermap (default: cosine)')
     p.add_argument('--matrix-a', help='21x21 AA matrix CSV for set A')
     p.add_argument('--matrix-b', help='21x21 AA matrix CSV for set B')
-
+    p.add_argument('--label-a', default='A', help='Custom label for matrix A (default: A)')
+    p.add_argument('--label-b', default='B', help='Custom label for matrix B (default: B)')
+   
     return p.parse_args()
 
 # ---------- Main ----------
@@ -639,7 +641,11 @@ def main():
     if args.step == 'matrix-compare':
         if not args.matrix_a or not args.matrix_b:
             raise SystemExit("--matrix-a and --matrix-b are required for 'matrix-compare'")
-        out_paths = compare_matrices(args.matrix_a, args.matrix_b, args.out_dir)
+        out_paths = compare_matrices(
+            args.matrix_a, args.matrix_b, args.out_dir,
+            label_a=args.label_a, label_b=args.label_b
+        )
+
         logging.info(f"[matrix-compare] wrote: {out_paths}")
         return 0
 
