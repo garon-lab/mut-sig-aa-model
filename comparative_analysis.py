@@ -68,6 +68,7 @@ AA3_TO_1: Dict[str, str] = {
 # Use 'X' consistently for stop in column names
 AA_1 = list("ARNDCQEGHILKMFPSTWYV") + ["X"]                 # 21 symbols with X=stop
 PAIR_COLS = [a + b for a in AA_1 for b in AA_1]             # 441 AA-pair columns, canonical order
+HEATMAP_CLIP = 0.001
 
 def _normalize_id_col(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {
@@ -141,6 +142,7 @@ def _plot_refined_heatmap(D: pd.DataFrame, out_png: Path, title: str):
     vmax = float(np.nanpercentile(np.abs(D.values), 99)) if np.isfinite(np.nanmax(np.abs(D.values))) else 1.0
     if vmax <= 0:
         vmax = 1.0
+    vmax = min(vmax, HEATMAP_CLIP)
 
     cmap = mpl.cm.get_cmap('coolwarm').copy()
     cmap.set_bad('#dddddd')
@@ -538,6 +540,8 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B", 
     else:
         vmax = float(np.nanmax(np.abs(D.values))) if np.isfinite(np.nanmax(np.abs(D.values))) else 1.0
         if vmax <= 0: vmax = 1.0
+        vmax = min(vmax, HEATMAP_CLIP)
+
         fig, ax = plt.subplots(figsize=(8, 6))
         im = ax.imshow(D.values, aspect="auto", vmin=-vmax, vmax=vmax)
         fig.colorbar(im, ax=ax, label="Δ proportion")
@@ -571,8 +575,9 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B", 
                 _plot_refined_heatmap(D_ord, clustered_png_fp, f"{label_a} − {label_b} enrichment (clustered)")
             else:
                 vmax = float(np.nanmax(np.abs(D_ord.values))) if np.isfinite(np.nanmax(np.abs(D_ord.values))) else 1.0
-                if vmax <= 0:
-                    vmax = 1.0
+                if vmax <= 0: vmax = 1.0
+                vmax = min(vmax, HEATMAP_CLIP)
+
                 fig2, ax2 = plt.subplots(figsize=(8, 6))
                 im2 = ax2.imshow(D_ord.values, aspect="auto", vmin=-vmax, vmax=vmax)
                 fig2.colorbar(im2, ax=ax2, label="Δ proportion")
