@@ -42,8 +42,8 @@ import matplotlib.pyplot as plt
 import seaborn as sb
 try:
    from scipy.stats import fisher_exact
-      except Exception:
-      fisher_exact = None
+except Exception:
+   fisher_exact = None
    try:
       from scipy.cluster.hierarchy import linkage, leaves_list
    except Exception:
