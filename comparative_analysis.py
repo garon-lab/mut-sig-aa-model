@@ -250,10 +250,21 @@ def summarize_dir(dir_path: str, manifest_path: str | None = None) -> pd.DataFra
     df = pd.concat(rows, ignore_index=True)
     if 'ID' not in df.columns:
         df = df.rename(columns={df.columns[0]: 'ID'})
-    df = df[['ID','SUM'] + CANON_COLS]
+    
+    if df.columns.duplicated().any():
+        dup_ct = int(df.columns.duplicated().sum())
+        dups = [c for c in df.columns[df.columns.duplicated()][:8]]
+        logging.warning(f"[summarize_dir] dropping {dup_ct} duplicate columns (keeping first). Examples: {dups}")
+        df = df.loc[:, ~df.columns.duplicated()]
+
+    df = df[['ID','SUM'] + [c for c in CANON_COLS if c in df.columns]]
+
     if manifest_path:
-        ids = pd.read_table(manifest_path, header=None).iloc[:,0].astype(str)
-        df = df[df['ID'].astype(str).isin(set(ids))]
+        ids = pd.read_table(manifest_path, header=None).iloc[:,0].astype(str).str.strip()
+        ids = ids.str.replace(r"_integrated\.csv$", "", regex=True)
+        id_series = df['ID'].astype(str)
+        mask = id_series.isin(set(ids)).to_numpy()
+        df = df.loc[mask]
     return df
 
 def summarize_observed(observed_dir: str, out_dir: str, manifest_path: Optional[str]) -> pd.DataFrame:
