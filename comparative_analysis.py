@@ -41,14 +41,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sb
 try:
-        from scipy.stats import fisher_exact
-    except Exception:
-        fisher_exact = None
-    try:
-        from scipy.cluster.hierarchy import linkage, leaves_list
-    except Exception:
-        linkage = None
-        leaves_list = None
+   from scipy.stats import fisher_exact
+      except Exception:
+      fisher_exact = None
+   try:
+      from scipy.cluster.hierarchy import linkage, leaves_list
+   except Exception:
+      linkage = None
+      leaves_list = None
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
