@@ -17,7 +17,7 @@ Features
 Dependencies: pandas, numpy, matplotlib, seaborn
 
 Typical usage:
-    python comparison_and_modeling.py \
+    python comparative_analysis.py \
         --obs_dir <observed CSVs> \
         --comp_dir <directory containing comparison_vectors.csv> \
         --manifest <optional manifest (first col are IDs)> \
@@ -25,7 +25,7 @@ Typical usage:
         --step all
 
 Single-file usage (you already have a summary CSV):
-    python comparison_and_modeling.py \
+    python comparative_analysis.py \
         --vector_file path/to/summary.csv \
         --comp_dir <directory with comparison_vectors.csv> \
         --out_dir <output> \
@@ -40,15 +40,18 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sb
+# Optional
 try:
-   from scipy.stats import fisher_exact
+    from scipy.stats import fisher_exact
 except Exception:
-   fisher_exact = None
-   try:
-      from scipy.cluster.hierarchy import linkage, leaves_list
-   except Exception:
-      linkage = None
-      leaves_list = None
+    fisher_exact = None
+
+try:
+    from scipy.cluster.hierarchy import linkage, leaves_list
+except Exception:
+    linkage = None
+    leaves_list = None
+
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -130,6 +133,31 @@ CANON_SET  = set(CANON_COLS)
 _invalid = [c for c in CANON_COLS if len(c)!=2 or c[0] not in AA_1 or c[1] not in AA_1]
 if _invalid:
     raise ValueError(f"HEADING has invalid codes: {_invalid[:5]}{'...' if len(_invalid)>5 else ''}")
+
+def _plot_refined_heatmap(D: pd.DataFrame, out_png: Path, title: str):
+    import numpy as np, matplotlib.pyplot as plt, matplotlib as mpl
+
+    # Robust symmetric scaling around 0 (99th percentile)
+    vmax = float(np.nanpercentile(np.abs(D.values), 99)) if np.isfinite(np.nanmax(np.abs(D.values))) else 1.0
+    if vmax <= 0:
+        vmax = 1.0
+
+    cmap = mpl.cm.get_cmap('coolwarm').copy()
+    cmap.set_bad('#dddddd')
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    im = ax.imshow(D.values, aspect='auto', vmin=-vmax, vmax=vmax, cmap=cmap)
+    fig.colorbar(im, ax=ax, label="Δ proportion")
+    ax.set_xticks(range(len(D.columns)))
+    ax.set_xticklabels(D.columns, rotation=90, fontsize=8)
+    ax.set_yticks(range(len(D.index)))
+    ax.set_yticklabels(D.index, fontsize=8)
+    ax.set_title(title)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=150)
+    plt.close(fig)
+
+
    
 # ---------- IO & Vectorization ----------
 
@@ -468,7 +496,7 @@ def single_file_compare(vector_file: str, comparison_dir: str, out_dir: str, com
     sim = compare_vectors(df, comp, out_dir, outfile="single_similarity.csv")
     plot_similarity_heatmap(sim, out_dir, name="single_similarity_heatmap.png")
 
-def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
+def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B", proportions=False):
     """
     Compare two 21×21 AA matrices:
       • align and save counts for A and B (labeled by --label-a/--label-b)
@@ -476,22 +504,6 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
       • compute per-cell Fisher tests with BH-FDR
     All outputs are written directly under out_dir.
     """
-    from pathlib import Path
-    import logging
-    import pandas as pd
-    import numpy as np
-    import matplotlib.pyplot as plt
-
-    # Optional deps
-    try:
-        from scipy.stats import fisher_exact
-    except Exception:
-        fisher_exact = None
-    try:
-        from scipy.cluster.hierarchy import linkage, leaves_list
-    except Exception:
-        linkage = None
-        leaves_list = None
 
     outp = Path(out_dir)
     outp.mkdir(parents=True, exist_ok=True)
@@ -519,57 +531,37 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
     enrich_csv_fp = outp / f"{label_a}_minus_{label_b}_enrichment.csv"
     D.to_csv(enrich_csv_fp)
 
-    # Plain (unclustered) heatmap
+    # Plain heatmap
+enrich_png_fp = outp / f"{label_a}_minus_{label_b}_enrichment_heatmap.png"
+if proportions:
+    _plot_refined_heatmap(D, enrich_png_fp, f"{label_a} − {label_b} enrichment (proportion)")
+else:
     vmax = float(np.nanmax(np.abs(D.values))) if np.isfinite(np.nanmax(np.abs(D.values))) else 1.0
-    if vmax <= 0:
-        vmax = 1.0
+    if vmax <= 0: vmax = 1.0
     fig, ax = plt.subplots(figsize=(8, 6))
     im = ax.imshow(D.values, aspect="auto", vmin=-vmax, vmax=vmax)
-    fig.colorbar(im, ax=ax)
-    ax.set_xticks(range(len(D.columns)))
-    ax.set_xticklabels(D.columns, rotation=90, fontsize=8)
-    ax.set_yticks(range(len(D.index)))
-    ax.set_yticklabels(D.index, fontsize=8)
+    fig.colorbar(im, ax=ax, label="Δ proportion")
+    ax.set_xticks(range(len(D.columns))); ax.set_xticklabels(D.columns, rotation=90, fontsize=8)
+    ax.set_yticks(range(len(D.index)));  ax.set_yticklabels(D.index, fontsize=8)
     ax.set_title(f"{label_a} − {label_b} enrichment (proportion)")
-    fig.tight_layout()
-    enrich_png_fp = outp / f"{label_a}_minus_{label_b}_enrichment_heatmap.png"
-    fig.savefig(enrich_png_fp, dpi=150)
-    plt.close(fig)
+    fig.tight_layout(); fig.savefig(enrich_png_fp, dpi=150); plt.close(fig)
 
-    # Clustered heatmap (Ward)
-    clustered_png_fp = None
-    clustered_csv_fp = None
-    row_order_fp = None
-    col_order_fp = None
-    if linkage is not None and leaves_list is not None:
-        try:
-            row_Z = linkage(D.values, method="ward", optimal_ordering=True)
-            col_Z = linkage(D.values.T, method="ward", optimal_ordering=True)
-            r_ord = leaves_list(row_Z)
-            c_ord = leaves_list(col_Z)
-            D_ord = D.iloc[list(r_ord), list(c_ord)]
-
-            clustered_csv_fp = outp / f"{label_a}_minus_{label_b}_enrichment.clustered.csv"
-            row_order_fp = outp / f"{label_a}_minus_{label_b}_row_order.csv"
-            col_order_fp = outp / f"{label_a}_minus_{label_b}_col_order.csv"
-            D_ord.to_csv(clustered_csv_fp)
-            pd.Series(D_ord.index, name="row_order").to_csv(row_order_fp, index=False)
-            pd.Series(D_ord.columns, name="col_order").to_csv(col_order_fp, index=False)
-
-            fig2, ax2 = plt.subplots(figsize=(8, 6))
-            im2 = ax2.imshow(D_ord.values, aspect="auto", vmin=-vmax, vmax=vmax)
-            fig2.colorbar(im2, ax=ax2)
-            ax2.set_xticks(range(len(D_ord.columns)))
-            ax2.set_xticklabels(D_ord.columns, rotation=90, fontsize=8)
-            ax2.set_yticks(range(len(D_ord.index)))
-            ax2.set_yticklabels(D_ord.index, fontsize=8)
-            ax2.set_title(f"{label_a} − {label_b} enrichment (clustered)")
-            fig2.tight_layout()
-            clustered_png_fp = outp / f"{label_a}_minus_{label_b}_enrichment_clustered.png"
-            fig2.savefig(clustered_png_fp, dpi=150)
-            plt.close(fig2)
-        except Exception as e:
-            logging.warning(f"[matrix-compare] clustering failed: {e}")
+# Clustered heatmap
+if linkage is not None and leaves_list is not None:
+    ...
+    clustered_png_fp = outp / f"{label_a}_minus_{label_b}_enrichment_clustered.png"
+    if proportions:
+        _plot_refined_heatmap(D_ord, clustered_png_fp, f"{label_a} − {label_b} enrichment (clustered)")
+    else:
+        vmax = float(np.nanmax(np.abs(D_ord.values))) if np.isfinite(np.nanmax(np.abs(D_ord.values))) else 1.0
+        if vmax <= 0: vmax = 1.0
+        fig2, ax2 = plt.subplots(figsize=(8, 6))
+        im2 = ax2.imshow(D_ord.values, aspect="auto", vmin=-vmax, vmax=vmax)
+        fig2.colorbar(im2, ax=ax2, label="Δ proportion")
+        ax2.set_xticks(range(len(D_ord.columns))); ax2.set_xticklabels(D_ord.columns, rotation=90, fontsize=8)
+        ax2.set_yticks(range(len(D_ord.index)));  ax2.set_yticklabels(D_ord.index, fontsize=8)
+        ax2.set_title(f"{label_a} − {label_b} enrichment (clustered)")
+        fig2.tight_layout(); fig2.savefig(clustered_png_fp, dpi=150); plt.close(fig2)
 
     # Per-cell stats (Fisher + BH-FDR) with labeled columns
     rows = []
@@ -654,6 +646,8 @@ def parse_args():
     p.add_argument('--matrix-b', help='21x21 AA matrix CSV for set B')
     p.add_argument('--label-a', default='A', help='Custom label for matrix A (default: A)')
     p.add_argument('--label-b', default='B', help='Custom label for matrix B (default: B)')
+    p.add_argument('--proportions', action='store_true', help='Use refined plotting for A−B proportion heatmaps (default: simple).')
+
    
     return p.parse_args()
 
@@ -669,7 +663,7 @@ def main():
             raise SystemExit("--matrix-a and --matrix-b are required for 'matrix-compare'")
         out_paths = compare_matrices(
             args.matrix_a, args.matrix_b, args.out_dir,
-            label_a=args.label_a, label_b=args.label_b
+            label_a=args.label_a, label_b=args.label_b, proportions=args.proportions
         )
 
         logging.info(f"[matrix-compare] wrote: {out_paths}")
