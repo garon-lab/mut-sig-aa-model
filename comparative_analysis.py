@@ -350,59 +350,77 @@ def _read_combined_vectors_table(fp: Path) -> pd.DataFrame | None:
 def summarize_dir(dir_path: str, manifest_path: str | None = None) -> pd.DataFrame:
     """
     Ingest .csv/.tsv/.gz; accept tall, 21×21 matrices, single-row vectors, and combined tables.
-    Derive per-file IDs by manifest-aware substring matching (pattern-free).
+    Derive per-file IDs by manifest-aware matching and return a combined table:
+        columns: ID, SUM, <AA-pair columns...>
+    Filtering is driven by the manifest (if provided), with robust normalization.
     """
     dirp = Path(dir_path)
     patterns = ["*.csv","*.CSV","*.tsv","*.TSV","*.csv.gz","*.CSV.GZ","*.tsv.gz","*.TSV.GZ"]
     files = sorted({p for pat in patterns for p in dirp.rglob(pat)})
     logging.info(f"[summarize_dir] Scanning {dir_path} — {len(files)} candidate file(s)")
 
+    # ---------------- Manifest (header aware, BOM safe, normalized → canonical map) ----------------
     manifest_ids: list[str] | None = None
     manifest_norm_map: dict[str, str] | None = None
-   
+
     if manifest_path:
+        # Read with header auto-detect
         mani = pd.read_csv(manifest_path, sep=None, engine="python")
         first_col = mani.columns[0]
-        raw_ids = mani[first_col].astype(str).str.strip()
-        raw_ids = raw_ids[raw_ids.str.lower() != first_col.lower()]  # drop header row if read as data
+        raw_ids = mani[first_col].astype(str)
+
+        # Strip BOM + whitespace; drop header if it slipped into the data
+        raw_ids = raw_ids.str.replace('\ufeff', '', regex=False).str.strip()
+        raw_ids = raw_ids[raw_ids.str.lower() != first_col.lower()]
+        # Allow simple suffix cleanup folks sometimes put into manifests
         raw_ids = raw_ids.str.replace(r"_integrated\.csv$", "", regex=True)
-   
+
         manifest_ids = raw_ids.tolist()
-        # normalized → canonical mapping (so we can keep the manifest’s original spelling)
+        # Build normalized → canonical mapping (so outputs keep manifest spelling)
         manifest_norm_map = {normalize_id(x): x for x in manifest_ids}
-        manifest_norm_set = set(manifest_norm_map.keys())
+        norm_set = set(manifest_norm_map.keys())
+    else:
+        norm_set = set()
 
-
+    # ---------------- Build rows ----------------
     rows = []
     for fp in files:
+        # A) combined table (multi-row, already wide)
         comb = _read_combined_vectors_table(fp)
         if comb is not None:
-            # If combined table has ID, normalize via manifest when possible
             if manifest_ids is not None and 'ID' in comb.columns:
+                # Map each combined-table ID to canonical manifest spelling if possible
                 def _map_comb_id(s):
                     sn = normalize_id(str(s))
-                    if sn in manifest_norm_map:       # exact normalized match first
+                    if sn in manifest_norm_map:      # exact normalized match first
                         return manifest_norm_map[sn]
-                    return _pick_id_from_filename(str(s), manifest_ids)  # fallback
+                    return _pick_id_from_filename(str(s), manifest_ids)  # fallback (substring)
                 comb['ID'] = comb['ID'].astype(str).map(_map_comb_id)
-
+            # Keep a normalized source stem for robust filtering (even for combined)
+            comb['SRC_NORM'] = normalize_id(Path(fp).stem)
             rows.append(comb)
             continue
 
+        # B) single-vector / tall / 21×21 matrix file
         try:
             vec = _read_one_sample_csv(fp)
             stem = Path(fp).stem
-            
+            nstem = normalize_id(stem)
+
             if manifest_ids is not None:
-                nstem = normalize_id(stem)
-                if nstem in manifest_norm_map:                     # 1) strong, exact normalized match
-                    sid = manifest_norm_map[nstem]
-                else:                                              # 2) fallback: your substring picker
+                if nstem in norm_set:                          # strong, exact normalized match
+                    sid = manifest_norm_map[nstem]             # canonical manifest spelling
+                else:                                          # fallback: substring rescue
                     sid = _pick_id_from_filename(stem, manifest_ids)
             else:
                 sid = stem
-            
-            one = pd.DataFrame([{'ID': sid, 'SUM': float(np.nansum(vec))} | {c: float(vec[c]) for c in CANON_COLS}])
+
+            one = pd.DataFrame([{
+                'ID': sid,
+                'SUM': float(np.nansum(vec)),
+                'SRC_NORM': nstem,                              # for robust filtering
+                **{c: float(vec[c]) for c in CANON_COLS}
+            }])
             rows.append(one)
 
         except Exception as e:
@@ -412,6 +430,7 @@ def summarize_dir(dir_path: str, manifest_path: str | None = None) -> pd.DataFra
         raise FileNotFoundError(f"No usable CSV/TSV files found in {dir_path}")
 
     df = pd.concat(rows, ignore_index=True)
+
     if 'ID' not in df.columns:
         df = df.rename(columns={df.columns[0]: 'ID'})
 
@@ -420,44 +439,65 @@ def summarize_dir(dir_path: str, manifest_path: str | None = None) -> pd.DataFra
         logging.warning("[summarize_dir] dropping duplicate columns (keep first)")
         df = df.loc[:, ~df.columns.duplicated(keep='first')]
 
-    # Keep canonical columns
-    df = df[['ID', 'SUM'] + [c for c in CANON_COLS if c in df.columns]]
+    # Keep canonical columns (ID, SUM, and any AA-pair columns that exist)
+    df = df[['ID', 'SUM'] + [c for c in CANON_COLS if c in df.columns] + (['SRC_NORM'] if 'SRC_NORM' in df.columns else [])]
 
+    # ---------------- Manifest-driven filter (use ID OR SRC_NORM) ----------------
     if manifest_ids:
-       # 1) extra-clean manifest ids: strip BOM and whitespace
-       raw = pd.Series(manifest_ids, dtype=str).str.replace('\ufeff', '', regex=False).str.strip()
-       manifest_norm_map = {normalize_id(x): x for x in raw}
-       norm_set = set(manifest_norm_map.keys())
-   
-       # 2) normalize row IDs and build a robust boolean mask (no NA)
-       row_norm  = df['ID'].astype(str).map(normalize_id)
-       keep_mask = row_norm.isin(norm_set)
-       mask_array = keep_mask.fillna(False).to_numpy()
-       kept = int(mask_array.sum())
-   
-       # 3) DEBUG: show what we’re actually comparing
-       if kept == 0:
-           file_norms = sorted({normalize_id(Path(f).stem) for f in files})
-           mani_norms = sorted(norm_set)
-           logging.info(f"[debug] normalized stems (first 10): {file_norms[:10]}")
-           logging.info(f"[debug] normalized manifest (first 10): {mani_norms[:10]}")
-           logging.info(f"[debug] intersection size: {len(set(file_norms) & norm_set)}")
-   
-       if kept:
-           # map back to canonical manifest spelling
-           df.loc[mask_array, 'ID'] = row_norm[mask_array].map(manifest_norm_map).values
-           logging.info(f"[summarize_dir] manifest filter: {len(df)} -> {kept} rows")
-           df = df.loc[mask_array]
-       else:
-           sample_files    = [Path(f).stem for f in files[:5]]
-           sample_manifest = manifest_ids[:5]
-           logging.warning("[summarize_dir] 0 rows matched the manifest after normalization. "
-                           "Check filename↔ID mapping.\n"
-                           f"  e.g. file stems: {sample_files}\n"
-                           f"  e.g. manifest:  {sample_manifest}")
-           df = df.iloc[0:0]
+        # Normalize ID column
+        id_norm = df['ID'].astype(str).map(normalize_id)
+        mask_id = id_norm.isin(norm_set)
+
+        # If we have SRC_NORM, keep union: (normalized ID) OR (normalized stem)
+        if 'SRC_NORM' in df.columns:
+            mask_src = df['SRC_NORM'].astype(str).isin(norm_set)
+            keep_mask = (mask_id | mask_src)
+        else:
+            keep_mask = mask_id
+
+        mask_array = keep_mask.fillna(False).to_numpy()
+        kept = int(mask_array.sum())
+
+        # Debug when 0 kept: show normalized lists & intersection size
+        if kept == 0:
+            file_norms = sorted({normalize_id(Path(f).stem) for f in files})
+            mani_norms = sorted(norm_set)
+            logging.info(f"[debug] normalized stems (first 10): {file_norms[:10]}")
+            logging.info(f"[debug] normalized manifest (first 10): {mani_norms[:10]}")
+            logging.info(f"[debug] intersection size: {len(set(file_norms) & norm_set)}")
+            sample_files = [Path(f).stem for f in files[:5]]
+            sample_manifest = manifest_ids[:5]
+            logging.warning("[summarize_dir] 0 rows matched the manifest after normalization. "
+                            "Check filename↔ID mapping.\n"
+                            f"  e.g. file stems: {sample_files}\n"
+                            f"  e.g. manifest:  {sample_manifest}")
+            df = df.iloc[0:0]
+        else:
+            # Map kept rows' IDs back to canonical manifest spelling:
+            new_ids = df['ID'].astype(str)
+
+            # a) rows matched by ID
+            canonical_from_id = id_norm.map(manifest_norm_map)
+            new_ids.loc[mask_id.fillna(False)] = canonical_from_id.loc[mask_id.fillna(False)].fillna(
+                new_ids.loc[mask_id.fillna(False)]
+            )
+
+            # b) rows matched only by SRC_NORM
+            if 'SRC_NORM' in df.columns:
+                only_src = (~mask_id.fillna(False)) & mask_array
+                canonical_from_src = df['SRC_NORM'].astype(str).map(manifest_norm_map)
+                new_ids.loc[only_src] = canonical_from_src.loc[only_src].fillna(new_ids.loc[only_src])
+
+            df.loc[mask_array, 'ID'] = new_ids.loc[mask_array].values
+            logging.info(f"[summarize_dir] manifest filter: {len(df)} -> {kept} rows")
+            df = df.loc[mask_array]
+
+    # Drop SRC_NORM from the public output (it was only for internal matching)
+    if 'SRC_NORM' in df.columns:
+        df = df.drop(columns=['SRC_NORM'])
 
     return df
+
 
 
 
