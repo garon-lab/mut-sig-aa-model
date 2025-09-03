@@ -146,6 +146,65 @@ def _to_one_letter_or_X(x: object) -> Optional[str]:
         return "X" if one == "*" else one
     return None
 
+def make_proportion_vectors(summary_df: pd.DataFrame) -> pd.DataFrame:
+    """Return per-case proportions over CANON_COLS (ID-indexed)."""
+    df = summary_df.copy()
+    # keep one of any duplicate columns
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated(keep='first')]
+    df = df.set_index('ID')
+    counts = df.reindex(columns=[c for c in CANON_COLS if c in df.columns]).fillna(0.0)
+    sums = counts.sum(axis=1).replace(0, np.nan)
+    props = counts.div(sums, axis=0).fillna(0.0)
+    return props
+
+def load_expected_vector(path: str) -> pd.Series:
+    """
+    Load expected_vectors.csv and return a single expected proportion Series
+    aligned to CANON_COLS. If multiple rows exist, uses the first.
+    """
+    exp = pd.read_csv(path)
+    if 'ID' in exp.columns: exp = exp.drop(columns=['ID'])
+    if 'SUM' in exp.columns: exp = exp.drop(columns=['SUM'])
+    exp = exp.reindex(columns=CANON_COLS, fill_value=0.0)
+    v = exp.iloc[0].astype(float)
+    s = v.sum()
+    return (v / s) if s > 0 else v
+
+def plot_delta_clustermap(obs_props: pd.DataFrame, expected_props: pd.Series, out_dir: str, name="delta_clustermap.png"):
+    """Plot clustered heatmap of (observed proportions − expected proportions)."""
+    # Align columns and compute delta
+    exp = expected_props.reindex(obs_props.columns, fill_value=0.0)
+    delta = obs_props.subtract(exp, axis=1)
+    # Drop all-zero rows/cols
+    delta = delta.loc[(delta.abs().sum(axis=1) > 0), :]
+    delta = delta.loc[:, (delta.abs().sum(axis=0) > 0)]
+    if delta.shape[0] < 2 or delta.shape[1] < 2:
+        logging.warning("[delta] not enough data to cluster; skipping.")
+        return
+    # Robust symmetric scaling
+    vmax = float(np.nanpercentile(np.abs(delta.values), 99))
+    if vmax <= 0: vmax = 1.0
+    vmax = min(vmax, 0.001)  # reuse your HEATMAP_CLIP if defined
+    # Clustered heatmap
+    try:
+        g = sb.clustermap(delta, cmap="coolwarm", center=0.0, vmin=-vmax, vmax=vmax, metric="euclidean", figsize=(14, 12))
+    except Exception as e:
+        logging.warning(f"[delta] clustermap failed ({e}); falling back to unclustered heatmap")
+        plt.figure(figsize=(14, 12))
+        plt.imshow(delta.values, aspect='auto', vmin=-vmax, vmax=vmax, cmap='coolwarm')
+        plt.colorbar(label="Observed − Expected (proportion)")
+        plt.yticks(range(len(delta.index)), delta.index, fontsize=8)
+        plt.xticks(range(len(delta.columns)), delta.columns, rotation=90, fontsize=7)
+        plt.tight_layout()
+        plt.savefig(Path(out_dir)/name, dpi=150)
+        plt.close()
+        return
+    g.fig.savefig(Path(out_dir)/name, dpi=150)
+    plt.close(g.fig)
+    # Also save the delta table
+    delta.to_csv(Path(out_dir)/"delta_observed_minus_expected.csv")
+
 # AA-pair column order for vectors
 HEADING = ['AE','AG','AP','AS','AT','AV','CF','CG','CR','CS','CW','CX','CY',
            'DA','DE','DG','DH','DN','DV','DY','EA','ED','EG','EK','EQ','EV','EX','FC',
@@ -810,6 +869,19 @@ def main():
                                out_dir=args.out_dir)
         sim_df = compare_vectors(summary_df, comp, args.out_dir)
         plot_similarity_heatmap(sim_df, args.out_dir, name="heatmap.png")
+
+    # Build per-case proportions and delta vs the expected vector (first row of comparison CSV)
+    try:
+        obs_props = make_proportion_vectors(summary_df)        # ID-indexed proportions
+        exp_vec   = load_expected_vector(args.comparison_csv)  # single expected proportion vector
+        plot_delta_clustermap(obs_props, exp_vec, args.out_dir, name="delta_vs_expected_clustermap.png")
+        # (Optional) write the per-case proportions to disk in the same column order as expected
+        outp = Path(args.out_dir) / "observed_proportions.csv"
+        obs_props.reindex(columns=CANON_COLS, fill_value=0.0).to_csv(outp)
+        logging.info(f"Wrote per-case proportions -> {outp}")
+    except Exception as e:
+        logging.warning(f"[delta] failed to compute delta clustermap: {e}")
+
 
     # HEATMAP only (re-use existing similarity)
     if args.step == 'heatmap':
