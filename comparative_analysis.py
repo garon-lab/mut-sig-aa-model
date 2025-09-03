@@ -491,7 +491,7 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir):
             ax2.set_title("A − B enrichment (clustered)")
             fig2.tight_layout()
             fig2.savefig(mats / "A_minus_B_enrichment_clustered.png", dpi=150); plt.close(fig2)
-        except Exception as e:
+      except Exception as e:
             import logging
             logging.warning(f"[aa-compare] clustering failed: {e}")
     
