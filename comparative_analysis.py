@@ -289,7 +289,7 @@ def _read_combined_vectors_table(fp: Path) -> pd.DataFrame | None:
     return None
 
 
-ddef summarize_dir(dir_path: str, manifest_path: str | None = None) -> pd.DataFrame:
+def summarize_dir(dir_path: str, manifest_path: str | None = None) -> pd.DataFrame:
     """
     Ingest .csv/.tsv/.gz; accept tall, 21×21 matrices, single-row vectors, and combined tables.
     Derive per-file IDs by manifest-aware substring matching (pattern-free).
