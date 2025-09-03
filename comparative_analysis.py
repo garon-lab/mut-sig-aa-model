@@ -365,7 +365,7 @@ def plot_clustermap_vectors(vectors_df, out_dir, normalize_rows=True, name=None,
             zero_norm = (norms == 0)
             if zero_norm.any():
                 logging.warning(f"Clustermap: dropping {int(zero_norm.sum())} rows with zero norm for cosine metric.")
-                X = X.iloc[~zero_norm]
+                X = X.loc[~zero_norm]
 
     # drop all-zero columns (no information)
     zero_cols = (X.sum(axis=0) == 0)
@@ -614,35 +614,30 @@ def parse_args():
 def main():
     args = parse_args()
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
-    comp = load_comparison(args.comparison_dir or "",
-                       comparison_csv=args.comparison_csv,
-                       manifest_path=args.manifest,
-                       out_dir=args.out_dir)
+
+    # EARLY EXIT: matrix-compare does not need comparison vectors
+    if args.step == 'matrix-compare':
+        if not args.matrix_a or not args.matrix_b:
+            raise SystemExit("--matrix-a and --matrix-b are required for 'matrix-compare'")
+        out_paths = compare_matrices(args.matrix_a, args.matrix_b, args.out_dir)
+        logging.info(f"[matrix-compare] wrote: {out_paths}")
+        return 0
 
     summary_df = None
     sim_df = None
 
-    # TWO SINGLE-FILE MATRIX COMPARISON
-    if args.step == 'matrix-compare':
-        if not args.matrix_a or not args.matrix_b:
-            raise SystemExit("--matrix-a and --matrix-b are required for 'aa-compare'")
-        out_paths = aa_compare_matrices(args.matrix_a, args.matrix_b, args.out_dir)
-        logging.info(f"[aa-compare] wrote: {out_paths}")
-        return 0
-       
-    # SUMMARIZE (or load existing)   
+    # SUMMARIZE (or load existing)
     if args.step in ('summarize', 'all'):
         if not args.observed_dir:
             raise SystemExit("--observed-dir is required for step 'summarize' or 'all'")
         summary_df = summarize_observed(args.observed_dir, args.out_dir, args.manifest)
-        # Drop clustermaps for observed cohort
+        # clustermaps for observed cohort
         plot_clustermap_vectors(summary_df.copy(), args.out_dir,
-                        normalize_rows=False, name="clustermap_counts.png",
-                        metric=args.cluster_metric)
+                                normalize_rows=False, name="clustermap_counts.png",
+                                metric=args.cluster_metric)
         plot_clustermap_vectors(summary_df.copy(), args.out_dir,
-                        normalize_rows=True,  name="clustermap_proportions.png",
-                        metric=args.cluster_metric)
-
+                                normalize_rows=True, name="clustermap_proportions.png",
+                                metric=args.cluster_metric)
     else:
         # Try to get a summary from vector_file or out_dir/summary.csv
         if args.vector_file and Path(args.vector_file).exists():
@@ -653,17 +648,19 @@ def main():
                 summary_df = _read_summary_csv(str(vf))
 
     # COMPARE
-    if args.step in ('compare','all'):
+    if args.step in ('compare', 'all'):
         if summary_df is None:
             raise SystemExit("No summary available. Run with --step summarize or provide --vector-file/summary.csv.")
         if not args.comparison_dir and not args.comparison_csv:
             raise SystemExit("--comparison-dir or --comparison-csv is required for 'compare'/'all'")
-        comp = load_comparison(args.comparison_dir or "", comparison_csv=args.comparison_csv,
-                               manifest_path=args.manifest, out_dir=args.out_dir)
+        comp = load_comparison(args.comparison_dir or "",
+                               comparison_csv=args.comparison_csv,
+                               manifest_path=args.manifest,
+                               out_dir=args.out_dir)
         sim_df = compare_vectors(summary_df, comp, args.out_dir)
         plot_similarity_heatmap(sim_df, args.out_dir, name="heatmap.png")
 
-    # HEATMAP only (try to load previously computed similarity)
+    # HEATMAP only (re-use existing similarity)
     if args.step == 'heatmap':
         sim_path = Path(args.out_dir) / "similarity_matrix.csv"
         if not sim_path.exists():
@@ -672,7 +669,7 @@ def main():
         plot_similarity_heatmap(sim_df, args.out_dir, name="heatmap.png")
         if summary_df is not None:
             plot_clustermap_vectors(summary_df.copy(), args.out_dir, normalize_rows=False, name="clustermap_counts.png")
-            plot_clustermap_vectors(summary_df.copy(), args.out_dir, normalize_rows=True,  name="clustermap_proportions.png")
+            plot_clustermap_vectors(summary_df.copy(), args.out_dir, normalize_rows=True, name="clustermap_proportions.png")
 
     # SINGLE-FILE utilities
     if args.step == 'single-file':
@@ -682,6 +679,7 @@ def main():
         if args.comparison_dir or args.comparison_csv:
             single_file_compare(args.vector_file, args.comparison_dir or "", args.out_dir,
                                 comparison_csv=args.comparison_csv)
+
 
    
 
