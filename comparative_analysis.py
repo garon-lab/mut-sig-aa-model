@@ -40,6 +40,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sb
+import re
 # Optional
 try:
     from scipy.stats import fisher_exact
@@ -69,6 +70,38 @@ AA3_TO_1: Dict[str, str] = {
 AA_1 = list("ARNDCQEGHILKMFPSTWYV") + ["X"]                 # 21 symbols with X=stop
 PAIR_COLS = [a + b for a in AA_1 for b in AA_1]             # 441 AA-pair columns, canonical order
 HEATMAP_CLIP = 0.001
+
+def _norm_simple(s: str) -> str:
+    """Lowercase and strip non-alphanumerics for robust substring matching."""
+    return re.sub(r'[^A-Za-z0-9]', '', str(s)).lower()
+
+def _pick_id_from_filename(stem: str, manifest_ids: list[str] | None) -> str:
+    """
+    Return the best ID for a file stem by finding the longest manifest ID
+    whose normalized form is a substring of the normalized stem.
+    If no manifest or no match, return the stem.
+    """
+    if not manifest_ids:
+        return stem
+    nstem = _norm_simple(stem)
+    best = None
+    best_len = -1
+    for orig in manifest_ids:
+        n = _norm_simple(orig)
+        if n and n in nstem and len(n) > best_len:
+            best, best_len = orig, len(n)
+    return best or stem
+   
+def _extract_id_token(s: str) -> str:
+    """Pull a clean Case-ID from a filename or free text; strip common suffixes."""
+    base = Path(s).stem if isinstance(s, (str, Path)) else str(s)
+    base = base.strip()
+    base = re.sub(r'(_SNV.*|_SNP.*|_matrix.*|\.matrix.*)$', '', base, flags=re.IGNORECASE)
+    for pat in _CASE_PATTERNS:
+        m = re.search(pat, base)
+        if m:
+            return m.group(1)
+    return base
 
 def _normalize_id_col(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {
@@ -259,25 +292,38 @@ def _read_combined_vectors_table(fp: Path) -> pd.DataFrame | None:
 def summarize_dir(dir_path: str, manifest_path: str | None = None) -> pd.DataFrame:
     """
     Recursively ingest .csv/.CSV/.tsv/.TSV/.csv.gz/.tsv.gz files.
-    Accept tall, matrices, single-row vectors, and combined tables.
+    Accept tall, 21×21 matrices, single-row vectors, and combined tables.
+    Derive per-file IDs by manifest-aware substring matching (pattern-free).
     """
     dirp = Path(dir_path)
     patterns = ["*.csv","*.CSV","*.tsv","*.TSV","*.csv.gz","*.CSV.GZ","*.tsv.gz","*.TSV.GZ"]
     files = sorted({p for pat in patterns for p in dirp.rglob(pat)})
     logging.info(f"[summarize_dir] Scanning {dir_path} — {len(files)} candidate file(s)")
 
+    # Load manifest IDs (original text), if provided
+    manifest_ids: list[str] | None = None
+    if manifest_path:
+        ids = pd.read_table(manifest_path, header=None).iloc[:, 0].astype(str).str.strip()
+        # strip accidental filename suffixes like *_integrated.csv
+        ids = ids.str.replace(r"_integrated\.csv$", "", regex=True)
+        manifest_ids = ids.tolist()
+
     rows = []
     for fp in files:
         # combined table?
         comb = _read_combined_vectors_table(fp)
         if comb is not None:
-            logging.info(f"[summarize_dir] Combined table: {fp.name} (+{len(comb)} rows)")
+            # If this combined table has an ID column, normalize its IDs to manifest when possible
+            if manifest_ids is not None and 'ID' in comb.columns:
+                comb['ID'] = comb['ID'].astype(str).apply(lambda s: _pick_id_from_filename(s, manifest_ids))
             rows.append(comb)
             continue
+
         # per-sample file
         try:
             vec = _read_one_sample_csv(fp)
-            sid = fp.stem
+            stem = Path(fp).stem
+            sid = _pick_id_from_filename(stem, manifest_ids)
             one = pd.DataFrame([{'ID': sid, 'SUM': float(np.nansum(vec))} | {c: float(vec[c]) for c in CANON_COLS}])
             rows.append(one)
         except Exception as e:
@@ -289,22 +335,27 @@ def summarize_dir(dir_path: str, manifest_path: str | None = None) -> pd.DataFra
     df = pd.concat(rows, ignore_index=True)
     if 'ID' not in df.columns:
         df = df.rename(columns={df.columns[0]: 'ID'})
-    
-    if df.columns.duplicated().any():
-        dup_ct = int(df.columns.duplicated().sum())
-        dups = [c for c in df.columns[df.columns.duplicated()][:8]]
-        logging.warning(f"[summarize_dir] dropping {dup_ct} duplicate columns (keeping first). Examples: {dups}")
-        df = df.loc[:, ~df.columns.duplicated()]
 
+    # Drop duplicate columns (keep first) so df['ID'] is a Series
+    if df.columns.duplicated().any():
+        logging.warning("[summarize_dir] dropping duplicate columns (keep first)")
+        df = df.loc[:, ~df.columns.duplicated(keep='first')]
+
+    # Keep canonical columns only
     df = df[['ID','SUM'] + [c for c in CANON_COLS if c in df.columns]]
 
-    if manifest_path:
-        ids = pd.read_table(manifest_path, header=None).iloc[:,0].astype(str).str.strip()
-        ids = ids.str.replace(r"_integrated\.csv$", "", regex=True)
-        id_series = df['ID'].astype(str)
-        mask = id_series.isin(set(ids)).to_numpy()
-        df = df.loc[mask]
+    # Final manifest filter (exact match to original manifest tokens)
+    if manifest_ids:
+        mask = df['ID'].astype(str).isin(set(manifest_ids))
+        before, after = len(df), int(mask.sum())
+        if after == 0:
+            logging.warning("[summarize_dir] 0 rows matched the manifest; check filename↔ID mapping")
+        else:
+            logging.info(f"[summarize_dir] manifest filter: {before} -> {after} rows")
+        df = df.loc[mask.values]
+
     return df
+
 
 def summarize_observed(observed_dir: str, out_dir: str, manifest_path: Optional[str]) -> pd.DataFrame:
     df = summarize_dir(observed_dir, manifest_path)
@@ -369,6 +420,14 @@ def compare_vectors(observed_summary: pd.DataFrame,
                     comparison_df: pd.DataFrame,
                     out_dir: str,
                     outfile: str = "similarity_matrix.csv") -> pd.DataFrame:
+    # Deduplicate columns on observed, ensure we have rows
+    if observed_summary.columns.duplicated().any():
+        logging.warning("[compare] observed: dropping duplicate columns (keep first)")
+        observed_summary = observed_summary.loc[:, ~observed_summary.columns.duplicated(keep='first')]
+
+    if 'ID' not in observed_summary.columns or observed_summary.empty:
+        raise SystemExit("[compare] observed summary is empty or missing 'ID' (check manifest matching)")
+
     obs = observed_summary.set_index('ID').drop(columns=['SUM'], errors='ignore')
     common = [c for c in obs.columns if c in comparison_df.columns]
     if not common:
@@ -396,17 +455,14 @@ def plot_clustermap_vectors(vectors_df, out_dir, normalize_rows=True, name=None,
     Cluster map of sample x AA-pair vectors (optionally row-normalized to proportions).
     Drops rows/cols that would create NaN/Inf distances (e.g., all-zero rows for cosine).
     """
+    # Deduplicate columns so 'ID' is a Series, not a DataFrame
     if vectors_df.columns.duplicated().any():
         logging.warning("[clustermap] duplicate columns detected; dropping duplicates (keep first)")
         vectors_df = vectors_df.loc[:, ~vectors_df.columns.duplicated(keep='first')]
 
-    if 'ID' not in vectors_df.columns:
-        logging.warning("[clustermap] 'ID' column missing; skipping clustermap")
+    if 'ID' not in vectors_df.columns or len(vectors_df) == 0:
+        logging.warning("[clustermap] empty summary or missing 'ID'; skipping clustermap")
         return
-    if len(vectors_df) == 0:
-        logging.warning("[clustermap] empty summary; skipping clustermap")
-        return
-
     X = vectors_df.set_index('ID').drop(columns=['SUM'], errors='ignore')
 
     # drop all-zero rows before cosine (undefined)
