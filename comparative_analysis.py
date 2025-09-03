@@ -622,7 +622,15 @@ def main():
     summary_df = None
     sim_df = None
 
-    # SUMMARIZE (or load existing)
+    # TWO SINGLE-FILE MATRIX COMPARISON
+    if args.step == 'matrix-compare':
+        if not args.matrix_a or not args.matrix_b:
+            raise SystemExit("--matrix-a and --matrix-b are required for 'aa-compare'")
+        out_paths = aa_compare_matrices(args.matrix_a, args.matrix_b, args.out_dir)
+        logging.info(f"[aa-compare] wrote: {out_paths}")
+        return 0
+       
+    # SUMMARIZE (or load existing)   
     if args.step in ('summarize', 'all'):
         if not args.observed_dir:
             raise SystemExit("--observed-dir is required for step 'summarize' or 'all'")
@@ -675,13 +683,7 @@ def main():
             single_file_compare(args.vector_file, args.comparison_dir or "", args.out_dir,
                                 comparison_csv=args.comparison_csv)
 
-   # TWO SINGLE-FILE MATRIX COMPARISON
-    if args.step == 'matrix-compare':
-        if not args.matrix_a or not args.matrix_b:
-            raise SystemExit("--matrix-a and --matrix-b are required for 'aa-compare'")
-        out_paths = aa_compare_matrices(args.matrix_a, args.matrix_b, args.out_dir)
-        logging.info(f"[aa-compare] wrote: {out_paths}")
-        return 0
+   
 
 if __name__ == '__main__':
     main()
