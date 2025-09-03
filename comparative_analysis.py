@@ -158,13 +158,13 @@ def make_proportion_vectors(summary_df: pd.DataFrame) -> pd.DataFrame:
     return props
 
 def load_expected_vector(path: str) -> pd.Series:
-    """
-    Load expected_vectors.csv and return a single expected proportion Series
-    aligned to CANON_COLS. If multiple rows exist, uses the first.
-    """
     exp = pd.read_csv(path)
-    if 'ID' in exp.columns: exp = exp.drop(columns=['ID'])
-    if 'SUM' in exp.columns: exp = exp.drop(columns=['SUM'])
+    # If first column is a sample ID (“ID”), rename it then drop it; keep the AA-pair "ID".
+    if exp.columns[0] == 'ID':
+        exp = exp.rename(columns={'ID': 'SAMPLE_ID'})
+        exp = exp.drop(columns=['SAMPLE_ID'])
+    if 'SUM' in exp.columns:
+        exp = exp.drop(columns=['SUM'])
     exp = exp.reindex(columns=CANON_COLS, fill_value=0.0)
     v = exp.iloc[0].astype(float)
     s = v.sum()
@@ -439,8 +439,13 @@ def summarize_dir(dir_path: str, manifest_path: str | None = None) -> pd.DataFra
         logging.warning("[summarize_dir] dropping duplicate columns (keep first)")
         df = df.loc[:, ~df.columns.duplicated(keep='first')]
 
-    # Keep canonical columns (ID, SUM, and any AA-pair columns that exist)
-    df = df[['ID', 'SUM'] + [c for c in CANON_COLS if c in df.columns] + (['SRC_NORM'] if 'SRC_NORM' in df.columns else [])]
+    # Keep canonical columns (ID, SUM, AA-pairs, SRC_NORM) — but avoid label collisions
+    _conflicts = {'ID', 'SUM', 'SRC_NORM'}
+    pair_cols_present = [c for c in CANON_COLS if (c in df.columns) and (c not in _conflicts)]
+   
+    cols = ['ID', 'SUM'] + pair_cols_present + (['SRC_NORM'] if 'SRC_NORM' in df.columns else [])
+    df = df.loc[:, cols]
+   
 
     # ---------------- Manifest-driven filter (use ID OR SRC_NORM) ----------------
     if manifest_ids:
