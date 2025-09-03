@@ -40,6 +40,15 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sb
+try:
+        from scipy.stats import fisher_exact
+    except Exception:
+        fisher_exact = None
+    try:
+        from scipy.cluster.hierarchy import linkage, leaves_list
+    except Exception:
+        linkage = None
+        leaves_list = None
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -467,25 +476,8 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
       • compute per-cell Fisher tests with BH-FDR
     Outputs are written under <out_dir>/matrices/.
     """
-    from pathlib import Path
-    import logging
-    import pandas as pd
-    import numpy as np
-    import matplotlib.pyplot as plt
-
-    # Optional deps
-    try:
-        from scipy.stats import fisher_exact
-    except Exception:
-        fisher_exact = None
-    try:
-        from scipy.cluster.hierarchy import linkage, leaves_list
-    except Exception:
-        linkage = None
-        leaves_list = None
-
-    mats = Path(out_dir) / "matrices"
-    mats.mkdir(parents=True, exist_ok=True)
+    outp = Path(out_dir)
+    outp.mkdir(parents=True, exist_ok=True)
 
     # Load and align
     A = pd.read_csv(mat_a_path, index_col=0)
@@ -495,9 +487,11 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
     A = A.reindex(index=idx, columns=cols, fill_value=0)
     B = B.reindex(index=idx, columns=cols, fill_value=0)
 
-        # Save aligned counts
-    A.to_csv(mats / f"{label_a}_counts.csv")
-    B.to_csv(mats / f"{label_b}_counts.csv")
+    # Save aligned counts
+    A_counts_fp = outp / f"{label_a}_counts.csv"
+    B_counts_fp = outp / f"{label_b}_counts.csv"
+    A.to_csv(A_counts_fp)
+    B.to_csv(B_counts_fp)
 
     # Proportions & enrichment (A − B)
     At = max(int(A.values.sum()), 1)
@@ -505,12 +499,13 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
     Ap = A / At
     Bp = B / Bt
     D = Ap - Bp
-    D.to_csv(mats / f"{label_a}_minus_{label_b}_enrichment.csv")
+    enrich_fp = outp / f"{label_a}_minus_{label_b}_enrichment.csv"
+    D.to_csv(enrich_fp)
 
     # Plain (unclustered) heatmap of A−B
     vmax = float(np.nanmax(np.abs(D.values))) if np.isfinite(np.nanmax(np.abs(D.values))) else 1.0
     if vmax <= 0:
-        vmax = 1.0  # avoid zero range
+        vmax = 1.0
     fig, ax = plt.subplots(figsize=(8, 6))
     im = ax.imshow(D.values, aspect="auto", vmin=-vmax, vmax=vmax)
     fig.colorbar(im, ax=ax)
@@ -520,10 +515,12 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
     ax.set_yticklabels(D.index, fontsize=8)
     ax.set_title(f"{label_a} − {label_b} enrichment (proportion)")
     fig.tight_layout()
-    fig.savefig(mats / f"{label_a}_minus_{label_b}_enrichment_heatmap.png", dpi=150)
+    plain_png_fp = outp / f"{label_a}_minus_{label_b}_enrichment_heatmap.png"
+    fig.savefig(plain_png_fp, dpi=150)
     plt.close(fig)
 
     # Clustered heatmap of A−B (Ward; rows + cols)
+    clustered_png_fp = None
     if linkage is not None and leaves_list is not None:
         try:
             row_Z = linkage(D.values, method="ward", optimal_ordering=True)
@@ -532,12 +529,13 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
             c_ord = leaves_list(col_Z)
             D_ord = D.iloc[list(r_ord), list(c_ord)]
 
-            # Save clustered CSV + orders
-            D_ord.to_csv(mats / f"{label_a}_minus_{label_b}_enrichment.clustered.csv")
-            pd.Series(D_ord.index, name="row_order").to_csv(mats / f"{label_a}_minus_{label_b}_row_order.csv", index=False)
-            pd.Series(D_ord.columns, name="col_order").to_csv(mats / f"{label_a}_minus_{label_b}_col_order.csv", index=False)
+            clustered_csv_fp = outp / f"{label_a}_minus_{label_b}_enrichment.clustered.csv"
+            row_order_fp = outp / f"{label_a}_minus_{label_b}_row_order.csv"
+            col_order_fp = outp / f"{label_a}_minus_{label_b}_col_order.csv"
+            D_ord.to_csv(clustered_csv_fp)
+            pd.Series(D_ord.index, name="row_order").to_csv(row_order_fp, index=False)
+            pd.Series(D_ord.columns, name="col_order").to_csv(col_order_fp, index=False)
 
-            # Plot clustered heatmap
             fig2, ax2 = plt.subplots(figsize=(8, 6))
             im2 = ax2.imshow(D_ord.values, aspect="auto", vmin=-vmax, vmax=vmax)
             fig2.colorbar(im2, ax=ax2)
@@ -547,7 +545,8 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
             ax2.set_yticklabels(D_ord.index, fontsize=8)
             ax2.set_title(f"{label_a} − {label_b} enrichment (clustered)")
             fig2.tight_layout()
-            fig2.savefig(mats / f"{label_a}_minus_{label_b}_enrichment_clustered.png", dpi=150)
+            clustered_png_fp = outp / f"{label_a}_minus_{label_b}_enrichment_clustered.png"
+            fig2.savefig(clustered_png_fp, dpi=150)
             plt.close(fig2)
         except Exception as e:
             logging.warning(f"[matrix-compare] clustering failed: {e}")
@@ -556,12 +555,8 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
     rows = []
     for i in idx:
         for j in cols:
-            a = int(A.loc[i, j])        # cell in A
-            b = int(B.loc[i, j])        # cell in B
-            c = int(At - a)             # all other cells in A
-            d = int(Bt - b)             # all other cells in B
-
-            # Haldane–Anscombe correction for zeros
+            a = int(A.loc[i, j]); b = int(B.loc[i, j])
+            c = int(At - a);      d = int(Bt - b)
             a2, b2, c2, d2 = a + 0.5, b + 0.5, c + 0.5, d + 0.5
             if fisher_exact is not None:
                 try:
@@ -570,37 +565,36 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B"):
                     p = 1.0
             else:
                 p = 1.0
-
             rows.append({
-                "AA_from": i,
-                "AA_to": j,
-                "A_count": a,
-                "B_count": b,
-                "A_prop": a / At,
-                "B_prop": b / Bt,
+                "AA_from": i, "AA_to": j,
+                "A_count": a, "B_count": b,
+                "A_prop": a / At, "B_prop": b / Bt,
                 "log2_enrichment": float(np.log2((a / At + 1e-12) / (b / Bt + 1e-12))),
                 "pval": float(p),
             })
 
-    df = pd.DataFrame(rows)
-    pvals = df["pval"].values
+    stats_df = pd.DataFrame(rows)
+    pvals = stats_df["pval"].values
     n = len(pvals)
     if n:
         order = np.argsort(pvals)
         ranks = np.arange(1, n + 1)
         q = np.empty_like(pvals, dtype=float)
         q[order] = np.minimum.accumulate((pvals[order] * n / ranks)[::-1])[::-1]
-        df["qval"] = np.clip(q, 0.0, 1.0)
+        stats_df["qval"] = np.clip(q, 0.0, 1.0)
     else:
-        df["qval"] = []
+        stats_df["qval"] = []
 
-    df.to_csv(mats / "cell_stats.csv", index=False)
+    stats_fp = outp / "cell_stats.csv"
+    stats_df.to_csv(stats_fp, index=False)
 
     return {
-        f"{label_a}_counts": str((mats / f"{label_a}_counts.csv").resolve()),
-        f"{label_b}_counts": str((mats / f"{label_b}_counts.csv").resolve()),
-        f"{label_a}_minus_{label_b}_enrichment": str((mats / f"{label_a}_minus_{label_b}_enrichment.csv").resolve()),
-        "cell_stats": str((mats / "cell_stats.csv").resolve()),
+        f"{label_a}_counts": str(A_counts_fp.resolve()),
+        f"{label_b}_counts": str(B_counts_fp.resolve()),
+        f"{label_a}_minus_{label_b}_enrichment": str(enrich_fp.resolve()),
+        "enrichment_heatmap": str(plain_png_fp.resolve()),
+        "enrichment_heatmap_clustered": str(clustered_png_fp.resolve()) if clustered_png_fp else None,
+        "cell_stats": str(stats_fp.resolve()),
     }
 
 # ---------- CLI ----------
