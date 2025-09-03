@@ -531,37 +531,61 @@ def compare_matrices(mat_a_path, mat_b_path, out_dir, label_a="A", label_b="B", 
     enrich_csv_fp = outp / f"{label_a}_minus_{label_b}_enrichment.csv"
     D.to_csv(enrich_csv_fp)
 
-    # Plain heatmap
-enrich_png_fp = outp / f"{label_a}_minus_{label_b}_enrichment_heatmap.png"
-if proportions:
-    _plot_refined_heatmap(D, enrich_png_fp, f"{label_a} − {label_b} enrichment (proportion)")
-else:
-    vmax = float(np.nanmax(np.abs(D.values))) if np.isfinite(np.nanmax(np.abs(D.values))) else 1.0
-    if vmax <= 0: vmax = 1.0
-    fig, ax = plt.subplots(figsize=(8, 6))
-    im = ax.imshow(D.values, aspect="auto", vmin=-vmax, vmax=vmax)
-    fig.colorbar(im, ax=ax, label="Δ proportion")
-    ax.set_xticks(range(len(D.columns))); ax.set_xticklabels(D.columns, rotation=90, fontsize=8)
-    ax.set_yticks(range(len(D.index)));  ax.set_yticklabels(D.index, fontsize=8)
-    ax.set_title(f"{label_a} − {label_b} enrichment (proportion)")
-    fig.tight_layout(); fig.savefig(enrich_png_fp, dpi=150); plt.close(fig)
-
-# Clustered heatmap
-if linkage is not None and leaves_list is not None:
-    ...
-    clustered_png_fp = outp / f"{label_a}_minus_{label_b}_enrichment_clustered.png"
+    # Plain (unclustered) heatmap
+    enrich_png_fp = outp / f"{label_a}_minus_{label_b}_enrichment_heatmap.png"
     if proportions:
-        _plot_refined_heatmap(D_ord, clustered_png_fp, f"{label_a} − {label_b} enrichment (clustered)")
+        _plot_refined_heatmap(D, enrich_png_fp, f"{label_a} − {label_b} enrichment (proportion)")
     else:
-        vmax = float(np.nanmax(np.abs(D_ord.values))) if np.isfinite(np.nanmax(np.abs(D_ord.values))) else 1.0
+        vmax = float(np.nanmax(np.abs(D.values))) if np.isfinite(np.nanmax(np.abs(D.values))) else 1.0
         if vmax <= 0: vmax = 1.0
-        fig2, ax2 = plt.subplots(figsize=(8, 6))
-        im2 = ax2.imshow(D_ord.values, aspect="auto", vmin=-vmax, vmax=vmax)
-        fig2.colorbar(im2, ax=ax2, label="Δ proportion")
-        ax2.set_xticks(range(len(D_ord.columns))); ax2.set_xticklabels(D_ord.columns, rotation=90, fontsize=8)
-        ax2.set_yticks(range(len(D_ord.index)));  ax2.set_yticklabels(D_ord.index, fontsize=8)
-        ax2.set_title(f"{label_a} − {label_b} enrichment (clustered)")
-        fig2.tight_layout(); fig2.savefig(clustered_png_fp, dpi=150); plt.close(fig2)
+        fig, ax = plt.subplots(figsize=(8, 6))
+        im = ax.imshow(D.values, aspect="auto", vmin=-vmax, vmax=vmax)
+        fig.colorbar(im, ax=ax, label="Δ proportion")
+        ax.set_xticks(range(len(D.columns))); ax.set_xticklabels(D.columns, rotation=90, fontsize=8)
+        ax.set_yticks(range(len(D.index)));  ax.set_yticklabels(D.index, fontsize=8)
+        ax.set_title(f"{label_a} − {label_b} enrichment (proportion)")
+        fig.tight_layout(); fig.savefig(enrich_png_fp, dpi=150); plt.close(fig)
+
+    # Clustered heatmap (Ward)
+    clustered_png_fp = None
+    clustered_csv_fp = None
+    row_order_fp = None
+    col_order_fp = None
+    if linkage is not None and leaves_list is not None:
+        try:
+            row_Z = linkage(D.values, method="ward", optimal_ordering=True)
+            col_Z = linkage(D.values.T, method="ward", optimal_ordering=True)
+            r_ord = leaves_list(row_Z)
+            c_ord = leaves_list(col_Z)
+            D_ord = D.iloc[list(r_ord), list(c_ord)]
+
+            clustered_csv_fp = outp / f"{label_a}_minus_{label_b}_enrichment.clustered.csv"
+            row_order_fp = outp / f"{label_a}_minus_{label_b}_row_order.csv"
+            col_order_fp = outp / f"{label_a}_minus_{label_b}_col_order.csv"
+            D_ord.to_csv(clustered_csv_fp)
+            pd.Series(D_ord.index,   name="row_order").to_csv(row_order_fp, index=False)
+            pd.Series(D_ord.columns, name="col_order").to_csv(col_order_fp, index=False)
+
+            clustered_png_fp = outp / f"{label_a}_minus_{label_b}_enrichment_clustered.png"
+            if proportions:
+                _plot_refined_heatmap(D_ord, clustered_png_fp, f"{label_a} − {label_b} enrichment (clustered)")
+            else:
+                vmax = float(np.nanmax(np.abs(D_ord.values))) if np.isfinite(np.nanmax(np.abs(D_ord.values))) else 1.0
+                if vmax <= 0:
+                    vmax = 1.0
+                fig2, ax2 = plt.subplots(figsize=(8, 6))
+                im2 = ax2.imshow(D_ord.values, aspect="auto", vmin=-vmax, vmax=vmax)
+                fig2.colorbar(im2, ax=ax2, label="Δ proportion")
+                ax2.set_xticks(range(len(D_ord.columns)))
+                ax2.set_xticklabels(D_ord.columns, rotation=90, fontsize=8)
+                ax2.set_yticks(range(len(D_ord.index)))
+                ax2.set_yticklabels(D_ord.index, fontsize=8)
+                ax2.set_title(f"{label_a} − {label_b} enrichment (clustered)")
+                fig2.tight_layout()
+                fig2.savefig(clustered_png_fp, dpi=150)
+                plt.close(fig2)
+        except Exception as e:
+            logging.warning(f"[matrix-compare] clustering failed: {e}")
 
     # Per-cell stats (Fisher + BH-FDR) with labeled columns
     rows = []
