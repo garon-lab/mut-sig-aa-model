@@ -424,28 +424,28 @@ def summarize_dir(dir_path: str, manifest_path: str | None = None) -> pd.DataFra
     df = df[['ID', 'SUM'] + [c for c in CANON_COLS if c in df.columns]]
 
     if manifest_ids:
-    norm_set = set(manifest_norm_map.keys())
-    # normalize every row’s ID and keep those in the normalized manifest set
-    row_norm  = df['ID'].astype(str).map(normalize_id)
-    keep_mask = row_norm.isin(norm_set)
-
-    # robust count & mask (works even if keep_mask is nullable boolean or has NA)
-    mask_array = keep_mask.fillna(False).to_numpy()
-    kept = int(mask_array.sum())
-
-    if kept:
-        # map back to canonical manifest text (so outputs use the manifest’s spelling)
-        df.loc[mask_array, 'ID'] = row_norm[mask_array].map(manifest_norm_map).values
-        logging.info(f"[summarize_dir] manifest filter: {len(df)} -> {kept} rows")
-        df = df.loc[mask_array]
-    else:
-        sample_files   = [Path(f).stem for f in files[:5]]
-        sample_manifest = manifest_ids[:5]
-        logging.warning("[summarize_dir] 0 rows matched the manifest after normalization. "
-                        "Check filename↔ID mapping.\n"
-                        f"  e.g. file stems: {sample_files}\n"
-                        f"  e.g. manifest:  {sample_manifest}")
-        df = df.iloc[0:0]
+       norm_set = set(manifest_norm_map.keys())
+       # normalize every row’s ID and keep those in the normalized manifest set
+       row_norm  = df['ID'].astype(str).map(normalize_id)
+       keep_mask = row_norm.isin(norm_set)
+   
+       # robust count & mask (works even if keep_mask is nullable boolean or has NA)
+       mask_array = keep_mask.fillna(False).to_numpy()
+       kept = int(mask_array.sum())
+   
+       if kept:
+           # map back to canonical manifest text (so outputs use the manifest’s spelling)
+           df.loc[mask_array, 'ID'] = row_norm[mask_array].map(manifest_norm_map).values
+           logging.info(f"[summarize_dir] manifest filter: {len(df)} -> {kept} rows")
+           df = df.loc[mask_array]
+       else:
+           sample_files   = [Path(f).stem for f in files[:5]]
+           sample_manifest = manifest_ids[:5]
+           logging.warning("[summarize_dir] 0 rows matched the manifest after normalization. "
+                           "Check filename↔ID mapping.\n"
+                           f"  e.g. file stems: {sample_files}\n"
+                           f"  e.g. manifest:  {sample_manifest}")
+           df = df.iloc[0:0]
 
 
     return df
