@@ -441,37 +441,37 @@ def single_file_compare(vector_file: str, comparison_dir: str, out_dir: str, com
 
 def compare_matrices(mat_a_path, mat_b_path, out_dir):
    mats = Path(out_dir) / "matrices"; mats.mkdir(parents=True, exist_ok=True)
-    A = pd.read_csv(mat_a_path, index_col=0)
-    B = pd.read_csv(mat_b_path, index_col=0)
-    # align labels
-    idx = sorted(set(A.index) | set(B.index))
-    cols = sorted(set(A.columns) | set(B.columns))
-    A = A.reindex(index=idx, columns=cols, fill_value=0)
-    B = B.reindex(index=idx, columns=cols, fill_value=0)
-    # save aligned counts
-    (mats / "A_counts.csv").write_text(A.to_csv(index=True))
-    (mats / "B_counts.csv").write_text(B.to_csv(index=True))
-    # proportions & enrichment (A − B)
-    At = max(A.values.sum(), 1); Bt = max(B.values.sum(), 1)
-    Ap = A / At; Bp = B / Bt
-    (Ap - Bp).to_csv(mats / "A_minus_B_enrichment.csv")
-    D = Ap - Bp
-    D.to_csv(mats / "A_minus_B_enrichment.csv")
-    # ---------- Plain (unclustered) heatmap of A−B ----------
-    v = float(np.nanmax(np.abs(D.values))) if np.isfinite(np.nanmax(np.abs(D.values))) else 1.0
-    v = v if v > 0 else 1.0  # avoid zero range
-    fig, ax = plt.subplots(figsize=(8, 6))
-    im = ax.imshow(D.values, aspect="auto", vmin=-v, vmax=v)
-    fig.colorbar(im, ax=ax)
-    ax.set_xticks(range(len(D.columns))); ax.set_xticklabels(D.columns, rotation=90, fontsize=8)
-    ax.set_yticks(range(len(D.index)));  ax.set_yticklabels(D.index, fontsize=8)
-    ax.set_title("A − B enrichment (proportion)")
-    fig.tight_layout()
-    fig.savefig(mats / "A_minus_B_enrichment_heatmap.png", dpi=150); plt.close(fig)
+   A = pd.read_csv(mat_a_path, index_col=0)
+   B = pd.read_csv(mat_b_path, index_col=0)
+   # align labels
+   idx = sorted(set(A.index) | set(B.index))
+   cols = sorted(set(A.columns) | set(B.columns))
+   A = A.reindex(index=idx, columns=cols, fill_value=0)
+   B = B.reindex(index=idx, columns=cols, fill_value=0)
+   # save aligned counts
+   (mats / "A_counts.csv").write_text(A.to_csv(index=True))
+   (mats / "B_counts.csv").write_text(B.to_csv(index=True))
+   # proportions & enrichment (A − B)
+   At = max(A.values.sum(), 1); Bt = max(B.values.sum(), 1)
+   Ap = A / At; Bp = B / Bt
+   (Ap - Bp).to_csv(mats / "A_minus_B_enrichment.csv")
+   D = Ap - Bp
+   D.to_csv(mats / "A_minus_B_enrichment.csv")
+   # ---------- Plain (unclustered) heatmap of A−B ----------
+   v = float(np.nanmax(np.abs(D.values))) if np.isfinite(np.nanmax(np.abs(D.values))) else 1.0
+   v = v if v > 0 else 1.0  # avoid zero range
+   fig, ax = plt.subplots(figsize=(8, 6))
+   im = ax.imshow(D.values, aspect="auto", vmin=-v, vmax=v)
+   fig.colorbar(im, ax=ax)
+   ax.set_xticks(range(len(D.columns))); ax.set_xticklabels(D.columns, rotation=90, fontsize=8)
+   ax.set_yticks(range(len(D.index)));  ax.set_yticklabels(D.index, fontsize=8)
+   ax.set_title("A − B enrichment (proportion)")
+   fig.tight_layout()
+   fig.savefig(mats / "A_minus_B_enrichment_heatmap.png", dpi=150); plt.close(fig)
 
-    # ---------- Clustered heatmap of A−B (Ward; rows+cols) ----------
-    if linkage is not None and leaves_list is not None:
-        try:
+   # ---------- Clustered heatmap of A−B (Ward; rows+cols) ----------
+   if linkage is not None and leaves_list is not None:
+       try:
             # cluster rows, then columns
             row_Z = linkage(D.values,   method="ward", optimal_ordering=True)
             col_Z = linkage(D.values.T, method="ward", optimal_ordering=True)
