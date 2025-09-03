@@ -357,9 +357,18 @@ def plot_clustermap_vectors(vectors_df, out_dir, normalize_rows=True, name=None,
     Cluster map of sample x AA-pair vectors (optionally row-normalized to proportions).
     Drops rows/cols that would create NaN/Inf distances (e.g., all-zero rows for cosine).
     """
+    if vectors_df.columns.duplicated().any():
+        logging.warning("[clustermap] duplicate columns detected; dropping duplicates (keep first)")
+        vectors_df = vectors_df.loc[:, ~vectors_df.columns.duplicated(keep='first')]
+
+    if 'ID' not in vectors_df.columns:
+        logging.warning("[clustermap] 'ID' column missing; skipping clustermap")
+        return
+    if len(vectors_df) == 0:
+        logging.warning("[clustermap] empty summary; skipping clustermap")
+        return
+
     X = vectors_df.set_index('ID').drop(columns=['SUM'], errors='ignore')
-    # force numeric & clean non-finites
-    X = X.apply(pd.to_numeric, errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     # drop all-zero rows before cosine (undefined)
     if normalize_rows:
