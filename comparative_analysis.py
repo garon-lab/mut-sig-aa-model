@@ -676,12 +676,12 @@ def main():
                                 comparison_csv=args.comparison_csv)
 
    # TWO SINGLE-FILE MATRIX COMPARISON
-   if args.step == 'matrix-compare':
-      if not args.matrix_a or not args.matrix_b:
-         raise SystemExit("--matrix-a and --matrix-b are required for 'aa-compare'")
-      out_paths = aa_compare_matrices(args.matrix_a, args.matrix_b, args.out_dir)
-      logging.info(f"[aa-compare] wrote: {out_paths}")
-      return 0
+    if args.step == 'matrix-compare':
+        if not args.matrix_a or not args.matrix_b:
+            raise SystemExit("--matrix-a and --matrix-b are required for 'aa-compare'")
+        out_paths = aa_compare_matrices(args.matrix_a, args.matrix_b, args.out_dir)
+        logging.info(f"[aa-compare] wrote: {out_paths}")
+        return 0
 
 if __name__ == '__main__':
     main()
