@@ -342,17 +342,18 @@ def summarize_dir(dir_path: str, manifest_path: str | None = None) -> pd.DataFra
         df = df.loc[:, ~df.columns.duplicated(keep='first')]
 
     # Keep canonical columns only
-    df = df[['ID','SUM'] + [c for c in CANON_COLS if c in df.columns]]
+    df = df[['ID', 'SUM'] + [c for c in CANON_COLS if c in df.columns]]
 
     # Final manifest filter (exact match to original manifest tokens)
     if manifest_ids:
-        mask = df['ID'].astype(str).isin(set(manifest_ids))
-        before, after = len(df), int(mask.sum())
+        mask = df['ID'].astype(str).isin(set(manifest_ids)).to_numpy()  # 1-D mask
+        before = len(df)
+        after = int(np.count_nonzero(mask))
         if after == 0:
             logging.warning("[summarize_dir] 0 rows matched the manifest; check filename↔ID mapping")
         else:
             logging.info(f"[summarize_dir] manifest filter: {before} -> {after} rows")
-        df = df.loc[mask.values]
+        df = df.loc[mask]
 
     return df
 
