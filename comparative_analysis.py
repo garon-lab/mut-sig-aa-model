@@ -114,7 +114,7 @@ HEADING = ['AE','AG','AP','AS','AT','AV','CF','CG','CR','CS','CW','CX','CY',
            'WL','WR','WS','WX','XC','XE','XG','XK','XL','XQ','XR','XS','XW','XY','YC',
            'YD','YF','YH','YN','YS','YX']
 
-CANON_COLS = HEADING
+CANON_COLS = PAIR_COLS
 CANON_SET  = set(CANON_COLS)
 
 # Ensure all HEADING codes are valid AA pairs from AA (incl. X)
@@ -439,6 +439,97 @@ def single_file_compare(vector_file: str, comparison_dir: str, out_dir: str, com
     sim = compare_vectors(df, comp, out_dir, outfile="single_similarity.csv")
     plot_similarity_heatmap(sim, out_dir, name="single_similarity_heatmap.png")
 
+def compare_matrices(mat_a_path, mat_b_path, out_dir):
+   mats = Path(out_dir) / "matrices"; mats.mkdir(parents=True, exist_ok=True)
+    A = pd.read_csv(mat_a_path, index_col=0)
+    B = pd.read_csv(mat_b_path, index_col=0)
+    # align labels
+    idx = sorted(set(A.index) | set(B.index))
+    cols = sorted(set(A.columns) | set(B.columns))
+    A = A.reindex(index=idx, columns=cols, fill_value=0)
+    B = B.reindex(index=idx, columns=cols, fill_value=0)
+    # save aligned counts
+    (mats / "A_counts.csv").write_text(A.to_csv(index=True))
+    (mats / "B_counts.csv").write_text(B.to_csv(index=True))
+    # proportions & enrichment (A − B)
+    At = max(A.values.sum(), 1); Bt = max(B.values.sum(), 1)
+    Ap = A / At; Bp = B / Bt
+    (Ap - Bp).to_csv(mats / "A_minus_B_enrichment.csv")
+    D = Ap - Bp
+    D.to_csv(mats / "A_minus_B_enrichment.csv")
+    # ---------- Plain (unclustered) heatmap of A−B ----------
+    v = float(np.nanmax(np.abs(D.values))) if np.isfinite(np.nanmax(np.abs(D.values))) else 1.0
+    v = v if v > 0 else 1.0  # avoid zero range
+    fig, ax = plt.subplots(figsize=(8, 6))
+    im = ax.imshow(D.values, aspect="auto", vmin=-v, vmax=v)
+    fig.colorbar(im, ax=ax)
+    ax.set_xticks(range(len(D.columns))); ax.set_xticklabels(D.columns, rotation=90, fontsize=8)
+    ax.set_yticks(range(len(D.index)));  ax.set_yticklabels(D.index, fontsize=8)
+    ax.set_title("A − B enrichment (proportion)")
+    fig.tight_layout()
+    fig.savefig(mats / "A_minus_B_enrichment_heatmap.png", dpi=150); plt.close(fig)
+
+    # ---------- Clustered heatmap of A−B (Ward; rows+cols) ----------
+    if linkage is not None and leaves_list is not None:
+        try:
+            # cluster rows, then columns
+            row_Z = linkage(D.values,   method="ward", optimal_ordering=True)
+            col_Z = linkage(D.values.T, method="ward", optimal_ordering=True)
+            r_ord = leaves_list(row_Z)
+            c_ord = leaves_list(col_Z)
+            D_ord = D.iloc[list(r_ord), list(c_ord)]
+            # save clustered CSV + orders
+            D_ord.to_csv(mats / "A_minus_B_enrichment.clustered.csv")
+            pd.Series(D_ord.index,   name="row_order").to_csv(mats / "A_minus_B_row_order.csv", index=False)
+            pd.Series(D_ord.columns, name="col_order").to_csv(mats / "A_minus_B_col_order.csv", index=False)
+            # plot clustered heatmap
+            fig2, ax2 = plt.subplots(figsize=(8, 6))
+            im2 = ax2.imshow(D_ord.values, aspect="auto", vmin=-v, vmax=v)
+            fig2.colorbar(im2, ax=ax2)
+            ax2.set_xticks(range(len(D_ord.columns))); ax2.set_xticklabels(D_ord.columns, rotation=90, fontsize=8)
+            ax2.set_yticks(range(len(D_ord.index)));  ax2.set_yticklabels(D_ord.index, fontsize=8)
+            ax2.set_title("A − B enrichment (clustered)")
+            fig2.tight_layout()
+            fig2.savefig(mats / "A_minus_B_enrichment_clustered.png", dpi=150); plt.close(fig2)
+        except Exception as e:
+            import logging
+            logging.warning(f"[aa-compare] clustering failed: {e}")
+    
+    # per-cell stats
+    rows = []
+    for i in idx:
+        for j in cols:
+            a = int(A.loc[i, j]); b = int(B.loc[i, j])
+            c = int(At - a);      d = int(Bt - b)
+            a2, b2, c2, d2 = a + 0.5, b + 0.5, c + 0.5, d + 0.5  # Haldane correction
+            if fisher_exact:
+                try:
+                    _, p = fisher_exact([[a2, c2], [b2, d2]], alternative="two-sided")
+                except Exception:
+                    p = 1.0
+            else:
+                p = 1.0
+            rows.append({
+                "AA_from": i, "AA_to": j,
+                "A_count": a, "B_count": b,
+                "A_prop": a / At, "B_prop": b / Bt,
+                "log2_enrichment": float(np.log2((a/At + 1e-12) / (b/Bt + 1e-12))),
+                "pval": float(p),
+            })
+    df = pd.DataFrame(rows)
+    # BH-FDR
+    p = df["pval"].values; n = len(p); order = np.argsort(p); ranks = np.arange(1, n + 1)
+    q = np.empty_like(p, dtype=float)
+    q[order] = np.minimum.accumulate((p[order] * n / ranks)[::-1])[::-1]
+    df["qval"] = np.clip(q, 0.0, 1.0)
+    df.to_csv(mats / "cell_stats.csv", index=False)
+    return {
+        "A_counts": str((mats / "A_counts.csv").resolve()),
+        "B_counts": str((mats / "B_counts.csv").resolve()),
+        "A_minus_B_enrichment": str((mats / "A_minus_B_enrichment.csv").resolve()),
+        "cell_stats": str((mats / "cell_stats.csv").resolve()),
+    }
+
 # ---------- CLI ----------
 
 def parse_args():
@@ -456,10 +547,12 @@ def parse_args():
                    help='Directory for outputs')
     p.add_argument('--vector-file', '--vector_file', dest='vector_file',
                    help='Path to an existing summary CSV (to skip summarize or for single-file)')
-    p.add_argument('--step', choices=['summarize','compare','heatmap','single-file','all'],
+    p.add_argument('--step', choices=['summarize','compare','heatmap','single-file', 'matrix-compare','all'],
                    default='all', help='Which step(s) to run')
     p.add_argument('--cluster-metric', choices=['cosine','euclidean','correlation'],
                    default='cosine', help='Distance metric for clustermap (default: cosine)')
+    p.add_argument('--matrix-a', help='21x21 AA matrix CSV for set A')
+    p.add_argument('--matrix-b', help='21x21 AA matrix CSV for set B')
 
     return p.parse_args()
 
@@ -528,6 +621,14 @@ def main():
         if args.comparison_dir or args.comparison_csv:
             single_file_compare(args.vector_file, args.comparison_dir or "", args.out_dir,
                                 comparison_csv=args.comparison_csv)
+
+   # TWO SINGLE-FILE MATRIX COMPARISON
+   if args.step == 'matrix-compare':
+      if not args.matrix_a or not args.matrix_b:
+         raise SystemExit("--matrix-a and --matrix-b are required for 'aa-compare'")
+      out_paths = aa_compare_matrices(args.matrix_a, args.matrix_b, args.out_dir)
+      logging.info(f"[aa-compare] wrote: {out_paths}")
+      return 0
 
 if __name__ == '__main__':
     main()
