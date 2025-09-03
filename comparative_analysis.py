@@ -424,29 +424,38 @@ def summarize_dir(dir_path: str, manifest_path: str | None = None) -> pd.DataFra
     df = df[['ID', 'SUM'] + [c for c in CANON_COLS if c in df.columns]]
 
     if manifest_ids:
+       # 1) extra-clean manifest ids: strip BOM and whitespace
+       raw = pd.Series(manifest_ids, dtype=str).str.replace('\ufeff', '', regex=False).str.strip()
+       manifest_norm_map = {normalize_id(x): x for x in raw}
        norm_set = set(manifest_norm_map.keys())
-       # normalize every row’s ID and keep those in the normalized manifest set
+   
+       # 2) normalize row IDs and build a robust boolean mask (no NA)
        row_norm  = df['ID'].astype(str).map(normalize_id)
        keep_mask = row_norm.isin(norm_set)
-   
-       # robust count & mask (works even if keep_mask is nullable boolean or has NA)
        mask_array = keep_mask.fillna(False).to_numpy()
        kept = int(mask_array.sum())
    
+       # 3) DEBUG: show what we’re actually comparing
+       if kept == 0:
+           file_norms = sorted({normalize_id(Path(f).stem) for f in files})
+           mani_norms = sorted(norm_set)
+           logging.info(f"[debug] normalized stems (first 10): {file_norms[:10]}")
+           logging.info(f"[debug] normalized manifest (first 10): {mani_norms[:10]}")
+           logging.info(f"[debug] intersection size: {len(set(file_norms) & norm_set)}")
+   
        if kept:
-           # map back to canonical manifest text (so outputs use the manifest’s spelling)
+           # map back to canonical manifest spelling
            df.loc[mask_array, 'ID'] = row_norm[mask_array].map(manifest_norm_map).values
            logging.info(f"[summarize_dir] manifest filter: {len(df)} -> {kept} rows")
            df = df.loc[mask_array]
        else:
-           sample_files   = [Path(f).stem for f in files[:5]]
+           sample_files    = [Path(f).stem for f in files[:5]]
            sample_manifest = manifest_ids[:5]
            logging.warning("[summarize_dir] 0 rows matched the manifest after normalization. "
                            "Check filename↔ID mapping.\n"
                            f"  e.g. file stems: {sample_files}\n"
                            f"  e.g. manifest:  {sample_manifest}")
            df = df.iloc[0:0]
-
 
     return df
 
