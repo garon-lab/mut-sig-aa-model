@@ -8,22 +8,23 @@ It processes per-case inputs, generates substitution-level outputs, aggregates c
 Features:
 1. Parallelized per-case analysis using ProcessPoolExecutor.
 2. Statistical summaries of each omic layer across samples.
-3. Substitution extraction for comparison with dna-analysis.
+3. Substitution extraction for comparison with dna-analysis (optional via --emit_substitutions).
 4. Gene annotation based on presence in healthy lung tissue using the Human Protein Atlas.
-5. Plot generation (e.g., boxplots, scatter plots, volcano plots) for visualization.
-6. Cohort-level statistics and plots stratified by protein-expression.
+5. Plot generation (e.g., boxplots, scatter plots, volcano plots) for visualization (optional via --make_plots).
+6. Cohort-level statistics and plots stratified by protein-expression (optional via --cohort_plots, --cohort_plots_by_protein).
 
-Dependencies: pandas, numpy, matplotlib, scipy (optional: statistics, clustering)
+Dependencies: pandas, numpy, matplotlib, scipy (optional: statistics, clustering), statsmodels (optional)
 
 Usage:
     python multiomic_analysis.py \
-        --integrated_dir <directory of integrated CSVs> \
-        --manifest <path to case-ids> \
+        --integrated_dir <directory of *_integrated.csv> \
         --out_dir <output directory> \
-        --ref_zip <path to reference files> \
-        --make_plots --emit_substitutions \
-        --cohort_plots --cohort_plots_by_protein \
-        --jobs 8 --log_level INFO
+        [--manifest <case_ids.tsv>] \
+        [--ref_zip <reference.zip> | --refs_dir <refs_dir>] \
+        [--lung_tsv <lung-only.tsv>] [--gene_reads <gene-reads.gct>] \
+        [--make_plots] [--emit_substitutions] [--cohort_plots] [--cohort_plots_by_protein] \
+        [--plot_ext png|pdf|svg] [--log2fc_thr 1.0] [--pseudocount 1.0] \
+        [--ch3_use_m | --ch3_beta] [--jobs N] [--verbose]
 
 Arguments:
 Required
@@ -42,7 +43,10 @@ Reference discovery (any combination)
   --ref_zip                 reference.zip containing lung-only.tsv and/or gene-reads.gct
   --refs_dir                Directory to search by name (e.g., lung-only.tsv, gene-reads.gct)
   --lung_tsv                TSV/CSV list of lung-expressed genes (column auto-detected or --lung_gene_col)
-  --gene_reads              Gene-reads table (TSV/CSV or GCT; GCT totals auto-summed to __TOTAL__)
+  --gene_reads              Gene-reads table (TSV/CSV or GCT; GCT totals auto-summed)
+  --lung_name               File name for lung list inside --refs_dir (default: "lung-only.tsv")
+  --gene_reads_name         File name for gene_reads inside --refs_dir (default: "gene-reads.gct")
+  --no_json                 Ignore JSON auto pick-up
   --lung_gene_col           Column name in lung TSV (default: auto)
   --gene_reads_sep          Delimiter for --gene_reads (auto by extension if omitted)
   --gene_reads_value_col    Numeric value column for --gene_reads (default: first numeric; GCT uses __TOTAL__)
@@ -58,6 +62,10 @@ Analysis/plots
   --log2fc_thr              Threshold for up/down calling on Log2FC (default: 1.0)
   --pseudocount             Pseudocount for Log2FC computation (default: 1.0)
   --plot_ext                Plot format: png|pdf|svg (default: png)
+  --ch3_use_m               Use M-values for CH3 [log2(beta/(1-beta)] (default: enabled)
+  --ch3_beta                Use beta-based CH3 (overrides --ch3_use_m if given)
+  --beta_eps                Clipping epsilon for β→M conversion; β clipped to [eps, 1-eps] (default: 1e-6)
+  --no_dedupe               Disable per-case de-duplication pass
 
 
 Output:
@@ -71,14 +79,36 @@ Output:
 │   ├── C3L-00001_substitutions.tsv
 │   ├── C3L-00002_substitutions.tsv
 │   └── ...
+|   └── SNP_protein_by_case/
+|        ├── C3L-00001.csv
+|        ├── C3L-00001.matrix.csv
+│        └── ...
+|   └── SNV_protein_by_case/
+|        ├── C3L-00001.csv
+|        ├── C3L-00001.matrix.csv
+│        └── ...     
+|   └── cohort/ 
+|       └── SNP/
+|           ├── aa_matrix_SNP_ion_only_prop.csv         #21x21 matrix with proportion of substitutions with protein expression
+|           ├── aa_matrix_SNP_ion_only.csv              #21x21 matrix with count of subtitutions with protein expression
+|           ├── aa_matrix_SNP.csv                       #21x21 matrix with count of substitutions
+|           ├── signature12_SNP.csv                     #count of DNA mutation (12 total) leading to substitutions (e.g., A<C,A<G,A<T,C>A,...)
+│           └── substitutions_SNP.tsv [case_id|Gene|AA_start|AA_end|Substitution|REF|ALT|Log2FC_RNA|Delta_CNV|M_CH3|Protein_Present|Ion|Ion-Normal]
+|       └── SNV/
+|           ├── aa_matrix_SNV_ion_only_prop.csv         #21x21 matrix with proportion of substitutions with protein expression
+|           ├── aa_matrix_SNV_ion_only.csv              #21x21 matrix with count of subtitutions with protein expression
+|           ├── aa_matrix_SNV.csv                       #21x21 matrix with count of substitutions
+|           ├── signature12_SNV.csv                     #count of DNA mutation (12 total) leading to substitutions (e.g., A<C,A<G,A<T,C>A,...)
+│           └── substitutions_SNV.tsv [case_id|Gene|AA_start|AA_end|Substitution|REF|ALT|Log2FC_RNA|Delta_CNV|M_CH3|Protein_Present|Ion|Ion-Normal]
 │
-├── rna_vs_gene_reads/               # optional merge with gene-reads (if ref provided)
+├── rna_vs_gene_reads/               # optional merge with reference gene-reads (if ref provided)
 │   ├── C3L-00001_rna_merge.csv
 │   └── ...
 │
 ├── cohort/
-│   ├── analysis_summary.csv
-│   ├── substitutions_summary.tsv
+│   ├── analysis_summary.csv            # csv with case_id, RNA_up, RNA_down, RNA_n_with_log2fc, ...same for CNV, CH3, protein, rna_vs_gene_reads (reference) n|pearson|spearman
+│   ├── substitutions_summary.tsv       # csv with Gene, Substitution (AA format), n_cases, cases, mean_log2fc_[RNA|CNV|CH3], protein_hit_cases
+│   ├── statistics_summary.tsv          # csv with case_id, Log2FC_RNA, Delta_CNV, DeltaM_CH3, Log2FC_Protein, Ion, Ion-Normal with mean/median listed, SNP|SNV_genes|rows (_COHORT_ at bottom)
 │   ├── cohort_boxplot_RNA.png
 │   ├── cohort_boxplot_CNV.png
 │   ├── cohort_boxplot_CH3.png
@@ -87,6 +117,16 @@ Output:
 │   ├── cohort_volcano_CNV.png
 │   ├── cohort_volcano_CH3.png
 │   ├── cohort_volcano_Protein.png
+│   ├── cohort_volcano_RNA_top100.csv
+│   ├── cohort_volcano_CNV_top100.csv
+│   ├── cohort_volcano_CH3_top100.csv
+│   ├── correlation_heatmap.csv
+│   ├── correlation_heatmap.png
+│   ├── dendrogram_leaves.csv
+│   ├── dendrogram.csv
+│   ├── dendrogram.png
+│   ├── volcano_summary_merged.csv            # csv with layer (RNA, CH3, Protein), n_genes, n_sig_q<0.05, n_sig_up, n_sig_down, prop_sig, mean_abs_effect
+│   ├── volcano_top100_merged.csv             # csv with layer (RNA, CH3, Protein), Gene, MeanLog2FC, pval, qval, neglog10q, mean ŒîM
 │   └── cohort_by_protein/
 │       ├── prot_yes/...
 │       ├── prot_no/...
@@ -107,8 +147,8 @@ from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-import zipfile
+from typing import Dict, List, Optional, Tuple, Sequence
+
 import numpy as np
 import pandas as pd
 
@@ -116,16 +156,20 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+plt.ioff()
 
+# Optional SciPy (stats + clustering)
 try:
-    from scipy import stats as _scistats
+    from scipy.stats import ttest_ind, mannwhitneyu, fisher_exact, ttest_1samp
 except Exception:
-    _scistats = None
+    ttest_ind = mannwhitneyu = fisher_exact = ttest_1samp = None
+
 try:
     from scipy.cluster.hierarchy import linkage, dendrogram
 except Exception:
     linkage = dendrogram = None
 
+#=====================================================================
 
 # ---------------- Logging ----------------
 
@@ -136,26 +180,165 @@ def _setup_logging(out_dir: Path, level_name: str = "INFO") -> None:
     root = logging.getLogger()
     for h in list(root.handlers):
         root.removeHandler(h)
-    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S")
     fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
     fh.setLevel(level); fh.setFormatter(fmt)
     ch = logging.StreamHandler()
     ch.setLevel(level); ch.setFormatter(fmt)
     root.setLevel(level); root.addHandler(fh); root.addHandler(ch)
 
-
 # ---------------- IO helpers ----------------
 
 def _sniff_sep_from_path(path: Path, fallback: str = "\t") -> str:
-    name = str(path).lower()
-    if name.endswith((".tsv", ".txt")): return "\t"
-    if name.endswith(".csv"): return ","
+    s = str(path).lower()
+    if s.endswith((".tsv", ".txt")): return "\t"
+    if s.endswith(".csv"): return ","
     return fallback
+
+import zipfile
+
+def _extract_refs_from_zip(
+    ref_zip: Optional[str],
+    refs_dir: Optional[str],
+    out_dir: Path,
+    lung_name: str = "lung-only.tsv",
+    gene_reads_name: str = "gene-reads.gct",
+) -> dict:
+    """
+    If --ref_zip is provided, extract it to <out_dir>/metadata/ref_cache
+    and return {'lung_tsv': <path or None>, 'gene_reads': <path or None>}.
+    Also search --refs_dir for the same filenames if present.
+    """
+    resolved = {"lung_tsv": None, "gene_reads": None}
+    cache_dir = out_dir / "metadata" / "ref_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1) If ref_zip provided, extract (only if not already extracted)
+    if ref_zip:
+        zpath = Path(ref_zip)
+        if zpath.exists():
+            try:
+                with zipfile.ZipFile(zpath, "r") as zf:
+                    zf.extractall(cache_dir)
+            except Exception as e:
+                logging.warning(f"[refs] Failed to extract {zpath.name}: {e}")
+
+    # 2) Candidate locations to search, in priority order
+    search_roots = []
+    if refs_dir: search_roots.append(Path(refs_dir))
+    search_roots.append(cache_dir)
+
+    # 3) Find lung-only table (lung_name) and gene reads (gene_reads_name)
+    def find_first(roots: list[Path], names: list[str]) -> Optional[Path]:
+        for root in roots:
+            for nm in names:
+                p = root / nm
+                if p.exists():
+                    return p
+        # Also allow "loose" file anywhere under root
+        for root in roots:
+            for nm in names:
+                hits = list(root.rglob(nm))
+                if hits:
+                    return hits[0]
+        return None
+
+    # Allow common alternates for gene reads (csv as well)
+    lung_path = find_first(search_roots, [lung_name, "lung_only.tsv", "lung-only.csv", "lung_only.csv"])
+    gr_path   = find_first(search_roots, [gene_reads_name, "gene-reads.csv", "gene_reads.csv", "GTEx_v8_Lung_gene_reads_totals.csv"])
+
+    resolved["lung_tsv"]  = str(lung_path) if lung_path else None
+    resolved["gene_reads"] = str(gr_path) if gr_path else None
+
+    if resolved["lung_tsv"]:
+        logging.info(f"[refs] Using lung list -> {resolved['lung_tsv']}")
+    else:
+        logging.info("[refs] No lung list found (optional).")
+
+    if resolved["gene_reads"]:
+        logging.info(f"[refs] Using gene-reads -> {resolved['gene_reads']}")
+    else:
+        logging.info("[refs] No gene-reads found (optional).")
+
+    return resolved
+
 
 def _load_refs_from_json(p: Path) -> dict:
     import json
     with p.open("r", encoding="utf-8") as fh:
         return json.load(fh)
+
+def _dedupe_case_df(df: pd.DataFrame, cols: Dict[str, Optional[str]]) -> pd.DataFrame:
+    """
+    Remove duplicate variant/gene rows within a per-case table.
+    Strategy:
+      1) Normalize key fields.
+      2) Build a stable dedupe key.
+      3) Keep the row with the most info (prefers non-null Ion/SEQ, then first).
+    """
+    if df.empty:
+        return df
+
+    # Normalize common keys (string trim/upper; numeric coercion)
+    def _norm_str(s): return s.astype(str).str.strip().str.upper()
+    if "CHROM" in df.columns: df["CHROM"] = _norm_str(df["CHROM"])
+    if "POS" in df.columns:   df["POS"]   = pd.to_numeric(df["POS"], errors="coerce")
+    if "REF" in df.columns:   df["REF"]   = _norm_str(df["REF"])
+    if "ALT" in df.columns:   df["ALT"]   = _norm_str(df["ALT"])
+
+    sym_col = cols.get("symbol")
+    if sym_col and sym_col in df.columns:
+        df[sym_col] = _norm_str(df[sym_col])
+
+    # Optional AA pair from columns (if present)
+    if {"AA_start","AA_end"}.issubset(df.columns):
+        df["AA_start"] = _norm_str(df["AA_start"])
+        df["AA_end"]   = _norm_str(df["AA_end"])
+
+    # Build a robust dedupe key (choose available columns in priority order)
+    key_parts = []
+    for c in ("CHROM","POS","REF","ALT"): 
+        if c in df.columns: key_parts.append(df[c].astype(str))
+    if sym_col and sym_col in df.columns:
+        key_parts.append(df[sym_col].astype(str))
+    # include AA if available (stabilizes protein-level dupes)
+    if "AA_start" in df.columns and "AA_end" in df.columns:
+        key_parts.append(df["AA_start"].astype(str) + ">" + df["AA_end"].astype(str))
+
+    if not key_parts:
+        # fall back to all columns string (rare)
+        key = df.astype(str).agg("|".join, axis=1)
+    else:
+        key = pd.Series(key_parts[0], index=df.index)
+        for part in key_parts[1:]:
+            key = key + "§" + part.astype(str)
+    df["_DEDUP_KEY"] = key
+
+    # Prefer row with more information: Ion present > SEQ present > fewer NaNs
+    ion_present = df.get("Ion").notna() if "Ion" in df.columns else pd.Series(False, index=df.index)
+    seq_present = df.get("SEQ").notna() if "SEQ" in df.columns else pd.Series(False, index=df.index)
+    nonnull_count = df.notna().sum(axis=1)
+
+    df["_DEDUP_SCORE"] = (
+        ion_present.astype(int) * 1000 +
+        seq_present.astype(int) * 100 +
+        nonnull_count.fillna(0).astype(int)
+    )
+
+    # Keep max score per key
+    df = df.sort_values("_DEDUP_SCORE", ascending=False)
+    before = len(df)
+    df = df.drop_duplicates(subset=["_DEDUP_KEY"], keep="first").copy()
+    after = len(df)
+
+    # Clean temp columns
+    df.drop(columns=["_DEDUP_KEY","_DEDUP_SCORE"], errors="ignore", inplace=True)
+
+    if before != after:
+        logging.info(f"[dedupe] removed {before-after} duplicate row(s) (kept {after})")
+
+    return df
+
 
 def _norm_symbol_series(s: pd.Series) -> pd.Series:
     return s.astype(str).str.strip().str.upper()
@@ -164,6 +347,10 @@ def _norm_ensg_series(s: pd.Series) -> pd.Series:
     return s.astype(str).str.extract(r"(ENSG\d+)", expand=False)
 
 def _read_gene_reads_table(path: Path) -> pd.DataFrame:
+    """
+    Read gene-reads table. For GCT v1.2: compute __TOTAL__ across sample columns
+    and rename Name->Gene for convenience.
+    """
     name = path.name.lower()
     if name.endswith(".gct"):
         df = pd.read_csv(path, sep="\t", skiprows=2, dtype=str)
@@ -174,13 +361,15 @@ def _read_gene_reads_table(path: Path) -> pd.DataFrame:
         if "Name" in df.columns: df.rename(columns={"Name":"Gene"}, inplace=True)
         elif "NAME" in df.columns: df.rename(columns={"NAME":"Gene"}, inplace=True)
         return df
-    else:
-        return pd.read_csv(path, sep=_sniff_sep_from_path(path), dtype=str)
+    # TSV/CSV fallback
+    return pd.read_csv(path, sep=_sniff_sep_from_path(path), dtype=str)
 
 def _load_lung_symbols_robust(lung_tsv: Optional[Path], gene_col: Optional[str] = None) -> set[str]:
     if not lung_tsv: return set()
     df = pd.read_csv(lung_tsv, sep=_sniff_sep_from_path(lung_tsv), dtype=str)
-    candidates = ([gene_col] if gene_col else []) + ["Gene","gene","symbol","Symbol","Gene Symbol","Gene_Symbol","Approved symbol","HGNC symbol"]
+    candidates = ([gene_col] if gene_col else []) + [
+        "Gene","gene","symbol","Symbol","Gene Symbol","Gene_Symbol","Approved symbol","HGNC symbol"
+    ]
     for col in candidates:
         if col and col in df.columns:
             return set(_norm_symbol_series(df[col]))
@@ -189,39 +378,745 @@ def _load_lung_symbols_robust(lung_tsv: Optional[Path], gene_col: Optional[str] 
 def _load_lung_table_robust(lung_tsv: Path, gene_col_hint: Optional[str] = None) -> Optional[pd.DataFrame]:
     if not lung_tsv or not Path(lung_tsv).exists(): return None
     df = pd.read_csv(lung_tsv, sep=_sniff_sep_from_path(lung_tsv), dtype=str)
-    candidates = ([gene_col_hint] if gene_col_hint else []) + ["Gene name","Gene Name","Gene_name","Gene","symbol","Symbol","Gene_Symbol","HGNC symbol"]
+    candidates = ([gene_col_hint] if gene_col_hint else []) + [
+        "Gene name","Gene Name","Gene_name","Gene","symbol","Symbol","Gene_Symbol","HGNC symbol"
+    ]
     sym_col = next((c for c in candidates if c in df.columns), None) or df.columns[0]
     df_sym = df.copy(); df_sym["Gene"] = df_sym[sym_col].astype(str).str.strip().str.upper()
     ct_col = next((c for c in ["cell type","Cell type","cell_type","Cell_type"] if c in df.columns), None)
     lv_col = next((c for c in ["level","Level"] if c in df.columns), None)
     rel_col = next((c for c in ["reliability","Reliability"] if c in df.columns), None)
-    out = pd.DataFrame({"Gene": df_sym["Gene"]})
+    out = pd.DataFrame({"Gene": df_sym["Gene"]}).drop_duplicates()
     out["cell_type"] = df_sym[ct_col] if ct_col else np.nan
     out["level"] = df_sym[lv_col] if lv_col else np.nan
     out["reliability"] = df_sym[rel_col] if rel_col else np.nan
-    return out.drop_duplicates(subset=["Gene"])
+    return out
 
 def _read_manifest_cases(path: Path) -> list[str]:
-    """
-    Read a manifest of case IDs (first column).
-    Supports TSV/CSV/TXT with or without header.
-    """
-    if not path.exists():
-        raise FileNotFoundError(f"Manifest not found: {path}")
-    sep = _sniff_sep_from_path(path, fallback="\t")
+    """Read case IDs from first column of TSV/CSV/TXT with/without header."""
+    if not path.exists(): raise FileNotFoundError(f"Manifest not found: {path}")
+    sep = _sniff_sep_from_path(path, "\t")
     try:
-        df = pd.read_csv(path, sep=sep, dtype=str)
-        first_col = df.columns[0]
-        ids = df[first_col].astype(str).str.strip()
+        df = pd.read_csv(path, sep=sep, dtype=str, header=None)
+        ids = df[df.columns[0]].astype(str).str.strip()
     except Exception:
-        # Fallback: simple line-by-line
-        ids = pd.Series(
-            [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        )
-    ids = ids[ids != ""].dropna().unique().tolist()
-    return ids
+        ids = pd.Series([line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()])
+    return ids[ids != ""].dropna().unique().tolist()
 
-# ---------------- Analysis helpers ----------------
+def _resolve_refs(args) -> dict:
+    """
+    Minimal resolver for reference inputs.
+    Pulls paths/columns straight from CLI flags and (optionally) merges a JSON --refs file.
+    """
+    refs = {
+        "lung_tsv": args.lung_tsv,
+        "gene_reads": args.gene_reads,
+        "lung_gene_col": args.lung_gene_col,
+        "gene_reads_sep": args.gene_reads_sep,
+        "gene_reads_value_col": args.gene_reads_value_col,
+        "match_key": args.match_key,   # 'auto' | 'ensg' | 'symbol'
+    }
+
+    # Optional: merge pinned refs JSON if provided and allowed
+    if not getattr(args, "no_json", False) and getattr(args, "refs", None):
+        import json
+        cfg = Path(args.refs)
+        if cfg.exists():
+            with cfg.open("r", encoding="utf-8") as fh:
+                try:
+                    refs.update(json.load(fh))
+                except Exception as e:
+                    logging.warning(f"Failed to parse --refs JSON ({cfg}): {e}")
+
+    return refs
+
+
+# ---------------- Stats helpers ----------------
+
+def _bh_fdr(pvals: np.ndarray) -> np.ndarray:
+    """Benjamini–Hochberg FDR."""
+    p = np.asarray(pvals, dtype=float)
+    n = p.size
+    if n == 0:
+        return p
+    order = np.argsort(p)
+    ranks = np.arange(1, n + 1)
+    q = np.empty_like(p, dtype=float)
+    q[order] = np.minimum.accumulate((p[order] * n / ranks)[::-1])[::-1]
+    return np.clip(q, 0.0, 1.0)
+
+def _two_group_test(a: np.ndarray, b: np.ndarray, method: str = "welch") -> float:
+    """
+    Return two-sided p-value comparing a vs b.
+    method in {'welch','mw'} = Welch t-test or Mann–Whitney U.
+    """
+    a = np.asarray(a, dtype=float); a = a[np.isfinite(a)]
+    b = np.asarray(b, dtype=float); b = b[np.isfinite(b)]
+    if a.size < 2 or b.size < 2:
+        return np.nan
+    if method == "mw" and mannwhitneyu is not None:
+        try:
+            return float(mannwhitneyu(a, b, alternative="two-sided").pvalue)
+        except Exception:
+            return np.nan
+    if ttest_ind is not None:
+        try:
+            return float(ttest_ind(a, b, equal_var=False, nan_policy="omit").pvalue)
+        except Exception:
+            return np.nan
+    return np.nan
+
+def fisher_cell_stats(A: pd.DataFrame, B: pd.DataFrame) -> pd.DataFrame:
+    """Per-cell Fisher test + BH-FDR for two 21×21 count matrices."""
+    At = int(A.values.sum()) or 1
+    Bt = int(B.values.sum()) or 1
+    rows = []
+    for i in A.index:
+        for j in A.columns:
+            a = int(A.at[i, j]); b = int(B.at[i, j])
+            c = At - a;          d = Bt - b
+            a2, b2, c2, d2 = a+0.5, b+0.5, c+0.5, d+0.5
+            if fisher_exact is not None:
+                try:
+                    _, p = fisher_exact([[a2, c2], [b2, d2]], alternative="two-sided")
+                except Exception:
+                    p = 1.0
+            else:
+                p = np.nan
+            rows.append({
+                "AA_from": i, "AA_to": j,
+                "A_count": a, "B_count": b,
+                "A_prop": a / At, "B_prop": b / Bt,
+                "log2_enrichment": float(np.log2((a/At + 1e-12) / (b/Bt + 1e-12))),
+                "pval": float(p),
+            })
+    df = pd.DataFrame(rows)
+    df["qval"] = _bh_fdr(np.nan_to_num(df["pval"].values, nan=1.0))
+    return df
+
+def _safe_num(s):
+    return pd.to_numeric(s, errors="coerce")
+
+def _summ_case(df: pd.DataFrame, case_id: str) -> dict:
+    out = {"case_id": case_id}
+    # coverage counts
+    for col in ["Log2FC_RNA", "Delta_CNV", "Log2FC_CH3", "DeltaM_CH3",
+                "Log2FC_Protein", "Ion", "Ion-Normal"]:
+        if col in df.columns:
+            out[f"{col}_n_nonnull"] = int(_safe_num(df[col]).notna().sum())
+        else:
+            out[f"{col}_n_nonnull"] = 0
+    # simple means (robust): per layer if present
+    for col in ["Log2FC_RNA", "Delta_CNV", "Log2FC_CH3", "DeltaM_CH3", "Log2FC_Protein"]:
+        if col in df.columns:
+            ser = _safe_num(df[col]).dropna()
+            out[f"{col}_mean"] = float(ser.mean()) if len(ser) else np.nan
+            out[f"{col}_median"] = float(ser.median()) if len(ser) else np.nan
+        else:
+            out[f"{col}_mean"] = np.nan
+            out[f"{col}_median"] = np.nan
+    return out
+
+def build_master_statistics_summary(out_dir: str | Path) -> None:
+    out_dir = Path(out_dir)
+    cohort_dir = out_dir / "cohort"
+    subs_dir   = out_dir / "substitutions"
+    per_case   = out_dir / "per_case"
+    _ensure_dir(cohort_dir)
+
+    rows = []
+
+    # 1) Per-case analysis coverage / quick stats
+    for f in sorted(per_case.glob("*_analysis.csv")):
+        try:
+            case_id = f.name.replace("_analysis.csv", "")
+            df = pd.read_csv(f, dtype=str, low_memory=False)
+            rows.append(_summ_case(df, case_id))
+        except Exception as e:
+            logging.warning(f"[master] per-case summary failed for {f.name}: {e}")
+
+    case_df = pd.DataFrame(rows).sort_values("case_id") if rows else pd.DataFrame(columns=["case_id"])
+    # 2) Count how many AA outputs were actually written (skip empties)
+    def _count_aa_outputs(label: str) -> pd.DataFrame:
+        base = subs_dir / f"{label}_protein_by_case"
+        if not base.exists():
+            return pd.DataFrame(columns=["case_id", f"{label}_long_written", f"{label}_matrix_written"])
+        longs = {p.stem for p in base.glob("*.csv") if not p.name.endswith(".matrix.csv")}
+        mats  = {p.stem.replace(".matrix","") for p in base.glob("*.matrix.csv")}
+        # Only count if file exists and non-empty
+        def _nonempty(p): 
+            try:
+                return p.exists() and p.stat().st_size > 0
+            except Exception:
+                return False
+        data = []
+        for cid in sorted(longs | mats):
+            long_p = base / f"{cid}.csv"
+            mat_p  = base / f"{cid}.matrix.csv"
+            data.append({
+                "case_id": cid,
+                f"{label}_long_written":  1 if _nonempty(long_p) else 0,
+                f"{label}_matrix_written":1 if _nonempty(mat_p)  else 0,
+            })
+        return pd.DataFrame(data)
+
+    snv_counts = _count_aa_outputs("SNV")
+    snp_counts = _count_aa_outputs("SNP")
+
+    # 3) Cohort substitution totals by label
+    def _subs_totals(label: str) -> dict:
+        p = subs_dir / "cohort" / label / f"substitutions_{label}.tsv"
+        d = {f"subs_{label}_rows": 0, f"subs_{label}_genes": 0}
+        try:
+            if p.exists():
+                df = pd.read_csv(p, sep="\t", dtype=str, low_memory=False)
+                d[f"subs_{label}_rows"] = int(len(df))
+                if "Gene" in df.columns:
+                    d[f"subs_{label}_genes"] = int(df["Gene"].astype(str).str.strip().str.upper().nunique())
+        except Exception as e:
+            logging.warning(f"[master] read subs {label} failed: {e}")
+        return d
+
+    subs_tot = {}
+    for lbl in ("SNV","SNP"):
+        subs_tot.update(_subs_totals(lbl))
+
+    # 4) Cohort-level boxplot summaries (if present) – bring in a few key stats
+    box_summaries = []
+    for L in ("RNA","CNV","CH3","Protein"):
+        p = cohort_dir / f"cohort_boxplot_{L}_summary.csv"
+        if p.exists():
+            try:
+                df = pd.read_csv(p, dtype=str)
+                df.insert(0, "Layer", L)
+                box_summaries.append(df)
+            except Exception as e:
+                logging.warning(f"[master] boxplot summary {L} failed: {e}")
+    box_df = pd.concat(box_summaries, ignore_index=True) if box_summaries else pd.DataFrame()
+
+    # 5) Volcano summaries + merge all top100 into one table with a Layer tag
+    volc_summaries = []
+    top_tables = []
+    for L in ("RNA","CNV","CH3","Protein"):
+        ps = cohort_dir / f"cohort_volcano_{L}_summary.csv"
+        pt = cohort_dir / f"cohort_volcano_{L}_top100.csv"
+        if ps.exists():
+            try:
+                df = pd.read_csv(ps, dtype=str)
+                df.insert(0, "Layer", L)
+                volc_summaries.append(df)
+            except Exception as e:
+                logging.warning(f"[master] volcano summary {L} failed: {e}")
+        if pt.exists():
+            try:
+                tdf = pd.read_csv(pt, dtype=str)
+                tdf.insert(0, "Layer", L)
+                top_tables.append(tdf)
+            except Exception as e:
+                logging.warning(f"[master] volcano top {L} failed: {e}")
+    volc_df = pd.concat(volc_summaries, ignore_index=True) if volc_summaries else pd.DataFrame()
+    top_all = pd.concat(top_tables, ignore_index=True) if top_tables else pd.DataFrame()
+
+    # 6) Assemble master case table
+    master = case_df.copy()
+    for extra in (snv_counts, snp_counts):
+        if not extra.empty:
+            master = master.merge(extra, on="case_id", how="left")
+    # fill missing 0/NaN for written flags
+    for col in master.columns:
+        if col.endswith("_written"):
+            master[col] = master[col].fillna(0).astype(int)
+
+    # Append a single "COHORT" row of totals so you can view in one sheet
+    if not master.empty:
+        cohort_row = {c: np.nan for c in master.columns}
+        cohort_row["case_id"] = "__COHORT__"
+        cohort_row.update(subs_tot)
+        master = pd.concat([master, pd.DataFrame([cohort_row])], ignore_index=True)
+    else:
+        # still write a one-line cohort-only summary if no cases were parsed
+        master = pd.DataFrame([{"case_id":"__COHORT__", **subs_tot}])
+
+    # 7) Write outputs
+    master_out = cohort_dir / "statistics_summary.csv"
+    master.to_csv(master_out, index=False)
+    logging.info(f"[master] wrote {master_out}")
+
+    if not top_all.empty:
+        top_out = cohort_dir / "volcano_top100_merged.csv"
+        top_all.to_csv(top_out, index=False)
+        logging.info(f"[master] wrote {top_out}")
+
+    if not volc_df.empty:
+        volc_out = cohort_dir / "volcano_summary_merged.csv"
+        volc_df.to_csv(volc_out, index=False)
+        logging.info(f"[master] wrote {volc_out}")
+
+
+# ---------------- Small utilities ----------------
+
+def _series_summary_df(values, label: str = "value") -> pd.DataFrame:
+    s = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    if s.empty:
+        return pd.DataFrame([{"n": 0, "mean": np.nan, "std": np.nan, "median": np.nan,
+                              "q1": np.nan, "q3": np.nan, "min": np.nan, "max": np.nan,
+                              "label": label}])
+    return pd.DataFrame([{
+        "n": int(s.size),
+        "mean": float(s.mean()),
+        "std": float(s.std(ddof=1)) if s.size > 1 else 0.0,
+        "median": float(s.median()),
+        "q1": float(np.percentile(s, 25)),
+        "q3": float(np.percentile(s, 75)),
+        "min": float(s.min()),
+        "max": float(s.max()),
+        "label": label,
+    }])
+
+def save_plot(plots_dir: Path, stem: str, *, fig=None,
+              csv_df: pd.DataFrame | None = None,
+              dpi: int = 150, close: bool = True, ext: str = "png"):
+    plots_dir = Path(plots_dir); plots_dir.mkdir(parents=True, exist_ok=True)
+    fig = fig or plt.gcf()
+    fig.savefig(plots_dir / f"{stem}.{ext}", dpi=dpi, bbox_inches="tight")
+    if csv_df is not None:
+        csv_df.to_csv(plots_dir / f"{stem}.csv", index=False)
+    if close: plt.close(fig)
+
+def _ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+def _coerce_numeric(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce")
+
+# ---------------- CH3 M-values ----------------
+
+def _beta_to_m(beta: pd.Series, eps: float = 1e-6) -> pd.Series:
+    """Convert β to M-values = log2(β/(1-β)) with clipping."""
+    x = pd.to_numeric(beta, errors="coerce")
+    x = x.clip(lower=eps, upper=1.0 - eps)
+    return np.log2(x / (1.0 - x))
+
+def _add_ch3_m_values(df: pd.DataFrame, t_col: Optional[str], n_col: Optional[str], eps: float) -> pd.DataFrame:
+    if not t_col or not n_col or t_col not in df.columns or n_col not in df.columns:
+        df["M_CH3_Tumor"] = np.nan
+        df["M_CH3_Normal"] = np.nan
+        df["DeltaM_CH3"]   = np.nan
+        return df
+    t = _beta_to_m(df[t_col], eps)
+    n = _beta_to_m(df[n_col], eps)
+    df["M_CH3_Tumor"] = t
+    df["M_CH3_Normal"] = n
+    df["DeltaM_CH3"]   = t - n
+    return df
+
+# ---------------- Variant & substitutions helpers ----------------
+
+def _add_lung_flag(df: pd.DataFrame, sym_col: Optional[str], lung_syms: set[str]) -> pd.DataFrame:
+    df["Lung_Present"] = _norm_symbol_series(df[sym_col]).isin(lung_syms) if sym_col and lung_syms else np.nan
+    return df
+
+def _classify_label(df: pd.DataFrame, labels: Tuple[str,str] = ("SNV","SNP")) -> pd.Series:
+    f = df.get("FILTER", pd.Series("", index=df.index)).astype(str)
+    i = df.get("INFO", pd.Series("", index=df.index)).astype(str)
+    is_miss = i.str.contains("missense", case=False, na=False)
+    lab = pd.Series("", index=df.index, dtype="string")
+    lab[f.str.contains("alt",  case=False, na=False) & is_miss] = labels[1]  # SNP
+    lab[f.str.contains("PASS", case=False, na=False) & is_miss] = labels[0]  # SNV
+    return lab
+
+_AA_CODES = list("ACDEFGHIKLMNPQRSTVWY*")
+_AA_IDX = {a:i for i,a in enumerate(_AA_CODES)}
+AA_ORDER = list("ACDEFGHIKLMNPQRSTVWY") + ["*"]  # 20 AAs + stop as "*"
+
+
+def _canonical_aa(s: pd.Series) -> pd.Series:
+    """Uppercase and map unusual AA labels; coerce non-standard to 'X' (dropped later)."""
+    m = s.astype(str).str.strip().str.upper()
+    # Map known variants to canonical; extend as needed
+    m = m.replace({"STOP": "*", "TERM": "*"})
+    return m
+
+def _mask_has_ion(df: pd.DataFrame, ion_col: str) -> pd.Series:
+    """Keep rows where 'ion' is present and non-zero (handles numeric or strings)."""
+    if ion_col not in df.columns:
+        logging.warning(f"[AA tables] Ion column '{ion_col}' not found; keeping all rows.")
+        return pd.Series(True, index=df.index)
+    # Consider both NaN and zero as not supported
+    col = df[ion_col]
+    # try numeric
+    with np.errstate(all="ignore"):
+        col_num = pd.to_numeric(col, errors="coerce")
+    return col.notna() & (col.astype(str).str.len() > 0) & (col_num.fillna(0) != 0)
+
+def _infer_class_masks(df: pd.DataFrame):
+    """
+    Return boolean masks for SNP vs SNV rows.
+    Tries common columns first; falls back to simple heuristics.
+    """
+    n = len(df)
+    snp_mask = pd.Series(False, index=df.index)
+    snv_mask = pd.Series(False, index=df.index)
+
+    # Prefer explicit flags if present
+    for col in ["is_snp", "IS_SNP", "snp"]:
+        if col in df.columns:
+            snp_mask = snp_mask | df[col].astype(bool)
+    for col in ["is_snv", "IS_SNV", "snv"]:
+        if col in df.columns:
+            snv_mask = snv_mask | df[col].astype(bool)
+
+    # Variant kind string?
+    for col in ["variant_kind", "VARIANT_KIND", "type", "TYPE", "variant_class"]:
+        if col in df.columns and (snp_mask.sum() == 0 or snv_mask.sum() == 0):
+            v = df[col].astype(str).str.upper()
+            snp_mask = snp_mask | v.eq("SNP")
+            snv_mask = snv_mask | v.eq("SNV")
+
+    # Heuristic fallback: if we have REF/ALT at DNA level, treat length==1 as SNV candidate.
+    # (This is imperfect for germline vs somatic, but provides coverage if no labels exist.)
+    if (snp_mask.sum() == 0 and snv_mask.sum() == 0) and {"REF","ALT"}.issubset(df.columns):
+        ref = df["REF"].astype(str)
+        alt = df["ALT"].astype(str)
+        one_base = (ref.str.len()==1) & (alt.str.len()==1)
+        # Without germline/somatic info, direct both to SNV by default:
+        snv_mask = snv_mask | one_base
+
+    # If still empty, send all rows to SNV so the function is not a no-op.
+    if snp_mask.sum() == 0 and snv_mask.sum() == 0:
+        snv_mask = pd.Series(True, index=df.index)
+
+    return snp_mask, snv_mask
+
+def write_aa_matrices_dna_style_split(
+    per_case_dir: Path,
+    integrated_dir: Path,
+    out_dir: Path,
+    *,
+    labels: Tuple[str, str] = ("SNV", "SNP"),
+    ion_min: float | None = None,           # e.g., 10.0 to require Ion >= 10; None = any non-null Ion
+) -> None:
+    """
+    DNA-style AA matrices per case, split into SNV/SNP, but only from rows
+    with Ion evidence. Writes to:
+        <out_dir>/substitutions/SNV_protein_by_case/{CASE}.matrix.csv
+        <out_dir>/substitutions/SNP_protein_by_case/{CASE}.matrix.csv
+    """
+
+    snv_dir = out_dir / "substitutions" / "SNV_protein_by_case"
+    snp_dir = out_dir / "substitutions" / "SNP_protein_by_case"
+    _ensure_dir(snv_dir); _ensure_dir(snp_dir)
+
+    # Prefer augmented per-case tables; fall back to raw integrated if needed
+    files = sorted(per_case_dir.glob("*_analysis.csv")) or sorted(integrated_dir.glob("*_integrated.csv"))
+    if not files:
+        logging.warning("[dna-style split] No per-case files found for AA matrices.")
+        return
+
+    for f in files:
+        try:
+            df = pd.read_csv(f, dtype=str, low_memory=False).fillna("")
+            cols = _detect_cols_expanded(df)
+
+            # --- Ensure Ion columns exist; if not, try to derive like the worker does ---
+            if "Ion" not in df.columns and cols.get("pro_int_t"):
+                min_first = ion_min if ion_min is not None else -np.inf
+                df["Ion"] = _extract_ion_firstnum(df[cols["pro_int_t"]], min_first=min_first)
+
+                if "Protein_Present_Tumor" in df.columns:
+                    df["Ion"] = df["Ion"].where(df["Protein_Present_Tumor"], np.nan)
+            if "Ion-Normal" not in df.columns and cols.get("pro_int_n"):
+                min_first = ion_min if ion_min is not None else -np.inf
+                df["Ion-Normal"] = _extract_ion_firstnum(df[cols["pro_int_n"]], min_first=min_first)
+
+                if "Protein_Present_Normal" in df.columns:
+                    df["Ion-Normal"] = df["Ion-Normal"].where(df["Protein_Present_Normal"], np.nan)
+
+            # Robust Ion filter (>= ion_min if set; else any non-null)
+            if "Ion" not in df.columns:
+                logging.warning(f"[dna-style split] {f.name}: Ion column missing; skipping.")
+                continue
+            ion_first = _extract_ion_firstnum(df["Ion"], min_first=(ion_min if ion_min is not None else -np.inf))
+            ion_keep = ion_first.notna()
+
+            # --- Get AA_start / AA_end: use columns if present; else parse INFO pipe-field index 15 ---
+            if {"AA_start","AA_end"}.issubset(df.columns):
+                aa_from = df["AA_start"].astype(str).str.strip().str.upper()
+                aa_to   = df["AA_end"].astype(str).str.strip().str.upper()
+            else:
+                # mirror your existing parsing logic
+                info_col = cols.get("info")
+                if not info_col or info_col not in df.columns:
+                    logging.warning(f"[dna-style split] {f.name}: no INFO column to parse AA; writing empties.")
+                    aa_from = pd.Series("", index=df.index); aa_to = pd.Series("", index=df.index)
+                else:
+                    toks = df[info_col].astype(str).str.split("|", expand=True)
+                    if toks.shape[1] > 15:
+                        aa = toks.iloc[:, 15].astype(str).str.strip()
+                        aa_from = aa.str.slice(0, 1).str.upper()
+                        aa_to   = aa.str.slice(-1).str.upper()
+                    else:
+                        aa_from = pd.Series("", index=df.index); aa_to = pd.Series("", index=df.index)
+
+            aa_keep = aa_from.isin(AA_ORDER) & aa_to.isin(AA_ORDER)
+
+            # --- SNV/SNP classification using your helper ---
+            lab = _classify_label(df, labels=labels)  # uses FILTER & INFO   # noqa
+            # (See definition in your script.)  # noqa
+
+            case_id = _case_id_from_path(Path(f))
+
+            for lbl, target_dir in [(labels[0], snv_dir), (labels[1], snp_dir)]:
+                mask = ion_keep & aa_keep & lab.eq(lbl)
+                if not mask.any():
+                    # Always emit an empty matrix so downstream doesn’t break
+                    empty = pd.DataFrame(0, index=AA_ORDER, columns=AA_ORDER)
+                    empty.index.name = "AA_from"; empty.columns.name = "AA_to"
+                    empty.to_csv(target_dir / f"{case_id}.matrix.csv")
+                    continue
+
+                pairs = list(zip(aa_from[mask], aa_to[mask]))
+                mat = _aa_matrix_from_pairs(pairs)      # DNA-style counter
+                mat.index.name = "AA_from"; mat.columns.name = "AA_to"
+                mat.to_csv(target_dir / f"{case_id}.matrix.csv")
+
+            logging.info(f"[dna-style split] Wrote SNV/SNP matrices for {case_id}")
+
+        except Exception as e:
+            logging.warning(f"[dna-style split] {f.name}: {e}")
+
+def _compute_sub_table(df: pd.DataFrame, case_id: str, aa_ref_col: str, aa_alt_col: str, ion_col: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Build (long_table, matrix_table) for a single case.
+    long_table columns: [case_id, AA_from, AA_to, n, unique_peptides, ion_sum, ion_median]
+    matrix_table: 21x21 counts (AA_ORDER rows/cols)
+    """
+    if not {aa_ref_col, aa_alt_col}.issubset(df.columns):
+        raise KeyError(f"Missing AA columns: need '{aa_ref_col}' and '{aa_alt_col}'")
+
+    sub = df.copy()
+    sub[aa_ref_col] = _canonical_aa(sub[aa_ref_col])
+    sub[aa_alt_col] = _canonical_aa(sub[aa_alt_col])
+
+    # Drop unknown/non-canonical AAs
+    sub = sub[sub[aa_ref_col].isin(AA_ORDER) & sub[aa_alt_col].isin(AA_ORDER)]
+    if sub.empty:
+        long_cols = ["case_id","AA_from","AA_to","n","unique_peptides","ion_sum","ion_median"]
+        long_empty = pd.DataFrame(columns=long_cols)
+        mat = pd.DataFrame(0, index=AA_ORDER, columns=AA_ORDER)
+        mat.index.name = "AA_from"; mat.columns.name = "AA_to"
+        return long_empty, mat
+
+    # Aggregates
+    grp = sub.groupby([aa_ref_col, aa_alt_col], dropna=False)
+
+    # Counts
+    counts = grp.size().rename("n")
+
+    # Unique peptides
+    if "SEQ" in sub.columns:
+        uniq_pep = grp["SEQ"].nunique().rename("unique_peptides")
+    else:
+        uniq_pep = pd.Series(0, index=counts.index, name="unique_peptides")
+
+    # Ion metrics (numeric)
+    if ion_col in sub.columns:
+        sub["_ion_num"] = pd.to_numeric(sub[ion_col], errors="coerce")
+        ion_sum = grp["_ion_num"].sum(min_count=1).rename("ion_sum")
+        ion_med = grp["_ion_num"].median().rename("ion_median")
+    else:
+        ion_sum = pd.Series(np.nan, index=counts.index, name="ion_sum")
+        ion_med = pd.Series(np.nan, index=counts.index, name="ion_median")
+
+    long = (
+        pd.concat([counts, uniq_pep, ion_sum, ion_med], axis=1)
+          .reset_index(names=["AA_from","AA_to"])
+    )
+    long.insert(0, "case_id", case_id)
+
+    # Sort tidy table & build 21×21 matrix
+    long = long.sort_values(["n","AA_from","AA_to"], ascending=[False, True, True], ignore_index=True)
+    mat = (
+        long.pivot_table(index="AA_from", columns="AA_to", values="n", aggfunc="sum", fill_value=0)
+            .reindex(index=AA_ORDER, columns=AA_ORDER, fill_value=0)
+    )
+    mat.index.name = "AA_from"; mat.columns.name = "AA_to"
+    return long, mat
+
+
+def write_aa_tables_by_case(
+    df: pd.DataFrame,
+    out_dir: str | Path,
+    *,
+    case_col: str = "case_id",
+    aa_ref_col: str = "AA_start",     # will parse INFO[15] if these are absent
+    aa_alt_col: str = "AA_end",
+    ion_col: str = "Ion",
+    labels: Tuple[str, str] = ("SNV", "SNP"),
+    ion_min: float | None = None,     # None => any non-null Ion; number => Ion >= threshold
+    permissive_when_no_ion: bool = False,  # if True and Ion column missing/empty, keep all rows
+    log_counts: bool = True,
+) -> None:
+    """
+    Build per-case AA outputs split into SNV/SNP with Ion support.
+
+    Writes (only when a label has data):
+      <out_dir>/substitutions/SNV_protein_by_case/{CASE}.csv
+      <out_dir>/substitutions/SNV_protein_by_case/{CASE}.matrix.csv
+      <out_dir>/substitutions/SNP_protein_by_case/{CASE}.csv
+      <out_dir>/substitutions/SNP_protein_by_case/{CASE}.matrix.csv
+    """
+    out_dir = Path(out_dir)
+    snv_dir = out_dir / "substitutions" / "SNV_protein_by_case"
+    snp_dir = out_dir / "substitutions" / "SNP_protein_by_case"
+    _ensure_dir(snv_dir); _ensure_dir(snp_dir)
+
+    # Validate input
+    if df is None or df.empty:
+        logging.warning("[AA tables] Input dataframe is empty; nothing to write.")
+        return
+    if case_col not in df.columns:
+        raise KeyError(f"[AA tables] Missing case column '{case_col}'")
+
+    # Column detection (for INFO, symbols, protein intensity, etc.)
+    try:
+        cols = _detect_cols_expanded(df)
+    except Exception:
+        cols = {}
+
+    # 1) Ion support mask (first number before '/', consistent with the worker)
+    ion_series = df.get(ion_col)
+    if ion_series is None:
+        if permissive_when_no_ion:
+            ion_keep = pd.Series(True, index=df.index)
+        else:
+            logging.warning("[AA tables] Ion column missing; no rows will pass Ion filter "
+                            "(set permissive_when_no_ion=True to keep).")
+            ion_keep = pd.Series(False, index=df.index)
+    else:
+        ion_first = _extract_ion_firstnum(
+            ion_series,
+            min_first=(ion_min if ion_min is not None else -np.inf),  # allow any non-null when None
+        )
+        ion_keep = pd.to_numeric(ion_first, errors="coerce").notna()
+
+    # 2) AA_from / AA_to (prefer existing columns; else parse INFO pipe-field #16)
+    if {aa_ref_col, aa_alt_col}.issubset(df.columns):
+        aa_from = df[aa_ref_col].astype(str).str.strip().str.upper()
+        aa_to   = df[aa_alt_col].astype(str).str.strip().str.upper()
+    else:
+        info_col = cols.get("info")
+        if info_col and info_col in df.columns:
+            toks = df[info_col].astype(str).str.split("|", expand=True)
+            if toks.shape[1] > 15:
+                aa = toks.iloc[:, 15].astype(str).str.strip()
+                aa_from = aa.str.slice(0, 1).str.upper()
+                aa_to   = aa.str.slice(-1).str.upper()
+            else:
+                aa_from = pd.Series("", index=df.index)
+                aa_to   = pd.Series("", index=df.index)
+        else:
+            aa_from = pd.Series("", index=df.index)
+            aa_to   = pd.Series("", index=df.index)
+
+    # Canonical AA check
+    aa_keep = aa_from.isin(AA_ORDER) & aa_to.isin(AA_ORDER)
+
+    # 3) SNV/SNP label (prefer VarLabel if present; else classify; else default to first)
+    if "VarLabel" in df.columns:
+        lab = df["VarLabel"].astype(str)
+    elif ("FILTER" in df.columns) and (cols.get("info") in df.columns if cols.get("info") else False):
+        lab = _classify_label(df, labels=labels).astype(str)
+    else:
+        lab = pd.Series(labels[0], index=df.index, dtype="object")
+
+    # 4) Build per-case outputs
+    for case_id, _ in df.groupby(df[case_col], dropna=False):
+        case_mask = (df[case_col] == case_id)
+        base_mask = case_mask & ion_keep & aa_keep
+
+        # local frame for _compute_sub_table (ensure AA columns exist)
+        tmp = df.loc[case_mask].copy()
+        if aa_ref_col not in tmp.columns: tmp[aa_ref_col] = aa_from[case_mask].values
+        if aa_alt_col not in tmp.columns: tmp[aa_alt_col] = aa_to[case_mask].values
+
+        wrote_any = False
+        for lbl, target_dir in [(labels[0], snv_dir), (labels[1], snp_dir)]:
+            mask = base_mask & lab.eq(lbl)
+
+            if log_counts:
+                n_case  = int(case_mask.sum())
+                n_ionaa = int((case_mask & ion_keep & aa_keep).sum())
+                n_lbl   = int((case_mask & lab.eq(lbl)).sum())
+                n_final = int(mask.sum())
+                logging.info(f"[AA tables] {case_id} | {lbl}: case={n_case}, ion+AA={n_ionaa}, "
+                             f"lbl_only={n_lbl}, final={n_final}")
+
+            # Skip writing for this label if nothing passes Ion+AA+label
+            if not mask.any():
+                continue
+
+            # ---- Long table (proteomics aggregates)
+            long_df, _ = _compute_sub_table(
+                tmp.loc[mask],
+                str(case_id),
+                aa_ref_col=aa_ref_col,
+                aa_alt_col=aa_alt_col,
+                ion_col=ion_col,
+            )
+            long_path = target_dir / f"{case_id}.csv"
+            _ensure_dir(long_path.parent)
+            long_df.to_csv(long_path, index=False)
+
+            # ---- DNA-style matrix (simple counts of AA_from→AA_to), with pair de-dup
+            use_pairs = (
+                pd.DataFrame({"F": aa_from[mask], "T": aa_to[mask]})
+                .drop_duplicates()
+            )
+            if not len(use_pairs):
+                continue
+
+            pairs = list(zip(use_pairs["F"], use_pairs["T"]))
+            mat = _aa_matrix_from_pairs(pairs)
+            mat.index.name = "AA_from"; mat.columns.name = "AA_to"
+            (target_dir / f"{case_id}.matrix.csv").parent.mkdir(parents=True, exist_ok=True)
+            mat.to_csv(target_dir / f"{case_id}.matrix.csv")
+
+            wrote_any = True
+
+        if not wrote_any:
+            logging.info(f"[AA tables] {case_id}: no Ion+AA+label rows — no files written for this case.")
+        else:
+            logging.info(f"[AA tables] {case_id}: wrote Ion-filtered {labels[0]}/{labels[1]} long+matrix files")
+
+
+
+def _aa_matrix_from_pairs(pairs: List[Tuple[str,str]]) -> pd.DataFrame:
+    mat = np.zeros((len(_AA_CODES), len(_AA_CODES)), dtype=int)
+    for a,b in pairs:
+        if a in _AA_IDX and b in _AA_IDX:
+            mat[_AA_IDX[a], _AA_IDX[b]] += 1
+    return pd.DataFrame(mat, index=_AA_CODES, columns=_AA_CODES)
+
+_SUBS12 = ["AC","AG","AT","CA","CG","CT","GA","GC","GT","TA","TC","TG"]
+
+def _signature12_from_ref_alt(ref: pd.Series, alt: pd.Series) -> pd.Series:
+    refu = ref.astype(str).str.upper(); altu = alt.astype(str).str.upper()
+    mask = (refu.str.len()==1) & (altu.str.len()==1) & refu.isin(list("ACGT")) & altu.isin(list("ACGT"))
+    codes = (refu[mask] + altu[mask]).str.replace(r"[^ACGT]", "", regex=True)
+    sig = pd.Series(0, index=_SUBS12, dtype=int)
+    vc = codes.value_counts()
+    for k,v in vc.items():
+        if k in sig.index: sig[k] = int(v)
+    return sig
+
+def _extract_ion_firstnum(val: pd.Series, min_first: float = 10.0) -> pd.Series:
+    s = val.astype(str)
+    first = s.str.split("/", n=1, expand=True).iloc[:, 0]
+    x = pd.to_numeric(first, errors="coerce")
+    return x.where(x >= min_first, np.nan)
+
+# ---------------- Case/meta helpers ----------------
 
 def _case_id_from_path(p: Path) -> str:
     name = p.name
@@ -249,99 +1144,28 @@ def _detect_cols_expanded(df: pd.DataFrame) -> Dict[str, Optional[str]]:
         info   = has_any(["INFO","Info","info"]),
     )
 
-def _ensure_dir(p: Path) -> None:
-    p.mkdir(parents=True, exist_ok=True)
-
-def _coerce_numeric(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(s, errors="coerce")
-
-def _add_lung_flag(df: pd.DataFrame, sym_col: Optional[str], lung_syms: set[str]) -> pd.DataFrame:
-    df["Lung_Present"] = _norm_symbol_series(df[sym_col]).isin(lung_syms) if sym_col and lung_syms else np.nan
-    return df
-
-# --- SNV/SNP label classification (adapted from dna_analysis) ---
-def _classify_label(df: pd.DataFrame, labels: Tuple[str,str] = ("SNV","SNP")) -> pd.Series:
-    f = df.get("FILTER", pd.Series("", index=df.index)).astype(str)
-    i = df.get("INFO", pd.Series("", index=df.index)).astype(str)
-    is_miss = i.str.contains("missense", case=False, na=False)
-    lab = pd.Series("", index=df.index, dtype="string")
-    # default groupings: PASS+missense -> SNV, alt+missense -> SNP
-    lab[f.str.contains("alt",  case=False, na=False) & is_miss] = labels[1]
-    lab[f.str.contains("PASS", case=False, na=False) & is_miss] = labels[0]
-    return lab
-
-# --- build 21x21 AA matrix from AA start/end pairs ---
-_AA_CODES = list("ACDEFGHIKLMNPQRSTVWY*")  # 21 incl stop
-_AA_IDX = {a:i for i,a in enumerate(_AA_CODES)}
-
-def _aa_matrix_from_pairs(pairs: List[Tuple[str,str]]) -> pd.DataFrame:
-    mat = np.zeros((len(_AA_CODES), len(_AA_CODES)), dtype=int)
-    for a,b in pairs:
-        if a in _AA_IDX and b in _AA_IDX:
-            mat[_AA_IDX[a], _AA_IDX[b]] += 1
-    return pd.DataFrame(mat, index=_AA_CODES, columns=_AA_CODES)
-
-# --- build 12-channel REF→ALT signature (only single-base) ---
-_SUBS12 = ["AC","AG","AT","CA","CG","CT","GA","GC","GT","TA","TC","TG"]
-def _signature12_from_ref_alt(ref: pd.Series, alt: pd.Series) -> pd.Series:
-    refu = ref.astype(str).str.upper(); altu = alt.astype(str).str.upper()
-    mask = (refu.str.len()==1) & (altu.str.len()==1) & refu.isin(list("ACGT")) & altu.isin(list("ACGT"))
-    codes = (refu[mask] + altu[mask]).str.replace(r"[^ACGT]", "", regex=True)
-    sig = pd.Series(0, index=_SUBS12, dtype=int)
-    vc = codes.value_counts()
-    for k,v in vc.items():
-        if k in sig.index:
-            sig[k] = int(v)
-    return sig
-    
-def _extract_ion_firstnum(val: pd.Series, min_first: float = 10.0) -> pd.Series:
+def _validate_refs(refs: dict, strict: bool = False) -> None:
     """
-    For values like '12/34', return the first numeric part iff first >= min_first, else NaN.
-    Non-string or malformed values -> NaN.
+    Check that optional reference files exist.
+    - If strict=True, raise FileNotFoundError when any referenced file is missing.
+    - If strict=False, just log a warning and continue.
     """
-    s = val.astype(str)
-    first = s.str.split("/", n=1, expand=True).iloc[:, 0]
-    x = pd.to_numeric(first, errors="coerce")
-    return x.where(x >= min_first, np.nan)
+    missing = []
+    for key in ("lung_tsv", "gene_reads"):
+        p = refs.get(key)
+        if p is not None and str(p).strip() != "" and not Path(str(p)).exists():
+            missing.append((key, p))
+
+    if missing:
+        msg = "; ".join([f"{k}={v}" for k, v in missing])
+        if strict:
+            raise FileNotFoundError(f"Strict refs: missing files: {msg}")
+        else:
+            logging.warning(f"[refs] Missing optional references (continuing): {msg}")
 
 
-def _add_delta_log2fc(df: pd.DataFrame, t_col: Optional[str], n_col: Optional[str],
-                      base_name: str, pseudocount: float) -> pd.DataFrame:
-    """
-    Generic Δ and log2FC on two numeric columns. Creates
-    Delta_{base_name} and Log2FC_{base_name} (NaN if columns missing).
-    """
-    if not t_col or not n_col or t_col not in df.columns or n_col not in df.columns:
-        df[f"Delta_{base_name}"] = np.nan
-        df[f"Log2FC_{base_name}"] = np.nan
-        return df
-    t = pd.to_numeric(df[t_col], errors="coerce")
-    n = pd.to_numeric(df[n_col], errors="coerce")
-    df[f"Delta_{base_name}"] = t - n
-    df[f"Log2FC_{base_name}"] = np.log2((t + pseudocount) / (n + pseudocount))
-    return df
+# ---------------- Gene-reads merge helpers ----------------
 
-# --- Protein LFC from Ion ---
-def _add_log2fc_protein_from_ion(df: pd.DataFrame, pseudocount: float, case_id: Optional[str] = None) -> pd.DataFrame:
-    t_col, n_col = "Ion", "Ion-Normal"
-    if t_col in df.columns and n_col in df.columns:
-        t = pd.to_numeric(df[t_col], errors="coerce")
-        n = pd.to_numeric(df[n_col], errors="coerce")
-        df["Delta_Protein"]  = t - n
-        df["Log2FC_Protein"] = np.log2((t + pseudocount) / (n + pseudocount))
-    else:
-        df["Delta_Protein"]  = np.nan
-        df["Log2FC_Protein"] = np.nan
-        if case_id is not None:
-            logging.warning(f"[{case_id}] Ion/Ion-Normal not available — Log2FC_Protein set to NaN")
-    return df
-
-# --- Small utilities ---
-def _count_up_down(df: pd.DataFrame, col: str, thr: float) -> Tuple[int,int,int]:
-    s = pd.to_numeric(df[col], errors="coerce")
-    return int((s >= thr).sum()), int((s <= -thr).sum()), int(s.notna().sum())
-
-# --- gene_reads matching helpers ---
 def _auto_pick_gene_reads_id(df: pd.DataFrame) -> tuple[str, str]:
     for c in ["ENSG","ENSGene","ENSGene_core","gene_id","ensembl","Ensembl","Ensembl_ID"]:
         if c in df.columns: return c, "ensg"
@@ -394,7 +1218,8 @@ def _merge_rna_vs_gene_reads_dual(case_df: pd.DataFrame, cols: Dict[str, Optiona
         stats["used_key"] = desired_key
     return merged, stats
 
-# --- protein presence masks ---
+# ---------------- Protein presence masks ----------------
+
 def _protein_presence_masks(df: pd.DataFrame, cols: Dict[str, Optional[str]]) -> tuple[pd.Series, pd.Series]:
     if "Protein_Present_Tumor" in df.columns:
         present_t = df["Protein_Present_Tumor"].astype(bool)
@@ -410,14 +1235,17 @@ def _protein_presence_masks(df: pd.DataFrame, cols: Dict[str, Optional[str]]) ->
             present_n = df[cols["pro_n"]].notna()
     return present_t, present_n
 
-# --- cohort substitutions packages (SNV/SNP) ---
+# ---------------- Substitutions packaging ----------------
+
 def _build_cohort_substitution_packages(per_case_dir: Path, integrated_dir: Path, cohort_dir: Path,
                                         labels: Tuple[str,str] = ("SNV","SNP"), verbose: bool = False):
-    """Create cohort-level SNV/ and SNP/ packages under <cohort_dir>/substitutions/:
-       - substitutions_{label}.tsv (with Ion & Ion-Normal if present)
-       - aa_matrix_{label}.csv (21x21)
-       - signature12_{label}.csv (12-channel REF→ALT)"""
-    base_out = cohort_dir / "substitutions"
+    """
+    Create cohort-level SNV/ and SNP/ packages under <out_dir>/substitutions/cohort/<LBL>:
+      - substitutions_{label}.tsv (with Ion & Ion-Normal if present)
+      - aa_matrix_{label}.csv (21x21)
+      - signature12_{label}.csv (12-channel REF→ALT)
+    """
+    base_out = cohort_dir.parent / "substitutions" / "cohort"
     base_out.mkdir(parents=True, exist_ok=True)
     files = sorted(per_case_dir.glob("*_analysis.csv")) or sorted(integrated_dir.glob("*_integrated.csv"))
     if not files:
@@ -426,6 +1254,7 @@ def _build_cohort_substitution_packages(per_case_dir: Path, integrated_dir: Path
     per_label_rows = {labels[0]: [], labels[1]: []}
     per_label_pairs = {labels[0]: [], labels[1]: []}
     per_label_sig = {labels[0]: None, labels[1]: None}
+
     for f in files:
         try:
             df = pd.read_csv(f, dtype=str, low_memory=False).fillna("")
@@ -435,10 +1264,13 @@ def _build_cohort_substitution_packages(per_case_dir: Path, integrated_dir: Path
             aa_col = aa_field.iloc[:,15] if aa_field.shape[1] > 15 else pd.Series("", index=df.index)
             aa_start = aa_col.str.slice(0,1); aa_end = aa_col.str.slice(-1)
             lab = _classify_label(df, labels=labels)
+
+            # signature12 accumulators
             if "REF" in df.columns and "ALT" in df.columns:
                 for lbl in labels:
                     sig = _signature12_from_ref_alt(df.loc[lab==lbl, "REF"], df.loc[lab==lbl, "ALT"])
                     per_label_sig[lbl] = (per_label_sig[lbl] + sig) if per_label_sig[lbl] is not None else sig.copy()
+
             for lbl in labels:
                 mask = (lab == lbl)
                 if not mask.any(): continue
@@ -447,11 +1279,11 @@ def _build_cohort_substitution_packages(per_case_dir: Path, integrated_dir: Path
                     "Gene": df[cols["symbol"]] if cols["symbol"] else np.nan,
                     "AA_start": aa_start,
                     "AA_end": aa_end,
-                    "Substitution": aa_start + ">" + aa_end,
+                    "Substitution": aa_start + aa_end,
                     "REF": df.get("REF", np.nan),
                     "ALT": df.get("ALT", np.nan),
                     "Log2FC_RNA": df.get("Log2FC_RNA", np.nan),
-                    "Log2FC_CNV": df.get("Log2FC_CNV", np.nan),
+                    "Delta_CNV": df.get("Delta_CNV", np.nan),
                     "Log2FC_CH3": df.get("Log2FC_CH3", np.nan),
                     "Protein_Present": (df["Protein_Present_Tumor"].astype(bool)
                         if "Protein_Present_Tumor" in df.columns
@@ -459,13 +1291,14 @@ def _build_cohort_substitution_packages(per_case_dir: Path, integrated_dir: Path
                     "Ion": df["Ion"] if "Ion" in df.columns else np.nan,
                     "Ion-Normal": df["Ion-Normal"] if "Ion-Normal" in df.columns else np.nan,
                 })
-                keep = tmp["Substitution"].astype(str) != ">"
-                per_label_rows[lbl].append(tmp[keep])
-                pairs = list(zip(aa_start[mask & keep], aa_end[mask & keep]))
-                per_label_pairs[lbl].extend([(str(a), str(b)) for a,b in pairs if isinstance(a,str) and isinstance(b,str)])
+                keep = tmp["Substitution"].astype(str).str.match(r"^[A-Z\\*][A-Z\\*]$")
+                # IMPORTANT: filter by label + keep
+                per_label_rows[lbl].append(tmp.loc[mask & keep])
+                per_label_pairs[lbl].extend([(str(a), str(b)) for a,b in zip(aa_start[mask & keep], aa_end[mask & keep])])
         except Exception as e:
             if verbose:
-                print(f"[analysis] cohort substitutions scan failed for {f}: {e}")
+                logging.info(f"[analysis] cohort substitutions scan failed for {f}: {e}")
+
     for lbl in labels:
         out_dir = base_out / lbl
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -473,236 +1306,327 @@ def _build_cohort_substitution_packages(per_case_dir: Path, integrated_dir: Path
             pd.concat(per_label_rows[lbl], ignore_index=True).to_csv(out_dir / f"substitutions_{lbl}.tsv", sep="\t", index=False)
         else:
             pd.DataFrame(columns=["case_id","Gene","AA_start","AA_end","Substitution","REF","ALT",
-                                  "Log2FC_RNA","Log2FC_CNV","Log2FC_CH3","Protein_Present","Ion","Ion-Normal"]
+                                  "Log2FC_RNA","Delta_CNV","Log2FC_CH3","Protein_Present","Ion","Ion-Normal"]
                         ).to_csv(out_dir / f"substitutions_{lbl}.tsv", sep="\t", index=False)
         _aa_matrix_from_pairs(per_label_pairs[lbl]).to_csv(out_dir / f"aa_matrix_{lbl}.csv")
         (per_label_sig[lbl] if per_label_sig[lbl] is not None else pd.Series(0, index=_SUBS12, dtype=int)) \
             .to_csv(out_dir / f"signature12_{lbl}.csv", header=["count"])
 
-def _make_boxplots_protein_yes_vs_no(per_case_dir: Path, integrated_dir: Path, out_dir: Path, verbose: bool = False):
-    root = out_dir / "cohort_by_protein"
-    root.mkdir(parents=True, exist_ok=True)
-    per_case_files = sorted(per_case_dir.glob("*_analysis.csv")) or sorted(integrated_dir.glob("*_integrated.csv"))
-    if not per_case_files:
-        logging.warning("[analysis] No per-case files for protein yes/no boxplots.")
-        return
+# ---------------- Ion-only AA matrices ----------------
 
-    layers = {"RNA":"Log2FC_RNA","CNV":"Log2FC_CNV","CH3":"Log2FC_CH3"}
-    for L, col in layers.items():
-        yes_vals, no_vals = [], []
-        for f in per_case_files:
-            try:
-                df = pd.read_csv(f, dtype=str, low_memory=False)
-                cols = _detect_cols_expanded(df)
-                if col not in df.columns: continue
-                present_t, _ = _protein_presence_masks(df, cols)
-                vals = pd.to_numeric(df[col], errors="coerce")
-                yes_vals.extend(vals[present_t].dropna().tolist())
-                no_vals.extend(vals[~present_t].dropna().tolist())
-            except Exception as e:
-                if verbose: print(f"[analysis] protein yes/no collect failed for {f}: {e}")
+def _build_cohort_aa_matrices_ion_only(
+    cohort_dir: Path,
+    labels: Tuple[str, str] = ("SNV", "SNP"),
+    min_ion: Optional[float] = None,
+    verbose: bool = False,
+) -> Dict[str, str]:
+    """
+    Build cohort-level 21×21 AA matrices from substitutions with Ion evidence only.
 
-        if yes_vals and no_vals:
-            fig = plt.figure()
-            plt.boxplot([no_vals, yes_vals], labels=["Protein No","Protein Yes"], showfliers=False)
-            plt.title(f"Protein Yes vs No — {L}")
-            plt.ylabel(f"{L} log2FC")
-            fig.savefig(root / f"boxplot_yes_vs_no_{L}.png", dpi=150, bbox_inches="tight")
-            plt.close(fig)
+    Reads:
+        <out_dir>/substitutions/cohort/{LBL}/substitutions_{LBL}.tsv
+    Writes (only when there is data to write):
+        <out_dir>/substitutions/cohort/{LBL}/aa_matrix_{LBL}_{suffix}.csv
+        <out_dir>/substitutions/cohort/{LBL}/aa_matrix_{LBL}_{suffix}_prop.csv
 
-# ---------------- Per-case worker ----------------
+    Where:
+        suffix = "ion_only"        if min_ion is None
+               = f"ion_ge_{x}"    if min_ion is a number (e.g., 10.0 -> "ion_ge_10")
 
-_worker_cache = {
-    "lung_path": None,
-    "lung_col": None,
-    "lung_syms": None,
-    "lung_df_path": None,
-    "lung_df": None,
-    "gene_reads_key": None,
-    "gene_reads_df": None,
-}
+    Returns:
+        dict of label->path entries for counts/prop files that were written.
+    """
+    out_paths: Dict[str, str] = {}
+    base = Path(cohort_dir).parent / "substitutions" / "cohort"
+    suf = "ion_only" if min_ion is None else f"ion_ge_{float(min_ion):g}"
 
-def _get_lung_syms_cached(lung_path: Optional[str], lung_col: Optional[str]) -> set:
-    if not lung_path: return set()
-    lp = str(lung_path)
-    if _worker_cache["lung_path"] != lp or _worker_cache["lung_col"] != (lung_col or ""):
-        _worker_cache["lung_syms"] = _load_lung_symbols_robust(Path(lp), lung_col)
-        _worker_cache["lung_path"] = lp; _worker_cache["lung_col"] = lung_col or ""
-    return _worker_cache["lung_syms"] or set()
+    for lbl in labels:
+        subdir = base / lbl
+        subfile = subdir / f"substitutions_{lbl}.tsv"
+        if not subfile.exists():
+            if verbose:
+                logging.info(f"[ion-only] {lbl}: missing substitutions table -> {subfile}")
+            continue
 
-def _get_lung_df_cached(lung_path: Optional[str], lung_col: Optional[str]) -> Optional[pd.DataFrame]:
-    if not lung_path: return None
-    lp = str(lung_path); key = (lp, lung_col or "")
-    if _worker_cache.get("lung_df_path") != key:
-        _worker_cache["lung_df"] = _load_lung_table_robust(Path(lp), lung_col)
-        _worker_cache["lung_df_path"] = key
-    return _worker_cache["lung_df"]
+        try:
+            df = pd.read_csv(subfile, sep="\t", dtype=str, low_memory=False)
+        except Exception as e:
+            logging.warning(f"[ion-only] {lbl}: failed to read {subfile.name}: {e}")
+            continue
 
-def _get_gene_reads_cached(gr_path: Optional[str], sep: Optional[str] = None) -> Optional[pd.DataFrame]:
-    if not gr_path: return None
-    gp = str(gr_path); key = (gp, sep or "")
-    if _worker_cache.get("gene_reads_key") != key:
-        if gp.lower().endswith(".gct"):
-            _worker_cache["gene_reads_df"] = _read_gene_reads_table(Path(gp))
+        if df.empty:
+            if verbose:
+                logging.info(f"[ion-only] {lbl}: substitutions table empty; skipping.")
+            continue
+
+        # Ion support (first numeric before '/', consistent with per-case logic)
+        ion_series = df.get("Ion", pd.Series(index=df.index, dtype=object))
+        ion_first = _extract_ion_firstnum(
+            ion_series,
+            min_first=(min_ion if min_ion is not None else -np.inf)
+        )
+        ion_mask = pd.to_numeric(ion_first, errors="coerce").notna()
+
+        # AA start/end
+        aas = df.get("AA_start", pd.Series("", index=df.index)).astype(str).str.strip().str.upper()
+        aae = df.get("AA_end",   pd.Series("", index=df.index)).astype(str).str.strip().str.upper()
+        aa_mask = aas.isin(AA_ORDER) & aae.isin(AA_ORDER)
+
+        keep = ion_mask & aa_mask
+
+        if verbose:
+            logging.info(f"[ion-only] {lbl}: keep {int(keep.sum())}/{len(df)} rows "
+                         f"(min_ion={'any' if min_ion is None else min_ion})")
+
+        if not keep.any():
+            # Suppress writing empty files
+            continue
+
+        # De-dup AA pairs so exact duplicates don't inflate counts
+        use_pairs = (
+            pd.DataFrame({"F": aas[keep], "T": aae[keep]})
+            .drop_duplicates()
+        )
+        if use_pairs.empty:
+            continue
+
+        pairs = list(zip(use_pairs["F"], use_pairs["T"]))
+        mat_counts = _aa_matrix_from_pairs(pairs)
+        total = int(mat_counts.values.sum())
+        if total == 0:
+            # Nothing meaningful after aggregation; skip writing
+            continue
+
+        mat_prop = (mat_counts / total).astype(float)
+
+        counts_path = subdir / f"aa_matrix_{lbl}_{suf}.csv"
+        prop_path   = subdir / f"aa_matrix_{lbl}_{suf}_prop.csv"
+
+        # Ensure dir and write
+        _ensure_dir(counts_path.parent)
+        mat_counts.to_csv(counts_path)
+        mat_prop.to_csv(prop_path)
+
+        out_paths[f"{lbl}_counts"] = str(counts_path.resolve())
+        out_paths[f"{lbl}_prop"]   = str(prop_path.resolve())
+
+    return out_paths
+
+
+# ---------------- Delta/log2FC & Protein LFC ----------------
+
+def _add_delta_log2fc(df: pd.DataFrame, t_col: Optional[str], n_col: Optional[str],
+                      base_name: str, pseudocount: float) -> pd.DataFrame:
+    if not t_col or not n_col or t_col not in df.columns or n_col not in df.columns:
+        df[f"Delta_{base_name}"] = np.nan
+        df[f"Log2FC_{base_name}"] = np.nan
+        return df
+    t = pd.to_numeric(df[t_col], errors="coerce")
+    n = pd.to_numeric(df[n_col], errors="coerce")
+    df[f"Delta_{base_name}"] = t - n
+    df[f"Log2FC_{base_name}"] = np.log2((t + pseudocount) / (n + pseudocount))
+    return df
+
+def _add_log2fc_protein_from_ion(df: pd.DataFrame, pseudocount: float, case_id: Optional[str] = None) -> pd.DataFrame:
+    t_col, n_col = "Ion", "Ion-Normal"
+    if t_col in df.columns and n_col in df.columns:
+        t = pd.to_numeric(df[t_col], errors="coerce")
+        n = pd.to_numeric(df[n_col], errors="coerce")
+        df["Delta_Protein"]  = t - n
+        df["Log2FC_Protein"] = np.log2((t + pseudocount) / (n + pseudocount))
+    else:
+        df["Delta_Protein"]  = np.nan
+        df["Log2FC_Protein"] = np.nan
+        if case_id is not None:
+            logging.warning(f"[{case_id}] Ion/Ion-Normal not available — Log2FC_Protein set to NaN")
+    return df
+
+def _add_cnv_metrics(df: pd.DataFrame,
+                     t_col: Optional[str],
+                     n_col: Optional[str],
+                     pseudocount: float) -> pd.DataFrame:
+    if not t_col or not n_col or t_col not in df.columns or n_col not in df.columns:
+        df["Delta_CNV"] = np.nan
+        df["CNV_log2_t_vs_n"] = np.nan
+        df["CNV_log2_diploid_Tumor"] = np.nan
+        df["CNV_log2_diploid_Normal"] = np.nan
+        df["CNV_state_Tumor"] = pd.Series(pd.Categorical([np.nan]*len(df),
+            categories=["DeepDel","Loss","Diploid","Gain","Amp"]))
+        df["Log2FC_CNV"] = df["CNV_log2_t_vs_n"]
+        return df
+
+    t = pd.to_numeric(df[t_col], errors="coerce")
+    n = pd.to_numeric(df[n_col], errors="coerce")
+
+    df["Delta_CNV"] = t - n
+    df["CNV_log2_t_vs_n"] = np.log2((t + pseudocount) / (n + pseudocount))
+    df["CNV_log2_diploid_Tumor"]  = np.log2((t + pseudocount) / (2.0 + pseudocount))
+    df["CNV_log2_diploid_Normal"] = np.log2((n + pseudocount) / (2.0 + pseudocount))
+
+    bins  = [-0.5, 0.5, 1.5, 2.5, 5.5, np.inf]
+    labels= ["DeepDel","Loss","Diploid","Gain","Amp"]
+    df["CNV_state_Tumor"] = pd.cut(t, bins=bins, labels=labels).astype("category")
+
+    df["Log2FC_CNV"] = df["CNV_log2_t_vs_n"]  # back-compat alias
+    return df
+
+
+def _count_up_down(df: pd.DataFrame, col: str, thr: float) -> Tuple[int,int,int]:
+    s = pd.to_numeric(df[col], errors="coerce")
+    return int((s >= thr).sum()), int((s <= -thr).sum()), int(s.notna().sum())
+
+# ---------------- Volcano & Boxplot summaries ----------------
+
+def _pval_vs_zero(vals: Sequence[float]) -> float:
+    """
+    One-sample two-sided test of mean(vals) vs 0.0.
+    Uses SciPy ttest_1samp when available; otherwise falls back to Welch vs zeros.
+    Returns NaN when not enough data.
+    """
+    v = np.asarray(vals, dtype=float)
+    v = v[np.isfinite(v)]
+    if v.size < 2:
+        return np.nan
+    if ttest_1samp is not None:
+        try:
+            return float(ttest_1samp(v, 0.0, nan_policy="omit").pvalue)
+        except Exception:
+            pass
+    # Fallback: compare to zeros with same length (Welch)
+    return _two_group_test(v, np.zeros_like(v), method="welch")
+
+def _volcano_summary(
+    records: list[dict],
+    eff_key: str,
+    p_key: str = "pval",
+    *,
+    gene_key: str = "Gene",
+    q_key: str = "qval",
+    q_thresh: float = 0.05,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return (summary_row_df, top10_df) for a volcano's per-gene records."""
+    if not records:
+        summary = pd.DataFrame([{
+            "n_genes": 0,
+            f"n_sig_q<={q_thresh}": 0,
+            "n_sig_up": 0,
+            "n_sig_down": 0,
+            "prop_sig": 0.0,
+            "mean_abs_effect": np.nan,
+        }])
+        top = pd.DataFrame(columns=[gene_key, eff_key, p_key, q_key, "neglog10q"])
+        return summary, top
+
+    df = pd.DataFrame.from_records(records).copy()
+    if gene_key not in df.columns:
+        for alt in ("Gene","gene","feature","Feature"):
+            if alt in df.columns:
+                gene_key = alt
+                break
         else:
-            _worker_cache["gene_reads_df"] = pd.read_csv(gp, sep=sep, dtype=str) if sep else _read_gene_reads_table(Path(gp))
-        _worker_cache["gene_reads_key"] = key
-    return _worker_cache["gene_reads_df"]
+            df[gene_key] = [f"feat_{i}" for i in range(len(df))]
 
-def _extract_substitutions(case_id: str, df: pd.DataFrame, cols: Dict[str, Optional[str]]) -> pd.DataFrame:
-    """Parse INFO pipe-field 16 (index 15) to derive AA start/end and a Substitution label (e.g., A>V).
-       Returns a per-row table; caller may group/deduplicate."""
-    info_col = cols.get("info")
-    if not info_col or info_col not in df.columns:
-        return pd.DataFrame(columns=["case_id","Gene","Substitution","AA_start","AA_end",
-                                     "Log2FC_RNA","Log2FC_CNV","Log2FC_CH3","Protein_Present",
-                                     "Ion","Ion-Normal"])
+    df[eff_key] = pd.to_numeric(df.get(eff_key), errors="coerce")
+    if p_key in df.columns:
+        df[p_key] = pd.to_numeric(df[p_key], errors="coerce")
+    else:
+        df[p_key] = np.nan
 
-    info = df[info_col].astype(str).fillna("")
-    toks = info.str.split("|", expand=True)
-    if toks.shape[1] <= 15:
-        return pd.DataFrame(columns=["case_id","Gene","Substitution","AA_start","AA_end",
-                                     "Log2FC_RNA","Log2FC_CNV","Log2FC_CH3","Protein_Present",
-                                     "Ion","Ion-Normal"])
+    if q_key not in df.columns:
+        df[q_key] = _bh_fdr(np.nan_to_num(df[p_key].to_numpy(), nan=1.0))
+    else:
+        df[q_key] = pd.to_numeric(df[q_key], errors="coerce")
 
-    aa = toks.iloc[:,15].astype(str).str.strip()
-    aa_start = aa.str.slice(0,1)
-    aa_end = aa.str.slice(-1)
-    subst = aa_start + ">" + aa_end
+    df["neglog10q"] = -np.log10(df[q_key] + 1e-300)
+    df["_abs_eff"]  = df[eff_key].abs()
+    df["_sign"]     = np.sign(df[eff_key])
+    df["_sig"]      = df[q_key] <= q_thresh
 
-    # prefer your explicit tumor presence boolean if present
-    protein_present = (df["Protein_Present_Tumor"].astype(bool)
-                       if "Protein_Present_Tumor" in df.columns
-                       else (df[cols["pro_t"]].notna() if cols["pro_t"] else False))
+    n = int(len(df))
+    n_sig = int(df["_sig"].sum())
+    n_up = int((df["_sig"] & (df["_sign"] > 0)).sum())
+    n_down = int((df["_sig"] & (df["_sign"] < 0)).sum())
+    mean_abs = float(df["_abs_eff"].mean())
 
-    out = pd.DataFrame({
-        "case_id": case_id,
-        "Gene": df[cols["symbol"]] if cols["symbol"] else np.nan,
-        "Substitution": subst,
-        "AA_start": aa_start,
-        "AA_end": aa_end,
-        "Log2FC_RNA": df.get("Log2FC_RNA", np.nan),
-        "Log2FC_CNV": df.get("Log2FC_CNV", np.nan),
-        "Log2FC_CH3": df.get("Log2FC_CH3", np.nan),
-        "Protein_Present": protein_present,
-        # carry through Ion columns when present (else NaN)
-        "Ion": df["Ion"] if "Ion" in df.columns else np.nan,
-        "Ion-Normal": df["Ion-Normal"] if "Ion-Normal" in df.columns else np.nan,
-    })
+    summary = pd.DataFrame([{
+        "n_genes": n,
+        f"n_sig_q<={q_thresh}": n_sig,
+        "n_sig_up": n_up,
+        "n_sig_down": n_down,
+        "prop_sig": (n_sig / n) if n else 0.0,
+        "mean_abs_effect": mean_abs,
+    }])
 
-    # clean: drop NA substitutions or ones like '>' only
-    mask = aa.notna() & (aa.str.len() >= 2) & (subst != ">")
-    return out[mask]
+    top = (
+        df.sort_values([q_key, "_abs_eff"], ascending=[True, False])
+          [[gene_key, eff_key, p_key, q_key, "neglog10q"]]
+          .head(100)
+          .rename(columns={gene_key: "Gene"})
+    )
+    return summary, top
 
-def _process_case_worker(fp_str: str, out_dir_str: str, opts: dict) -> dict:
-    try:
-        fp = Path(fp_str)
-        out_dir = Path(out_dir_str)
-        per_case_dir = out_dir / "per_case"; per_case_dir.mkdir(parents=True, exist_ok=True)
-        rna_cmp_dir = out_dir / "rna_vs_gene_reads"; rna_cmp_dir.mkdir(parents=True, exist_ok=True)
-        subs_dir = out_dir / "substitutions"
-        if opts.get("emit_substitutions", False):
-            subs_dir.mkdir(parents=True, exist_ok=True)
+def _boxplot_summary_df(
+    groups: Dict[str, Sequence],
+    *,
+    method: str = "welch",
+    pairwise: bool = True
+) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+    """
+    Per-group descriptive stats and optional pairwise tests (p & q).
+    Returns: (by_group_df, pairwise_df or None)
+    """
+    rows = []
+    clean_groups: Dict[str, np.ndarray] = {}
+    for name, vals in groups.items():
+        v = pd.Series(vals, dtype=float)
+        v = v[np.isfinite(v)]
+        clean_groups[name] = v.to_numpy()
+        rows.append(_series_summary_df(v, label=name).iloc[0].to_dict())
+    by_group = pd.DataFrame(rows)
 
-        case_id = _case_id_from_path(fp)
-        df = pd.read_csv(fp, sep=",", dtype=str, low_memory=False)
-        cols = _detect_cols_expanded(df)
+    labels = list(clean_groups.keys())
+    if not pairwise or len(labels) < 2:
+        return by_group, None
 
-        # Lung annotation merge (with annotations) or fallback boolean flag
-        lung_df = _get_lung_df_cached(opts.get("lung_tsv"), opts.get("lung_gene_col"))
-        if cols["symbol"] and lung_df is not None and not lung_df.empty:
-            sym_norm = df[cols["symbol"]].astype(str).str.strip().str.upper()
-            aux = pd.DataFrame({"__sym__": sym_norm})
-            ldf = lung_df.copy(); ldf["Gene"] = ldf["Gene"].astype(str).str.strip().str.upper()
-            aux = aux.merge(ldf, left_on="__sym__", right_on="Gene", how="left")
-            df["Lung_Present"] = aux["Gene"].notna()
-            if "cell_type" in aux.columns: df["Lung_cell_type"] = aux["cell_type"]
-            if "level" in aux.columns:     df["Lung_level"]      = aux["level"]
-            if "reliability" in aux.columns: df["Lung_reliability"] = aux["reliability"]
-        else:
-            lung_syms = _get_lung_syms_cached(opts.get("lung_tsv"), opts.get("lung_gene_col"))
-            df = _add_lung_flag(df, cols["symbol"], lung_syms)
+    pairs = []
+    for i in range(len(labels)):
+        for j in range(i+1, len(labels)):
+            a_name, b_name = labels[i], labels[j]
+            a = clean_groups[a_name]; b = clean_groups[b_name]
+            mean_a = float(np.nanmean(a)) if a.size else np.nan
+            mean_b = float(np.nanmean(b)) if b.size else np.nan
+            delta  = mean_a - mean_b
+            if np.all(a > 0) and np.all(b > 0):
+                log2fc = float(np.log2((mean_a + 1e-12)/(mean_b + 1e-12)))
+            else:
+                log2fc = np.nan
+            p = _two_group_test(a, b, method=method)
+            pairs.append({
+                "group_a": a_name, "group_b": b_name,
+                "n_a": int(a.size), "n_b": int(b.size),
+                "mean_a": mean_a, "mean_b": mean_b,
+                "delta_mean": delta, "log2FC": log2fc, "pval": p,
+            })
+    pairwise_df = pd.DataFrame(pairs)
+    pairwise_df["qval"] = _bh_fdr(np.nan_to_num(pairwise_df["pval"].to_numpy(), nan=1.0))
 
-        # Protein presence + Ion extraction (only if at least one SEQ)
-        has_any_seq = bool(cols["pro_t"]) and df[cols["pro_t"]].notna().any()
-        if has_any_seq:
-            df["Protein_Present_Tumor"]  = df[cols["pro_t"]].notna() if cols["pro_t"] else False
-            df["Protein_Present_Normal"] = df[cols["pro_n"]].notna() if cols["pro_n"] else False
-            if cols.get("pro_int_t") and cols["pro_int_t"] in df.columns:
-                ion_t = _extract_ion_firstnum(df[cols["pro_int_t"]], min_first=10.0)
-                df["Ion"] = ion_t.where(df["Protein_Present_Tumor"], np.nan)
-            if cols.get("pro_int_n") and cols["pro_int_n"] in df.columns:
-                ion_n = _extract_ion_firstnum(df[cols["pro_int_n"]], min_first=10.0)
-                df["Ion-Normal"] = ion_n.where(df["Protein_Present_Normal"], np.nan)
+    if len(labels) == 2 and len(pairwise_df) == 1:
+        pv = float(pairwise_df.loc[0, "pval"]); qv = float(pairwise_df.loc[0, "qval"])
+        dm = float(pairwise_df.loc[0, "delta_mean"]); l2 = float(pairwise_df.loc[0, "log2FC"]) if np.isfinite(pairwise_df.loc[0, "log2FC"]) else np.nan
+        by_group = by_group.copy()
+        by_group["pval"] = pv; by_group["qval"] = qv
+        by_group["delta_mean_vs_other"] = [dm, -dm]
+        by_group["log2FC_vs_other"]     = [l2, (-l2 if np.isfinite(l2) else np.nan)]
+    return by_group, pairwise_df
 
-        # Deltas & log2FCs
-        pseudocount = float(opts.get("pseudocount", 1.0))
-        df = _add_delta_log2fc(df, cols["rna_t"], cols["rna_n"], "RNA", pseudocount)
-        df = _add_delta_log2fc(df, cols["cn_t"], cols["cn_n"], "CNV", pseudocount)
-        df = _add_delta_log2fc(df, cols["ch3_t"], cols["ch3_n"], "CH3", pseudocount)
-        df = _add_log2fc_protein_from_ion(df, pseudocount, case_id=case_id)
+# ---------------- Cohort/plot pipelines ----------------
 
-
-        # Per-case summary row
-        thr = float(opts.get("log2fc_thr", 1.0))
-        row = {"case_id": case_id}
-        for base in ["RNA","CNV","CH3","Protein"]:
-            up, down, n = _count_up_down(df, f"Log2FC_{base}", thr)
-            row[f"{base}_up_{thr}"] = int(up); row[f"{base}_down_{thr}"] = int(down); row[f"{base}_n_with_log2fc"] = int(n)
-
-        # RNA vs gene_reads comparison
-        desired_key = opts.get("desired_key", "symbol")
-        gene_reads_df = _get_gene_reads_cached(opts.get("gene_reads"), opts.get("gene_reads_sep"))
-        if gene_reads_df is not None and cols["rna_t"]:
-            merged, stats = _merge_rna_vs_gene_reads_dual(df, cols, gene_reads_df, desired_key, opts.get("gene_reads_value_col"))
-            row.update({"rna_vs_gene_reads_n": stats["n"], "rna_vs_gene_reads_pearson": stats["pearson"],
-                        "rna_vs_gene_reads_spearman": stats["spearman"], "rna_vs_gene_reads_key_used": stats.get("used_key")})
-            if not merged.empty:
-                (rna_cmp_dir / f"{case_id}_rna_merge.csv").parent.mkdir(parents=True, exist_ok=True)
-                merged.to_csv(rna_cmp_dir / f"{case_id}_rna_merge.csv", index=False)
-
-        # Substitutions per-case
-        if opts.get("emit_substitutions", False):
-            subdf = _extract_substitutions(case_id, df, cols)
-            if not subdf.empty:
-                subdf.to_csv(subs_dir / f"{case_id}_substitutions.tsv", sep="\t", index=False)
-
-        # Save augmented per-case
-        df.to_csv(per_case_dir / f"{case_id}_analysis.csv", index=False)
-
-        # Simple per-case plots (if requested)
-        if opts.get("make_plots", False):
-            case_plot_dir = (out_dir / "plots" / case_id)  # per-case local plots; not cohort
-            case_plot_dir.mkdir(parents=True, exist_ok=True)
-            ext = opts.get("plot_ext", "png")
-            for label, col in [('RNA','Log2FC_RNA'),('CNV','Log2FC_CNV'),('CH3','Log2FC_CH3'),('Protein','Log2FC_Protein')]:
-                if col in df.columns:
-                    fig = plt.figure(); s = pd.to_numeric(df[col], errors="coerce").dropna()
-                    if not s.empty:
-                        plt.hist(s, bins=50); plt.title(f'{case_id} {label} log2FC'); plt.xlabel('log2FC'); plt.ylabel('Count')
-                        fig.savefig(case_plot_dir / f'{col}.{ext}', dpi=150, bbox_inches="tight"); plt.close(fig)
-            if gene_reads_df is not None and cols["rna_t"]:
-                merged, stats = _merge_rna_vs_gene_reads_dual(df, cols, gene_reads_df, desired_key, opts.get("gene_reads_value_col"))
-                if not merged.empty:
-                    fig = plt.figure(); plt.scatter(merged['RNA_Count'], merged['gene_reads'], s=8)
-                    ann = f"pearson={stats['pearson']:.3f}\nspearman={stats['spearman']:.3f}\nn={stats['n']}"
-                    plt.title(f'{case_id} RNA vs gene_reads'); plt.xlabel('RNA_Count'); plt.ylabel('gene_reads')
-                    plt.text(0.02, 0.98, ann, transform=plt.gca().transAxes, va="top")
-                    fig.savefig(case_plot_dir / f'rna_vs_gene_reads.{ext}', dpi=150, bbox_inches="tight"); plt.close(fig)
-
-        return row
-    except Exception as e:
-        return {"case_id": _case_id_from_path(Path(fp_str)), "error": str(e)}
-
-
-# ---------------- Cohort plots (save directly under <cohort_dir>) ----------------
-
-def _is_snv_row(row) -> bool:
-    ref = str(row.get("REF", "") or "").strip(); alt = str(row.get("ALT", "") or "").strip()
-    if ref and alt and len(ref) == 1 and len(alt) == 1:
-        return ref.upper() in "ACGT" and alt.upper() in "ACGT"
-    cons = str(row.get("Consequence", "") or "").lower()
-    return any(k in cons for k in ("missense","synonymous","nonsense","stop_gained","stop_lost","start_lost"))
+def _layer_cols_from_detect(cols: dict, base: str) -> tuple[Optional[str], Optional[str]]:
+    if base == "RNA":     return cols.get("rna_t"), cols.get("rna_n")
+    if base == "CNV":     return cols.get("cn_t"),  cols.get("cn_n")
+    if base == "CH3":     return cols.get("ch3_t"), cols.get("ch3_n")
+    if base == "Protein": return "Ion", "Ion-Normal"
+    return None, None
 
 def _collect_snv_genes_from_case(df: pd.DataFrame, sym_col: str) -> set:
     if sym_col not in df.columns: return set()
@@ -715,110 +1639,19 @@ def _collect_snv_genes_from_case(df: pd.DataFrame, sym_col: str) -> set:
         snv_mask = cons.str.contains("missense|synonymous|nonsense|stop_gained|stop_lost|start_lost", regex=True)
     return set(df.loc[snv_mask, sym_col].astype(str).str.strip().str.upper().unique().tolist())
 
-def _layer_cols_from_detect(cols: dict, base: str) -> tuple[str, str]:
-    if base == "RNA":
-        return cols.get("rna_t"), cols.get("rna_n")
-    if base == "CNV":
-        return cols.get("cn_t"), cols.get("cn_n")
-    if base == "CH3":
-        return cols.get("ch3_t"), cols.get("ch3_n")
-    if base == "Protein":
-        # Prefer Ion intensity columns; downstream code will verify presence in df
-        return ("Ion", "Ion-Normal")
-    return None, None
-
-
-def _make_cohort_boxplots_and_volcano(per_case_dir: Path, integrated_dir: Path, out_dir: Path, verbose: bool = False):
-    plots_dir = out_dir  # <out_dir>=cohort_dir; write images directly into cohort/
-    plots_dir.mkdir(parents=True, exist_ok=True)
-
-    snv_genes = set()
-    per_case_files = sorted(per_case_dir.glob("*_analysis.csv")) or sorted(integrated_dir.glob("*_integrated.csv"))
-    for f in per_case_files:
-        try:
-            df = pd.read_csv(f, dtype=str, low_memory=False)
-            cols = _detect_cols_expanded(df); sym_col = cols.get("symbol")
-            if sym_col: snv_genes.update(_collect_snv_genes_from_case(df, sym_col))
-        except Exception as e:
-            if verbose: print(f"[analysis] SNV scan failed for {f}: {e}")
-    if not snv_genes:
-        logging.warning("[analysis] No SNV-harboring genes detected; skipping cohort boxplots/volcano")
-        return
-
-    layers = ["RNA","CNV","CH3","Protein"]
-    layer_data = {L: {"tumor": [], "normal": []} for L in layers}
-
-    for f in per_case_files:
-        try:
-            df = pd.read_csv(f, dtype=str, low_memory=False)
-            cols = _detect_cols_expanded(df); sym_col = cols.get("symbol")
-            if not sym_col: continue
-            mask = df[sym_col].astype(str).str.strip().str.upper().isin(snv_genes)
-            if not mask.any(): continue
-            sdf = df.loc[mask]
-            for L in layers:
-                t_col, n_col = _layer_cols_from_detect(cols, L)
-                if not t_col or not n_col or t_col not in sdf.columns or n_col not in sdf.columns: continue
-                tvals = pd.to_numeric(sdf[t_col], errors="coerce").dropna()
-                nvals = pd.to_numeric(sdf[n_col], errors="coerce").dropna()
-                if len(tvals): layer_data[L]["tumor"].extend(tvals.tolist())
-                if len(nvals): layer_data[L]["normal"].extend(nvals.tolist())
-        except Exception as e:
-            if verbose: print(f"[analysis] aggregation failed for {f}: {e}")
-
-    for L in layers:
-        tvals = layer_data[L]["tumor"]; nvals = layer_data[L]["normal"]
-        if not tvals or not nvals: continue
-        fig = plt.figure(); plt.boxplot([nvals, tvals], labels=["Normal","Tumor"], showfliers=False)
-        plt.title(f"Cohort {L} (SNV genes)"); plt.ylabel(L)
-        fig.savefig(plots_dir / f"cohort_boxplot_{L}.png", dpi=150, bbox_inches="tight"); plt.close(fig)
-
-    layer_l2fc_cols = {"RNA":"Log2FC_RNA","CNV":"Log2FC_CNV","CH3":"Log2FC_CH3","Protein":"Log2FC_Protein"}
-    for L, col in layer_l2fc_cols.items():
-        rows = []
-        for f in per_case_files:
-            try:
-                df = pd.read_csv(f, dtype=str, low_memory=False); cols = _detect_cols_expanded(df); sym_col = cols.get("symbol")
-                if not sym_col or col not in df.columns: continue
-                sdf = df[[sym_col, col]].copy()
-                sdf[sym_col] = sdf[sym_col].astype(str).str.strip().str.upper()
-                sdf = sdf[sdf[sym_col].isin(snv_genes)]
-                sdf[col] = pd.to_numeric(sdf[col], errors="coerce"); sdf = sdf.dropna(subset=[col])
-                rows.append(sdf.rename(columns={sym_col: "Gene"}))
-            except Exception as e:
-                if verbose: print(f"[analysis] volcano input failed for {f}: {e}")
-        if not rows: continue
-        big = pd.concat(rows, ignore_index=True)
-        agg = big.groupby("Gene")[col].apply(list).reset_index(name="vals")
-        xs, ys = [], []
-        for _, r in agg.iterrows():
-            vals = [v for v in r["vals"] if pd.notna(v)]; n = len(vals)
-            if not vals: continue
-            mean = float(np.mean(vals)); std = float(np.std(vals, ddof=1)) if n > 1 else 0.0
-            if _scistats is not None and n > 1 and std > 0:
-                ttest = _scistats.ttest_1samp(vals, 0.0, nan_policy="omit")
-                p = float(getattr(ttest, "pvalue", ttest[1] if isinstance(ttest, tuple) else 1.0))
-            else:
-                p = 1.0
-            xs.append(mean); ys.append(-np.log10(max(p, 1e-300)))
-        if not xs: continue
-        fig = plt.figure(); plt.scatter(xs, ys, s=8)
-        plt.title(f"Cohort volcano — {L} (SNV genes)"); plt.xlabel("Mean log2FC"); plt.ylabel("-log10 p")
-        fig.savefig(plots_dir / f"cohort_volcano_{L}.png", dpi=150, bbox_inches="tight"); plt.close(fig)
-
-def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_dir: Path, out_dir: Path, verbose: bool = False):
+def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_dir: Path, out_dir: Path,
+                                                 verbose: bool = False, use_ch3_m: bool = False, ext: str = "png"):
     root_dir = out_dir / "cohort_by_protein"
     (root_dir / "prot_yes").mkdir(parents=True, exist_ok=True)
     (root_dir / "prot_no").mkdir(parents=True, exist_ok=True)
 
     per_case_files = sorted(per_case_dir.glob("*_analysis.csv")) or sorted(integrated_dir.glob("*_integrated.csv"))
     if not per_case_files:
-        logging.warning("[analysis] No per-case files found for cohort-by-protein plots"); return
+        logging.warning("[analysis] No per-case files for cohort-by-protein plots"); return
 
     strata = {"prot_yes": {"snv_genes": set(), "plots_dir": root_dir / "prot_yes"},
               "prot_no":  {"snv_genes": set(), "plots_dir": root_dir / "prot_no"}}
 
-    # 1) SNV genes per stratum
     for f in per_case_files:
         try:
             df = pd.read_csv(f, dtype=str, low_memory=False); cols = _detect_cols_expanded(df); sym_col = cols.get("symbol")
@@ -829,15 +1662,18 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
             if (~present_t).any():
                 strata["prot_no"]["snv_genes"].update(_collect_snv_genes_from_case(df.loc[~present_t], sym_col))
         except Exception as e:
-            if verbose: print(f"[analysis] strat SNV scan failed for {f}: {e}")
+            if verbose: logging.info(f"[analysis] strat SNV scan failed for {f}: {e}")
 
-    # 2) Boxplots + volcano per stratum
     layers = ["RNA","CNV","CH3","Protein"]
-    layer_l2fc_cols = {"RNA":"Log2FC_RNA","CNV":"Log2FC_CNV","CH3":"Log2FC_CH3","Protein":"Log2FC_Protein"}
+    layer_effect_cols = {
+        "RNA": "Log2FC_RNA",
+        "CNV": "Delta_CNV",
+        "CH3": ("DeltaM_CH3" if use_ch3_m else "Log2FC_CH3"),
+        "Protein": "Log2FC_Protein",
+    }
 
     for name, bag in strata.items():
         snv_genes = bag["snv_genes"]; plots_dir = bag["plots_dir"]
-        if verbose: print(f"[analysis] {name}: SNV genes: {len(snv_genes)}")
         if not snv_genes:
             logging.warning(f"[analysis] No SNV genes for {name}; skipping"); continue
 
@@ -854,22 +1690,30 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
                 if sdf.empty: continue
                 for L in layers:
                     t_col, n_col = _layer_cols_from_detect(cols, L)
+                    if L == "CH3" and use_ch3_m:
+                        t_col, n_col = "M_CH3_Tumor", "M_CH3_Normal"
                     if not t_col or not n_col or t_col not in sdf.columns or n_col not in sdf.columns: continue
                     tvals = pd.to_numeric(sdf[t_col], errors="coerce").dropna()
                     nvals = pd.to_numeric(sdf[n_col], errors="coerce").dropna()
                     if len(tvals): layer_data[L]["tumor"].extend(tvals.tolist())
                     if len(nvals): layer_data[L]["normal"].extend(nvals.tolist())
             except Exception as e:
-                if verbose: print(f"[analysis] {name} aggregation failed for {f}: {e}")
+                if verbose: logging.info(f"[analysis] {name} aggregation failed for {f}: {e}")
 
         for L in layers:
             tvals = layer_data[L]["tumor"]; nvals = layer_data[L]["normal"]
             if not tvals or not nvals: continue
             fig = plt.figure(); plt.boxplot([nvals, tvals], labels=["Normal","Tumor"], showfliers=False)
-            plt.title(f"Cohort {L} (SNV genes, {name.replace('_',' ')})"); plt.ylabel(L)
-            fig.savefig(plots_dir / f"cohort_boxplot_{L}_{name}.png", dpi=150, bbox_inches="tight"); plt.close(fig)
+            plt.title(f"Cohort {L} (SNV genes, {name.replace('_',' ')})")
+            plt.ylabel("CH3 M-value" if (L=="CH3" and use_ch3_m) else L)
+            by_group, pairwise = _boxplot_summary_df({"Normal": nvals, "Tumor": tvals})
+            save_plot(plots_dir, f"cohort_boxplot_{L}_{name}", fig=fig, csv_df=by_group, ext=ext)
+            if pairwise is not None:
+                pairwise.to_csv(plots_dir / f"cohort_boxplot_{L}_{name}_pairwise.csv", index=False)
+            plt.close(fig)
 
-        for L, col in layer_l2fc_cols.items():
+        for L, col0 in layer_effect_cols.items():
+            col = "DeltaM_CH3" if (L=="CH3" and use_ch3_m) else col0
             rows = []
             for f in per_case_files:
                 try:
@@ -883,46 +1727,51 @@ def _make_cohort_boxplots_and_volcano_by_protein(per_case_dir: Path, integrated_
                     sdf[col] = pd.to_numeric(sdf[col], errors="coerce"); sdf = sdf.dropna(subset=[col])
                     if not sdf.empty: rows.append(sdf.rename(columns={sym_col: "Gene"}))
                 except Exception as e:
-                    if verbose: print(f"[analysis] {name} volcano input failed for {f}: {e}")
-            if not rows: continue
+                    if verbose: logging.info(f"[analysis] {name} volcano input failed for {f}: {e}")
+            if not rows:
+                if verbose: logging.info(f"[analysis] {name} volcano empty for {L}")
+                continue
             big = pd.concat(rows, ignore_index=True)
             agg = big.groupby("Gene")[col].apply(list).reset_index(name="vals")
-            xs, ys = [], []
+            xs, ys, records = [], [], []
             for _, r in agg.iterrows():
-                vals = [v for v in r["vals"] if pd.notna(v)]; n = len(vals)
+                vals = [v for v in r["vals"] if pd.notna(v)]
                 if not vals: continue
-                mean = float(np.mean(vals)); std = float(np.std(vals, ddof=1)) if n > 1 else 0.0
-                if _scistats is not None and n > 1 and std > 0:
-                    ttest = _scistats.ttest_1samp(vals, 0.0, nan_policy="omit")
-                    p = float(getattr(ttest, "pvalue", ttest[1] if isinstance(ttest, tuple) else 1.0))
-                else:
-                    p = 1.0
-                xs.append(mean); ys.append(-np.log10(max(p, 1e-300)))
-            if not xs: continue
-            fig = plt.figure(); plt.scatter(xs, ys, s=8)
-            plt.title(f"Cohort volcano — {L} (SNV genes, {name.replace('_',' ')})")
-            plt.xlabel("Mean log2FC"); plt.ylabel("-log10 p")
-            fig.savefig(plots_dir / f"cohort_volcano_{L}_{name}.png", dpi=150, bbox_inches="tight"); plt.close(fig)
+                diff = float(np.mean(vals))
+                p = _two_group_test(np.asarray(vals), np.zeros_like(vals), method="welch")
+                xs.append(diff); ys.append(-np.log10(max(p, 1e-300)))
+                records.append({"Gene": r["Gene"], ("Mean ΔM" if (L=="CH3" and use_ch3_m) else "MeanDiff"): diff, "n": len(vals), "pval": p})
+            fig = plt.figure()
+            plt.scatter(xs, ys, s=8); plt.axvline(0.0, linestyle="--", linewidth=0.8)
+            plt.title(f"{name.replace('_',' ').title()} — {L}")
+            plt.xlabel(("Mean ΔM" if (L=="CH3" and use_ch3_m) else "Mean difference (vs 0)"))
+            plt.ylabel("-log10 p")
+            summary_df, top10_df = _volcano_summary(records, eff_key=("Mean ΔM" if (L=="CH3" and use_ch3_m) else "MeanDiff"))
+            save_plot(plots_dir, f"cohort_volcano_{L}_{name}", fig=fig, ext=ext)
+            summary_df.to_csv(plots_dir / f"cohort_volcano_{L}_{name}_summary.csv", index=False)
+            top10_df.to_csv(plots_dir / f"cohort_volcano_{L}_{name}_top10.csv", index=False)
+            plt.close(fig)
 
-def _make_volcano_protein_yes_vs_no(per_case_dir: Path, integrated_dir: Path, out_dir: Path, verbose: bool = False):
+
+def _make_volcano_protein_yes_vs_no(per_case_dir: Path, integrated_dir: Path, out_dir: Path,
+                                    verbose: bool = False, use_ch3_m: bool = False, ext: str = "png"):
     root = out_dir / "cohort_by_protein"
     root.mkdir(parents=True, exist_ok=True)
     per_case_files = sorted(per_case_dir.glob("*_analysis.csv")) or sorted(integrated_dir.glob("*_integrated.csv"))
     if not per_case_files:
         logging.warning("[analysis] No per-case files for protein yes/no volcano."); return
 
-    # SNV union
     snv_genes = set()
     for f in per_case_files:
         try:
             df = pd.read_csv(f, dtype=str, low_memory=False); cols = _detect_cols_expanded(df); sym_col = cols.get("symbol")
             if sym_col: snv_genes.update(_collect_snv_genes_from_case(df, sym_col))
         except Exception as e:
-            if verbose: print(f"[analysis] SNV scan failed for {f}: {e}")
+            if verbose: logging.info(f"[analysis] SNV scan failed for {f}: {e}")
     if not snv_genes:
         logging.warning("[analysis] No SNV genes detected; skipping protein yes/no volcano."); return
 
-    layers = {"RNA":"Log2FC_RNA","CNV":"Log2FC_CNV","CH3":"Log2FC_CH3"}
+    layers = {"RNA":"Log2FC_RNA","CNV":"Delta_CNV","CH3":("DeltaM_CH3" if use_ch3_m else "Log2FC_CH3")}
     for L, col in layers.items():
         yes_vals, no_vals = {}, {}
         for f in per_case_files:
@@ -939,30 +1788,352 @@ def _make_volcano_protein_yes_vs_no(per_case_dir: Path, integrated_dir: Path, ou
                 for _, r in sdf_yes.iterrows(): yes_vals.setdefault(r[sym_col], []).append(float(r[col]))
                 for _, r in sdf_no.iterrows():  no_vals.setdefault(r[sym_col], []).append(float(r[col]))
             except Exception as e:
-                if verbose: print(f"[analysis] protein yes/no collect failed for {f}: {e}")
+                if verbose: logging.info(f"[analysis] protein yes/no collect failed for {f}: {e}")
 
-        xs, ys = [], []
+        xs, ys, records = [], [], []
         for g in sorted(snv_genes):
             a, b = yes_vals.get(g, []), no_vals.get(g, [])
             if len(a) < 1 or len(b) < 1: continue
-            diff = float(np.mean(a)) - float(np.mean(b))
-            if _scistats is not None and len(a) > 1 and len(b) > 1:
-                try:
-                    ttest = _scistats.ttest_ind(a, b, equal_var=False, nan_policy="omit")
-                    p = float(getattr(ttest, "pvalue", ttest[1] if isinstance(ttest, tuple) else 1.0))
-                except Exception:
-                    p = 1.0
-            else:
-                p = 1.0
+            diff = float(np.mean(a) - np.mean(b))
+            p = _two_group_test(np.asarray(a), np.asarray(b), method="welch")
             xs.append(diff); ys.append(-np.log10(max(p, 1e-300)))
-        if not xs: 
-            if verbose: print(f"[analysis] protein yes/no volcano empty for {L}")
+            records.append({"Gene": g, "MeanDiff": diff, "n_yes": len(a), "n_no": len(b), "pval": p})
+        if not xs:
+            if verbose: logging.info(f"[analysis] protein yes/no volcano empty for {L}")
             continue
-        fig = plt.figure(); plt.scatter(xs, ys, s=8); plt.axvline(0.0, linestyle="--", linewidth=0.8)
-        plt.title(f"Protein Yes vs No — {L}"); plt.xlabel("Mean difference (Yes − No)"); plt.ylabel("-log10 p")
-        fig.savefig(root / f"volcano_yes_vs_no_{L}.png", dpi=150, bbox_inches="tight"); plt.close(fig)
+
+        fig = plt.figure()
+        plt.scatter(xs, ys, s=8); plt.axvline(0.0, linestyle="--", linewidth=0.8)
+        plt.title(f"Protein Yes vs No — {L}")
+        plt.xlabel("Mean difference (Yes − No)" + (" in ΔM" if (L=="CH3" and use_ch3_m) else " in log2FC"))
+        plt.ylabel("-log10 p")
+        summary_df, top10_df = _volcano_summary(records, eff_key="MeanDiff")
+        save_plot(root, f"cohort_volcano_yes_no_{L}", fig=fig, ext=ext)
+        summary_df.to_csv(root / f"cohort_volcano_yes_no_{L}_summary.csv", index=False)
+        top10_df.to_csv(root / f"cohort_volcano_yes_no_{L}_top10.csv", index=False)
+        plt.close(fig)
 
 
+def _make_boxplots_protein_yes_vs_no(per_case_dir: Path, integrated_dir: Path, out_dir: Path,
+                                     verbose: bool = False, use_ch3_m: bool = False, ext: str = "png"):
+    root = out_dir / "cohort_by_protein"
+    root.mkdir(parents=True, exist_ok=True)
+    per_case_files = sorted(per_case_dir.glob("*_analysis.csv")) or sorted(integrated_dir.glob("*_integrated.csv"))
+    if not per_case_files:
+        logging.warning("[analysis] No per-case files for protein yes/no boxplots.")
+        return
+
+    layers = {"RNA":"Log2FC_RNA","CNV":"Delta_CNV","CH3":("DeltaM_CH3" if use_ch3_m else "Log2FC_CH3")}
+    for L, col in layers.items():
+        yes_vals, no_vals = [], []
+        for f in per_case_files:
+            try:
+                df = pd.read_csv(f, dtype=str, low_memory=False)
+                cols = _detect_cols_expanded(df)
+                if col not in df.columns: continue
+                present_t, _ = _protein_presence_masks(df, cols)
+                vals = pd.to_numeric(df[col], errors="coerce")
+                yes_vals.extend(vals[present_t].dropna().tolist())
+                no_vals.extend(vals[~present_t].dropna().tolist())
+            except Exception as e:
+                if verbose: logging.info(f"[analysis] protein yes/no collect failed for {f}: {e}")
+
+        if yes_vals and no_vals:
+            fig = plt.figure()
+            plt.boxplot([no_vals, yes_vals], labels=["Protein No","Protein Yes"], showfliers=False)
+            plt.title(f"Protein Yes vs No — {L}")
+            plt.ylabel("CH3 M-value" if (L=="CH3" and use_ch3_m) else ("CN copy number" if L=="CNV" else L))
+            # For volcano:
+            if L == "CH3" and use_ch3_m:
+                plt.xlabel("Mean ΔM")
+            elif L == "CNV":
+                plt.xlabel("Mean ΔCN")
+            else:
+                plt.xlabel("Mean log2FC")
+
+            by_group, pairwise = _boxplot_summary_df({"Protein No": no_vals, "Protein Yes": yes_vals})
+            save_plot(root, f"boxplot_yes_vs_no_{L}", fig=fig, csv_df=by_group, ext=ext)
+            if pairwise is not None:
+                pairwise.to_csv(root / f"boxplot_yes_vs_no_{L}_pairwise.csv", index=False)
+            plt.close(fig)
+
+
+# ---------------- Per-case worker ----------------
+
+_worker_cache = {
+    "lung_path": None,
+    "lung_col": None,
+    "lung_syms": None,
+    "lung_df_path": None,
+    "lung_df": None,
+    "gene_reads_key": None,
+    "gene_reads_df": None,
+}
+
+def _get_lung_syms_cached(lung_path: Optional[str], lung_col: Optional[str]) -> set:
+    if not lung_path: return set()
+    key = (str(lung_path), lung_col or "")
+    if (_worker_cache["lung_path"], _worker_cache["lung_col"]) != key:
+        _worker_cache["lung_syms"] = _load_lung_symbols_robust(Path(lung_path), lung_col)
+        _worker_cache["lung_path"], _worker_cache["lung_col"] = key
+    return _worker_cache["lung_syms"] or set()
+
+def _get_lung_df_cached(lung_path: Optional[str], lung_col: Optional[str]) -> Optional[pd.DataFrame]:
+    if not lung_path: return None
+    key = (str(lung_path), lung_col or "")
+    if _worker_cache.get("lung_df_path") != key:
+        _worker_cache["lung_df"] = _load_lung_table_robust(Path(lung_path), lung_col)
+        _worker_cache["lung_df_path"] = key
+    return _worker_cache["lung_df"]
+
+def _get_gene_reads_cached(gr_path: Optional[str], sep: Optional[str] = None) -> Optional[pd.DataFrame]:
+    if not gr_path: return None
+    key = (str(gr_path), sep or "")
+    if _worker_cache.get("gene_reads_key") != key:
+        if str(gr_path).lower().endswith(".gct"):
+            _worker_cache["gene_reads_df"] = _read_gene_reads_table(Path(gr_path))
+        else:
+            _worker_cache["gene_reads_df"] = pd.read_csv(gr_path, sep=sep, dtype=str) if sep else _read_gene_reads_table(Path(gr_path))
+        _worker_cache["gene_reads_key"] = key
+    return _worker_cache["gene_reads_df"]
+
+def _extract_substitutions(
+    case_id: str,
+    df: pd.DataFrame,
+    cols: Optional[Dict[str, Optional[str]]] = None,
+    *,
+    labels: Tuple[str, str] = ("SNV", "SNP"),
+    add_label: bool = True,
+) -> pd.DataFrame:
+    """
+    Build a tidy substitutions table for one case.
+
+    Inputs
+    ------
+    case_id : str
+        Case identifier (used to fill the 'case_id' column).
+    df : pd.DataFrame
+        Per-case analysis table (or a substitutions-like table).
+    cols : dict or None
+        Result from _detect_cols_expanded(df). If None, will call it.
+    labels : (str, str)
+        Tuple of label names (SNV, SNP).
+    add_label : bool
+        If True, create/attach a 'VarLabel' column for SNV/SNP using FILTER/INFO
+        when available; otherwise preserve existing 'VarLabel' if present.
+
+    Returns
+    -------
+    pd.DataFrame with columns:
+        case_id, Gene, Substitution, AA_start, AA_end, REF, ALT,
+        Log2FC_RNA, Delta_CNV, Log2FC_CH3, Protein_Present, Ion, Ion-Normal,
+        VarLabel (if add_label=True)
+    """
+    # ---- column detection
+    if cols is None:
+        try:
+            cols = _detect_cols_expanded(df)
+        except Exception:
+            cols = {}
+
+    out_cols = [
+        "case_id","Gene","Substitution","AA_start","AA_end","REF","ALT",
+        "Log2FC_RNA","Delta_CNV","Log2FC_CH3","Protein_Present","Ion","Ion-Normal"
+    ]
+    # Acceptable AA codes; prefer global AA_ORDER if present
+    try:
+        _aa_ok = set(AA_ORDER)  # uses your 21 AA (incl. "*")
+    except NameError:
+        _aa_ok = set(list("ACDEFGHIKLMNPQRSTVWY*"))
+
+    n = len(df)
+    if n == 0:
+        base = pd.DataFrame(columns=out_cols)
+        if add_label:
+            base["VarLabel"] = pd.Series(dtype="object")
+        return base
+
+    # ---- Gene symbol (uppercased) if available
+    sym_col = cols.get("symbol")
+    gene_series = (df[sym_col].astype(str).str.strip().str.upper()) if sym_col and sym_col in df.columns else pd.Series(np.nan, index=df.index)
+
+    # ---- REF/ALT passthrough (optional)
+    ref = df["REF"] if "REF" in df.columns else pd.Series(np.nan, index=df.index)
+    alt = df["ALT"] if "ALT" in df.columns else pd.Series(np.nan, index=df.index)
+
+    # ---- Ion passthrough (optional)
+    ion_t = df["Ion"] if "Ion" in df.columns else pd.Series(np.nan, index=df.index)
+    ion_n = df["Ion-Normal"] if "Ion-Normal" in df.columns else pd.Series(np.nan, index=df.index)
+
+    # ---- Protein present flag
+    if "Protein_Present_Tumor" in df.columns:
+        prot_present = df["Protein_Present_Tumor"].astype(bool)
+    else:
+        # fallback: presence of peptide seq in tumor column if mapped in 'pro_t'
+        pro_t = cols.get("pro_t")
+        prot_present = (df[pro_t].notna()) if (pro_t and pro_t in df.columns) else pd.Series(False, index=df.index)
+
+    # ---- Effects passthrough
+    l2_rna = df["Log2FC_RNA"] if "Log2FC_RNA" in df.columns else pd.Series(np.nan, index=df.index)
+    d_cnv  = df["Delta_CNV"]  if "Delta_CNV"  in df.columns else pd.Series(np.nan, index=df.index)
+    l2_ch3 = df["Log2FC_CH3"] if "Log2FC_CH3" in df.columns else pd.Series(np.nan, index=df.index)
+
+    # ---- AA parsing
+    # Prefer existing AA_start/AA_end if already present
+    if {"AA_start","AA_end"}.issubset(df.columns):
+        aa_start = df["AA_start"].astype(str).str.strip().str.upper()
+        aa_end   = df["AA_end"].astype(str).str.strip().str.upper()
+    else:
+        info_col = cols.get("info")
+        if info_col and info_col in df.columns:
+            toks = df[info_col].astype(str).str.split("|", expand=True)
+            if toks.shape[1] > 15:
+                aa = toks.iloc[:, 15].astype(str).str.strip()
+                aa_start = aa.str.slice(0, 1).str.upper()
+                aa_end   = aa.str.slice(-1).str.upper()
+            else:
+                aa_start = pd.Series("", index=df.index)
+                aa_end   = pd.Series("", index=df.index)
+        else:
+            aa_start = pd.Series("", index=df.index)
+            aa_end   = pd.Series("", index=df.index)
+
+    subst = (aa_start + aa_end).astype(str)
+
+    # ---- Optional SNV/SNP label
+    var_label = None
+    if add_label:
+        if "VarLabel" in df.columns:
+            var_label = df["VarLabel"].astype(str)
+        elif ("FILTER" in df.columns) and (cols.get("info") in df.columns if cols.get("info") else False):
+            # use your helper to classify on original table
+            try:
+                var_label = _classify_label(df, labels=labels).astype(str)
+            except Exception:
+                var_label = pd.Series(labels[0], index=df.index, dtype="object")
+        else:
+            var_label = pd.Series(labels[0], index=df.index, dtype="object")
+
+    # ---- Build and filter
+    out = pd.DataFrame({
+        "case_id":        str(case_id),
+        "Gene":           gene_series,
+        "Substitution":   subst,
+        "AA_start":       aa_start,
+        "AA_end":         aa_end,
+        "REF":            ref,
+        "ALT":            alt,
+        "Log2FC_RNA":     l2_rna,
+        "Delta_CNV":      d_cnv,
+        "Log2FC_CH3":     l2_ch3,
+        "Protein_Present": prot_present,
+        "Ion":            ion_t,
+        "Ion-Normal":     ion_n,
+    })
+
+    # keep only plausible AA pairs (both in allowed set)
+    keep = out["AA_start"].isin(_aa_ok) & out["AA_end"].isin(_aa_ok)
+    out = out.loc[keep].copy()
+
+    if add_label:
+        out["VarLabel"] = var_label.loc[out.index].values
+
+    # Stable, minimal ordering
+    return out.reset_index(drop=True)
+
+
+def _process_case_worker(fp_str: str, out_dir_str: str, opts: dict) -> dict:
+    try:
+        fp = Path(fp_str); out_dir = Path(out_dir_str)
+        per_case_dir = out_dir / "per_case"; per_case_dir.mkdir(parents=True, exist_ok=True)
+        rna_cmp_dir = out_dir / "rna_vs_gene_reads"; rna_cmp_dir.mkdir(parents=True, exist_ok=True)
+        subs_dir = out_dir / "substitutions"
+        if opts.get("emit_substitutions", False):
+            subs_dir.mkdir(parents=True, exist_ok=True)
+
+        case_id = _case_id_from_path(fp)
+        df = pd.read_csv(fp, sep=",", dtype=str, low_memory=False)
+        cols = _detect_cols_expanded(df)
+        # De-duplicate early to keep all downstream summaries clean
+        if not opts.get("no_dedupe", False):
+            df = _dedupe_case_df(df, cols)
+
+        # Lung annotations
+        lung_df = _get_lung_df_cached(opts.get("lung_tsv"), opts.get("lung_gene_col"))
+        if cols["symbol"] and lung_df is not None and not lung_df.empty:
+            sym_norm = df[cols["symbol"]].astype(str).str.strip().str.upper()
+            aux = pd.DataFrame({"__sym__": sym_norm})
+            ldf = lung_df.copy(); ldf["Gene"] = ldf["Gene"].astype(str).str.strip().str.upper()
+            aux = aux.merge(ldf, left_on="__sym__", right_on="Gene", how="left")
+            df["Lung_Present"] = aux["Gene"].notna()
+            if "cell_type" in aux.columns: df["Lung_cell_type"] = aux["cell_type"]
+            if "level" in aux.columns:     df["Lung_level"]      = aux["level"]
+            if "reliability" in aux.columns: df["Lung_reliability"] = aux["reliability"]
+        else:
+            lung_syms = _get_lung_syms_cached(opts.get("lung_tsv"), opts.get("lung_gene_col"))
+            df = _add_lung_flag(df, cols["symbol"], lung_syms)
+
+        # Protein presence & Ion extraction
+        has_any_seq = bool(cols["pro_t"]) and df[cols["pro_t"]].notna().any()
+        if has_any_seq:
+            df["Protein_Present_Tumor"]  = df[cols["pro_t"]].notna() if cols["pro_t"] else False
+            df["Protein_Present_Normal"] = df[cols["pro_n"]].notna() if cols["pro_n"] else False
+            if cols.get("pro_int_t") and cols["pro_int_t"] in df.columns:
+                df["Ion"] = _extract_ion_firstnum(df[cols["pro_int_t"]], min_first=10.0).where(df["Protein_Present_Tumor"], np.nan)
+            if cols.get("pro_int_n") and cols["pro_int_n"] in df.columns:
+                df["Ion-Normal"] = _extract_ion_firstnum(df[cols["pro_int_n"]], min_first=10.0).where(df["Protein_Present_Normal"], np.nan)
+
+        # Deltas & log2FCs
+        pseudocount = float(opts.get("pseudocount", 1.0))
+        df = _add_delta_log2fc(df, cols["rna_t"], cols["rna_n"], "RNA", pseudocount)
+        df = _add_cnv_metrics(df, cols["cn_t"], cols["cn_n"], pseudocount)
+        df = _add_log2fc_protein_from_ion(df, pseudocount, case_id=case_id)
+
+        # NEW: CH3 M-values
+        beta_eps = float(opts.get("beta_eps", 1e-6))
+        df = _add_ch3_m_values(df, cols.get("ch3_t"), cols.get("ch3_n"), beta_eps)
+
+        # Per-case summary row
+        thr = float(opts.get("log2fc_thr", 1.0))
+        row = {"case_id": case_id}
+        for base in ["RNA","CNV","CH3","Protein"]:
+            col = f"Log2FC_{base}"
+            if base == "CNV" and "Delta_CNV" in df.columns:
+                col = "Delta_CNV"
+            if base == "CH3" and "DeltaM_CH3" in df.columns and opts.get("ch3_use_m", False):
+                col = "DeltaM_CH3"
+            up, down, n = _count_up_down(df, col, thr)
+            row[f"{base}_up_{thr}"] = int(up)
+            row[f"{base}_down_{thr}"] = int(down)
+            row[f"{base}_n_with_log2fc"] = int(n)
+
+
+
+        # RNA vs gene_reads comparison
+        desired_key = opts.get("desired_key", "symbol")
+        gene_reads_df = _get_gene_reads_cached(opts.get("gene_reads"), opts.get("gene_reads_sep"))
+        if gene_reads_df is not None and cols["rna_t"]:
+            merged, stats = _merge_rna_vs_gene_reads_dual(df, cols, gene_reads_df, desired_key, opts.get("gene_reads_value_col"))
+            row.update({"rna_vs_gene_reads_n": stats["n"], "rna_vs_gene_reads_pearson": stats["pearson"],
+                        "rna_vs_gene_reads_spearman": stats["spearman"], "rna_vs_gene_reads_key_used": stats.get("used_key")})
+            if not merged.empty:
+                (rna_cmp_dir / f"{case_id}_rna_merge.csv").parent.mkdir(parents=True, exist_ok=True)
+                merged.to_csv(rna_cmp_dir / f"{case_id}_rna_merge.csv", index=False)
+
+        # Substitutions per-case
+        if opts.get("emit_substitutions", False):
+            subdf = _extract_substitutions(case_id, df, cols)
+            if not subdf.empty:
+                subdf.to_csv(out_dir / "substitutions" / f"{case_id}_substitutions.tsv", sep="\t", index=False)
+
+        # Save augmented per-case
+        df.to_csv(per_case_dir / f"{case_id}_analysis.csv", index=False)
+
+        # (Optional) simple per-case plots can be added here
+
+        return row
+    except Exception as e:
+        return {"case_id": _case_id_from_path(Path(fp_str)), "error": str(e)}
 # ---------------- CLI & main ----------------
 
 def compute_statistics(data, out_dir):
@@ -972,21 +2143,191 @@ def compute_statistics(data, out_dir):
     stats_df = pd.concat(stats_list); out_file = Path(out_dir) / 'omic_statistics.csv'
     stats_df.to_csv(out_file); logging.info(f"Saved statistics to {out_file}")
 
-def generate_plots(data, out_dir):
-    combined = pd.concat(data.values(), keys=data.keys()); corr = combined.corr()
-    fig, ax = plt.subplots(); cax = ax.matshow(corr); fig.colorbar(cax)
+def generate_plots(data, out_dir, ext: str = "png"):
+    combined = pd.concat(data.values(), keys=data.keys())
+    corr = combined.corr(numeric_only=True)
+    fig, ax = plt.subplots()
+    cax = ax.matshow(corr); fig.colorbar(cax)
     ax.set_xticks(range(len(corr.columns))); ax.set_xticklabels(corr.columns, rotation=90)
-    ax.set_yticks(range(len(corr.index))); ax.set_yticklabels(corr.index)
-    plt.tight_layout(); plot_file = Path(out_dir) / 'correlation_heatmap.png'
-    plt.savefig(plot_file); plt.close(fig); logging.info(f"Saved correlation heatmap to {plot_file}")
+    ax.set_yticks(range(len(corr.index)));  ax.set_yticklabels(corr.index)
+    plt.tight_layout()
+    save_plot(Path(out_dir), "correlation_heatmap", fig=fig, csv_df=corr, ext=ext)
+    logging.info("Saved correlation heatmap (PNG + CSV) to %s", out_dir)
 
-def clustering_analysis(data, out_dir):
+
+def clustering_analysis(data, out_dir, ext: str = "png"):
     if linkage is None or dendrogram is None:
-        logging.warning("SciPy not available; skipping clustering_analysis"); return
-    combined = pd.concat(data.values(), keys=data.keys()); Z = linkage(combined.fillna(0).transpose(), method='ward')
-    fig, ax = plt.subplots(); dendrogram(Z, labels=combined.columns)
-    plt.tight_layout(); plot_file = Path(out_dir) / 'dendrogram.png'
-    plt.savefig(plot_file); plt.close(fig); logging.info(f"Saved dendrogram to {plot_file}")
+        logging.warning("SciPy not available; skipping clustering_analysis")
+        return
+
+    try:
+        combined = pd.concat(data.values(), keys=data.keys())  # multi-index rows
+    except Exception as e:
+        logging.warning(f"[clustering] concat failed: {e}")
+        return
+
+    # Keep numeric features only
+    X = combined.apply(pd.to_numeric, errors="coerce")  # coerce non-numeric to NaN
+    X = X.select_dtypes(include=[np.number]).fillna(0.0).transpose()
+
+    # Guardrails: need at least 2 features and 2 samples
+    if X.shape[0] < 2 or X.shape[1] < 2:
+        logging.warning(f"[clustering] insufficient numeric data (features x samples = {X.shape}); skipping.")
+        return
+
+    try:
+        Z = linkage(X, method="ward")
+    except Exception as e:
+        logging.warning(f"[clustering] linkage failed: {e}")
+        return
+
+    fig, _ = plt.subplots()
+    dd = dendrogram(Z, labels=X.index.tolist())
+    plt.tight_layout()
+
+    Z_df = pd.DataFrame(Z, columns=["idx1", "idx2", "dist", "count"])
+    save_plot(Path(out_dir), "dendrogram", fig=fig, csv_df=Z_df, ext=ext)
+    pd.DataFrame({"leaf": dd.get("ivl", [])}).to_csv(Path(out_dir) / "dendrogram_leaves.csv", index=False)
+    logging.info(f"[clustering] numeric features: {X.shape[0]}, samples: {X.shape[1]} (wrote dendrogram)")
+
+
+def _make_cohort_boxplots_and_volcano(per_case_dir: Path, integrated_dir: Path, out_dir: Path,
+                                      verbose: bool = False, use_ch3_m: bool = False, ext: str = "png"):
+    plots_dir = out_dir; plots_dir.mkdir(parents=True, exist_ok=True)
+    snv_genes: set = set()
+    per_case_files = sorted(per_case_dir.glob("*_analysis.csv")) or sorted(integrated_dir.glob("*_integrated.csv"))
+    for f in per_case_files:
+        try:
+            df = pd.read_csv(f, dtype=str, low_memory=False)
+            cols = _detect_cols_expanded(df); sym_col = cols.get("symbol")
+            if sym_col: snv_genes.update(_collect_snv_genes_from_case(df, sym_col))
+        except Exception as e:
+            if verbose: logging.info(f"[analysis] SNV scan failed for {f}: {e}")
+    if not snv_genes:
+        logging.warning("[analysis] No SNV-harboring genes detected; skipping cohort plots")
+        return
+
+    layers = ["RNA","CNV","CH3","Protein"]
+    layer_data = {L: {"tumor": [], "normal": []} for L in layers}
+    for f in per_case_files:
+        try:
+            df = pd.read_csv(f, dtype=str, low_memory=False)
+            cols = _detect_cols_expanded(df); sym_col = cols.get("symbol")
+            if not sym_col: continue
+            mask = df[sym_col].astype(str).str.strip().str.upper().isin(snv_genes)
+            if not mask.any(): continue
+            sdf = df.loc[mask]
+            for L in layers:
+                t_col, n_col = _layer_cols_from_detect(cols, L)
+                if L == "CH3" and use_ch3_m:
+                    t_col, n_col = "M_CH3_Tumor", "M_CH3_Normal"
+                if not t_col or not n_col or t_col not in sdf.columns or n_col not in sdf.columns: continue
+                tvals = pd.to_numeric(sdf[t_col], errors="coerce").dropna()
+                nvals = pd.to_numeric(sdf[n_col], errors="coerce").dropna()
+                if len(tvals): layer_data[L]["tumor"].extend(tvals.tolist())
+                if len(nvals): layer_data[L]["normal"].extend(nvals.tolist())
+        except Exception as e:
+            if verbose: logging.info(f"[analysis] aggregation failed for {f}: {e}")
+
+    for L in layers:
+        tvals = layer_data[L]["tumor"]; nvals = layer_data[L]["normal"]
+        if not tvals or not nvals: continue
+        fig = plt.figure(); plt.boxplot([nvals, tvals], labels=["Normal","Tumor"], showfliers=False)
+        plt.title(f"Cohort {L} (SNV genes)")
+        plt.ylabel("CH3 M-value" if (L=="CH3" and use_ch3_m) else L)
+        by_group, pairwise = _boxplot_summary_df({"Normal": nvals, "Tumor": tvals})
+        save_plot(plots_dir, f"cohort_boxplot_{L}", fig=fig, csv_df=by_group, ext=ext)
+        if pairwise is not None:
+            pairwise.to_csv(plots_dir / f"cohort_boxplot_{L}_pairwise.csv", index=False)
+        plt.close(fig)
+
+    layer_effect_cols = {
+        "RNA":"Log2FC_RNA",
+        "CNV":"Delta_CNV",   # ensure we use ΔCN
+        "CH3":("DeltaM_CH3" if use_ch3_m else "Log2FC_CH3"),
+        "Protein":"Log2FC_Protein"
+    }
+    for L, col in layer_effect_cols.items():
+        rows = []
+        total_candidates = 0
+        for f in per_case_files:
+            try:
+                df = pd.read_csv(f, dtype=str, low_memory=False)
+                cols = _detect_cols_expanded(df); sym_col = cols.get("symbol")
+                if not sym_col or col not in df.columns:
+                    continue
+                sdf = df[[sym_col, col]].copy()
+                sdf[sym_col] = sdf[sym_col].astype(str).str.strip().str.upper()
+                sdf = sdf[sdf[sym_col].isin(snv_genes)]
+                if sdf.empty:
+                    continue
+                sdf[col] = pd.to_numeric(sdf[col], errors="coerce")
+                sdf = sdf.dropna(subset=[col])
+                if sdf.empty:
+                    continue
+                rows.append(sdf.rename(columns={sym_col: "Gene"}))
+            except Exception as e:
+                if verbose:
+                    logging.info(f"[analysis] volcano input failed for {f}: {e}")
+
+        if not rows:
+            if verbose:
+                logging.info(f"[volcano] {L}: no rows after filtering; skipping.")
+            continue
+
+        big = pd.concat(rows, ignore_index=True)
+        agg = big.groupby("Gene")[col].apply(list).reset_index(name="vals")
+
+        xs, ys, records = [], [], []
+        kept, dropped_short = 0, 0
+        for _, r in agg.iterrows():
+            vals = [v for v in r["vals"] if pd.notna(v)]
+            if len(vals) < 2:
+                dropped_short += 1
+                continue
+            mean_eff = float(np.mean(vals))
+            p = _pval_vs_zero(vals)  # one-sample vs 0
+            if not np.isfinite(p):
+                continue
+            xs.append(mean_eff)
+            ys.append(-np.log10(max(p, 1e-300)))
+            kept += 1
+            records.append({
+                "Gene": r["Gene"],
+                ("Mean ΔCN" if L=="CNV" else ("Mean ΔM" if (L=="CH3" and use_ch3_m) else "MeanLog2FC")): mean_eff,
+                "n": len(vals), "pval": p
+            })
+
+        if verbose:
+            logging.info(f"[volcano] {L}: kept={kept}, dropped(<2 obs)={dropped_short}, genes_total={len(agg)}")
+
+        if not xs:
+            if verbose:
+                logging.info(f"[volcano] {L}: nothing to plot after stats; skipping.")
+            continue
+
+        fig = plt.figure()
+        plt.scatter(xs, ys, s=8)
+        plt.title(f"Cohort volcano — {L} (SNV genes)")
+        if L == "CNV":
+            plt.xlabel("Mean ΔCN")
+        elif L == "CH3" and use_ch3_m:
+            plt.xlabel("Mean ΔM")
+        else:
+            plt.xlabel("Mean log2FC")
+        plt.ylabel("-log10 p")
+
+        eff_key = "Mean ΔCN" if L=="CNV" else ("Mean ΔM" if (L=="CH3" and use_ch3_m) else "MeanLog2FC")
+        summary_df, top_df = _volcano_summary(records, eff_key=eff_key)
+
+        save_plot(plots_dir, f"cohort_volcano_{L}", fig=fig, ext=ext)
+        summary_df.to_csv(plots_dir / f"cohort_volcano_{L}_summary.csv", index=False)
+        # Top N size is controlled in _volcano_summary (see patch below)
+        top_df.to_csv(plots_dir / f"cohort_volcano_{L}_top100.csv", index=False)
+        plt.close(fig)
+
+
+#=====================================================================
 
 def parse_args():
     p = argparse.ArgumentParser(description="Downstream analysis for integrated multi-omics tables (extended).")
@@ -996,8 +2337,11 @@ def parse_args():
     p.add_argument("--integrated_dir", required=True, help="Directory containing *_integrated.csv files")
     p.add_argument("--out_dir", required=True, help="Directory for analysis outputs")
     p.add_argument("--manifest", default=None, help="TSV/CSV/TXT file listing expected case IDs in the first column")
-    p.add_argument("--log_level", default="INFO", choices=["DEBUG","INFO","WARNING","ERROR","CRITICAL"], help="Logging level (default: INFO)")
-    # References
+    p.add_argument("--log_level", default="INFO",
+                   choices=["DEBUG","INFO","WARNING","ERROR","CRITICAL"],
+                   help="Logging level (default: INFO)")
+
+    # References (optional)
     p.add_argument("--ref_zip", default=None, help="Path to reference.zip containing lung-only.tsv and gene-reads.gct")
     p.add_argument("--refs_dir", default=None, help="Directory containing reference files")
     p.add_argument("--lung_name", default="lung-only.tsv", help="File name for lung list inside --refs_dir")
@@ -1008,161 +2352,140 @@ def parse_args():
     p.add_argument("--strict_refs", action="store_true", help="Fail if referenced files are missing")
     p.add_argument("--lung_gene_col", default=None, help="Column name in lung TSV for gene symbols")
     p.add_argument("--gene_reads", default=None, help="Optional path to gene_reads table for RNA comparison")
-    p.add_argument("--gene_reads_sep", default=None, help="Delimiter for gene_reads (auto by extension if omitted)")
-    p.add_argument("--gene_reads_value_col", default=None, help="Numeric value column in --gene_reads (default: first numeric; for GCT uses __TOTAL__)")
-    p.add_argument("--match_key", choices=["auto","symbol","ensg"], default="auto", help="Key to match RNA vs gene_reads")
+    p.add_argument("--gene_reads_sep", default=None, help="Delimiter for --gene_reads (auto by extension if omitted)")
+    p.add_argument("--gene_reads_value_col", default=None,
+                   help="Numeric value column in --gene_reads (default: first numeric; GCT uses __TOTAL__)")
+    p.add_argument("--match_key", choices=["auto","symbol","ensg"], default="auto",
+                   help="Key to match RNA vs gene_reads (auto→ensg preferred)")
+
     # Analysis config
     p.add_argument("--log2fc_thr", type=float, default=1.0, help="Threshold for up/down calling on Log2FC")
     p.add_argument("--pseudocount", type=float, default=1.0, help="Pseudocount for Log2FC computation")
-    p.add_argument("--emit_substitutions", action="store_true", help="Emit per-case and cohort substitutions tables")
-    p.add_argument("--cohort_plots", action="store_true", help="Make cohort-wide SNV gene boxplots and volcano plots")
-    p.add_argument("--cohort_plots_by_protein", action="store_true", help="Also stratify cohort plots by protein-present vs protein-absent lines")
-    p.add_argument("--jobs", type=int, default=None, help="Max parallel workers (default: CPU cores; 0/None = auto)")
+    p.add_argument("--emit_substitutions", action="store_true",
+                   help="Emit per-case and cohort substitutions tables")
+    p.add_argument("--cohort_plots", action="store_true",
+                   help="Make cohort-wide SNV gene boxplots and volcano plots")
+    p.add_argument("--cohort_plots_by_protein", action="store_true",
+                   help="Also stratify cohort plots by protein-present vs protein-absent lines")
+    p.add_argument("--jobs", type=int, default=None,
+                   help="Max parallel workers (default: CPU cores; 0/None = auto)")
+
+    # CH3 options
+    p.add_argument("--ch3_use_m", action="store_true", default=True,
+                   help="Use M-values for CH3 (log2(beta/(1-beta))) in plots/summaries; also compute DeltaM_CH3.")
+    p.add_argument("--ch3_beta", action="store_true",
+               help="Use beta-based CH3 (overrides --ch3_use_m).")
+    p.add_argument("--beta_eps", type=float, default=1e-6,
+               help="Clipping epsilon for β→M conversion; β clipped to [eps, 1-eps].")
+    p.add_argument("--no_dedupe", action="store_true",
+               help="Disable per-case de-duplication pass (default: enabled).")
+
+
+
     return p.parse_args()
 
-def _validate_refs(refs: dict, strict: bool = False) -> None:
-    missing = []
-    for k in ["lung_tsv"]:
-        if k in refs and refs[k] is not None and not Path(str(refs[k])).exists():
-            missing.append((k, refs[k]))
-    if "gene_reads" in refs and refs["gene_reads"] is not None and not Path(str(refs["gene_reads"])).exists():
-        missing.append(("gene_reads", refs["gene_reads"]))
-    if strict and missing:
-        msg = "; ".join([f"{k}={v}" for k,v in missing])
-        raise FileNotFoundError(f"Strict refs: missing files: {msg}")
-
-def _find_in_dir_by_name_or_globs(root: Path, preferred_name: Optional[str], patterns: list[str]) -> Optional[Path]:
-    if not root: return None
-    root = Path(root)
-    if preferred_name:
-        cand = root / preferred_name
-        if cand.exists(): return cand
-    for pat in patterns:
-        for h in sorted(root.glob(pat)):
-            if h.is_file(): return h
-    return None
-
-def _zip_find_member(z: zipfile.ZipFile, candidates: list[str]) -> Optional[str]:
-    names = z.namelist()
-    for cand in candidates:
-        cn = cand.lower()
-        for n in names:
-            if n.lower().endswith("/" + cn) or n.lower() == cn: return n
-    for cand in candidates:
-        if cand.endswith(".gct") and "*" in cand:
-            for n in names:
-                if n.lower().endswith(".gct"): return n
-    return None
-
-def _zip_extract_member(z: zipfile.ZipFile, member: str, dst_dir: Path, rename: Optional[str] = None) -> Path:
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    raw_name = Path(member).name if rename is None else rename
-    outp = dst_dir / raw_name
-    with z.open(member) as src, outp.open("wb") as fh: fh.write(src.read())
-    return outp
-
-def _resolve_refs(args) -> dict:
-    refs = {}
-    if args.lung_tsv: refs["lung_tsv"] = args.lung_tsv
-    if args.gene_reads: refs["gene_reads"] = args.gene_reads
-    if args.lung_gene_col: refs["lung_gene_col"] = args.lung_gene_col
-    if args.gene_reads_sep: refs["gene_reads_sep"] = args.gene_reads_sep
-    if args.gene_reads_value_col: refs["gene_reads_value_col"] = args.gene_reads_value_col
-    if args.match_key: refs["match_key"] = args.match_key
-
-    if (not refs.get("lung_tsv") or not refs.get("gene_reads")) and args.refs_dir:
-        root = Path(args.refs_dir)
-        if not refs.get("lung_tsv"):
-            lung = _find_in_dir_by_name_or_globs(root, args.lung_name,
-                ["lung-only.tsv","lung_only.tsv","lung.tsv","hpa_lung*.tsv","protein*lung*.tsv","lung-only.csv","lung_only.csv","hpa_lung*.csv"])
-            if lung: refs["lung_tsv"] = str(lung)
-        if not refs.get("gene_reads"):
-            gr = _find_in_dir_by_name_or_globs(root, args.gene_reads_name,
-                ["gene-reads.gct","gene_reads.gct","*.gct","gene_reads.tsv","*gene*reads*.tsv","gene_reads.csv","*gene*reads*.csv"])
-            if gr: refs["gene_reads"] = str(gr)
-
-    if (not refs.get("lung_tsv") or not refs.get("gene_reads")) and args.ref_zip:
-        cache = Path(args.out_dir) / "metadata" / "ref_cache"
-        try:
-            with zipfile.ZipFile(args.ref_zip, "r") as z:
-                if not refs.get("lung_tsv"):
-                    member = _zip_find_member(z, ["lung-only.tsv","lung_only.tsv","lung.tsv"])
-                    if member: refs["lung_tsv"] = str(_zip_extract_member(z, member, cache, rename="lung-only.tsv"))
-                if not refs.get("gene_reads"):
-                    member = _zip_find_member(z, ["gene-reads.gct","gene_reads.gct","*.gct"])
-                    if member:
-                        refs["gene_reads"] = str(_zip_extract_member(z, member, cache, rename="gene-reads.gct"))
-                        refs.setdefault("gene_reads_sep", "\t")
-        except Exception as e:
-            logging.warning(f"[analysis] Failed to scan ref_zip: {e}")
-
-    if not args.no_json:
-        if args.refs:
-            cfg = Path(args.refs)
-            if not cfg.exists(): raise FileNotFoundError(f"--refs not found: {cfg}")
-            refs.update(_load_refs_from_json(cfg))
-        else:
-            meta_cfg = Path(args.integrated_dir) / "metadata" / "analysis_refs.json"
-            if meta_cfg.exists(): refs.update(_load_refs_from_json(meta_cfg))
-    return refs
 
 def main():
     args = parse_args()
-    out_dir = Path(args.out_dir); _ensure_dir(out_dir)
-    cohort_dir = out_dir / "cohort"; _ensure_dir(cohort_dir)
+    if getattr(args, "ch3_beta", False):
+        args.ch3_use_m = False
+
+    out_dir = Path(args.out_dir)
+    _ensure_dir(out_dir)
+    cohort_dir = out_dir / "cohort"
+    _ensure_dir(cohort_dir)
     _setup_logging(out_dir, args.log_level)
 
-    per_case_dir = out_dir / "per_case"; _ensure_dir(per_case_dir)
-    rna_cmp_dir = out_dir / "rna_vs_gene_reads"; _ensure_dir(rna_cmp_dir)
-    subs_dir = out_dir / "substitutions"; 
-    if args.emit_substitutions: _ensure_dir(subs_dir)
+    # Output folders used elsewhere
+    per_case_dir = out_dir / "per_case"
+    _ensure_dir(per_case_dir)
+    rna_cmp_dir = out_dir / "rna_vs_gene_reads"
+    _ensure_dir(rna_cmp_dir)
+
+    # Ensure substitutions dir exists early so workers can write per-case TSVs
+    subs_dir = out_dir / "substitutions"
+    if args.emit_substitutions:
+        _ensure_dir(subs_dir)
+
+    # Resolve references (zip -> cache -> args/flags)
+    zip_resolved = _extract_refs_from_zip(
+        getattr(args, "ref_zip", None),
+        getattr(args, "refs_dir", None),
+        out_dir=out_dir,
+        lung_name=getattr(args, "lung_name", "lung-only.tsv"),
+        gene_reads_name=getattr(args, "gene_reads_name", "gene-reads.gct"),
+    )
 
     refs = _resolve_refs(args)
+    # Only fill refs from zip if user didn’t pass explicit flags
+    if not refs.get("lung_tsv"):   refs["lung_tsv"]   = zip_resolved.get("lung_tsv")
+    if not refs.get("gene_reads"): refs["gene_reads"] = zip_resolved.get("gene_reads")
+
     try:
         _validate_refs(refs, strict=args.strict_refs)
     except Exception as e:
-        logging.error(f"Reference validation failed: {e}"); return 1
-    if args.verbose: logging.info(f"Resolved references: {refs}")
+        logging.error(f"Reference validation failed: {e}")
+        return 1
+    if args.verbose:
+        logging.info(f"Resolved references: {refs}")
 
-    # files to process (respect manifest)
+
+    # Files to process (respect manifest)
     integrated_dir = Path(args.integrated_dir)
     globbed = sorted(integrated_dir.glob("*_integrated.csv"))
     if args.manifest:
         try:
             case_ids = _read_manifest_cases(Path(args.manifest))
         except Exception as e:
-            logging.error(f"Failed to read manifest: {e}"); return 1
+            logging.error(f"Failed to read manifest: {e}")
+            return 1
         expected = {cid: integrated_dir / f"{cid}_integrated.csv" for cid in case_ids}
         missing = [cid for cid, p in expected.items() if not p.exists()]
         files = [p for p in expected.values() if p.exists()]
         extra = [p for p in globbed if _case_id_from_path(p) not in set(case_ids)]
         if missing:
-            logging.warning(f"{len(missing)} manifest case(s) missing *_integrated.csv: {', '.join(sorted(missing)[:25])}" + (" ..." if len(missing)>25 else ""))
+            logging.warning(
+                f"{len(missing)} manifest case(s) missing *_integrated.csv: "
+                f"{', '.join(sorted(missing)[:25])}" + (" ..." if len(missing) > 25 else "")
+            )
         if extra:
-            logging.info(f"{len(extra)} extra *_integrated.csv not in manifest (ignored): " +
-                         ", ".join(sorted(p.name for p in extra)[:25]) + (" ..." if len(extra)>25 else ""))
+            logging.info(
+                f"{len(extra)} extra *_integrated.csv not in manifest (ignored): "
+                + ", ".join(sorted(p.name for p in extra)[:25]) + (" ..." if len(extra) > 25 else "")
+            )
     else:
         files = globbed
         if not files:
-            logging.error(f"No *_integrated.csv files found in: {integrated_dir}"); return 1
+            logging.error(f"No *_integrated.csv files found in: {integrated_dir}")
+            return 1
     if not files:
-        logging.error("No files to process after applying manifest filtering."); return 1
+        logging.error("No files to process after applying manifest filtering.")
+        return 1
 
-    desired_key = (refs.get('match_key') or args.match_key) if (refs.get('match_key') or args.match_key) != 'auto' else 'symbol'
+    # Key for RNA↔gene_reads matching
+    desired_key = (refs.get("match_key") or args.match_key)
+    if desired_key == "auto":
+        desired_key = "ensg"
+
+    # Options passed into the worker
     opts = {
-        "lung_tsv": refs.get('lung_tsv'),
-        "lung_gene_col": refs.get('lung_gene_col'),
+        "lung_tsv": refs.get("lung_tsv"),
+        "lung_gene_col": refs.get("lung_gene_col"),
         "pseudocount": args.pseudocount,
         "log2fc_thr": args.log2fc_thr,
         "desired_key": desired_key,
-        "gene_reads": refs.get('gene_reads'),
-        "gene_reads_sep": refs.get('gene_reads_sep') or args.gene_reads_sep,
-        "gene_reads_value_col": refs.get('gene_reads_value_col') or args.gene_reads_value_col,
+        "gene_reads": refs.get("gene_reads"),
+        "gene_reads_sep": refs.get("gene_reads_sep") or args.gene_reads_sep,
+        "gene_reads_value_col": refs.get("gene_reads_value_col") or args.gene_reads_value_col,
         "emit_substitutions": args.emit_substitutions,
         "make_plots": args.make_plots,
         "plot_ext": args.plot_ext,
+        "beta_eps": args.beta_eps,
+        "ch3_use_m": args.ch3_use_m,
+        "no_dedupe": args.no_dedupe,
     }
 
+    # Parallel per-case processing
     from concurrent.futures import ProcessPoolExecutor, as_completed
     max_workers = args.jobs if (args.jobs and args.jobs > 0) else None
     summaries = []
@@ -1170,75 +2493,161 @@ def main():
         futs = {ex.submit(_process_case_worker, str(fp), str(out_dir), opts): fp for fp in files}
         for fut in as_completed(futs):
             res = fut.result()
-            if 'error' in res:
+            if "error" in res:
                 logging.warning(f"{res.get('case_id')}: worker error: {res['error']}")
             else:
                 summaries.append(res)
 
-    # Cohort summary tables under cohort/
+    # Cohort summary
     if summaries:
         summary_df = pd.DataFrame(summaries).sort_values("case_id")
+        (cohort_dir / "analysis_summary.csv").parent.mkdir(parents=True, exist_ok=True)
         summary_df.to_csv(cohort_dir / "analysis_summary.csv", index=False)
-        logging.info(f"Wrote cohort summary -> {cohort_dir/'analysis_summary.csv'}")
+        logging.info(f"Wrote cohort summary -> {cohort_dir / 'analysis_summary.csv'}")
     else:
         logging.warning("No per-case summaries produced.")
 
+    # Cohort substitutions (optional) + Per-case AA matrices from substitutions
     if args.emit_substitutions:
         sub_files = sorted((out_dir / "substitutions").glob("*_substitutions.tsv"))
-        subs_rows = []
+        subs_rows: List[pd.DataFrame] = []
         for sf in sub_files:
-            try: subs_rows.append(pd.read_csv(sf, sep='\t', dtype=str))
-            except Exception as e: logging.warning(f"Read substitutions failed for {sf.name}: {e}")
+            try:
+                subs_rows.append(pd.read_csv(sf, sep="\t", dtype=str, low_memory=False))
+            except Exception as e:
+                logging.warning(f"Read substitutions failed for {sf.name}: {e}")
+
         if subs_rows:
-            all_subs = pd.concat(subs_rows, ignore_index=True); agg = all_subs.copy()
-            for c in ["Log2FC_RNA","Log2FC_CNV","Log2FC_CH3"]:
-                if c in agg.columns: agg[c] = pd.to_numeric(agg[c], errors="coerce")
-            grouped = agg.groupby(["Gene","Substitution"], dropna=False).agg(
-                n_cases=("case_id", "nunique"),
-                cases=("case_id", lambda x: ";".join(sorted(set(map(str, x)))[:25])),
-                mean_Log2FC_RNA=("Log2FC_RNA","mean"),
-                mean_Log2FC_CNV=("Log2FC_CNV","mean"),
-                mean_Log2FC_CH3=("Log2FC_CH3","mean"),
-                protein_hit_cases=("Protein_Present", lambda s: int(pd.Series(s).fillna(False).astype(bool).sum())),
-            ).reset_index()
+            # Build all_cases_df from emitted substitutions and create AA matrices per case (ion-filtered)
+            all_cases_df = pd.concat(subs_rows, ignore_index=True)
+            # Light dedupe on substitutions: case_id + Gene + AA_start + AA_end + REF + ALT
+            subs_dedupe_keys = [k for k in ["case_id","Gene","AA_start","AA_end","REF","ALT"] if k in all_cases_df.columns]
+            if subs_dedupe_keys:
+                before = len(all_cases_df)
+                all_cases_df = all_cases_df.drop_duplicates(subset=subs_dedupe_keys, keep="first").copy()
+                after = len(all_cases_df)
+                if before != after:
+                    logging.info(f"[dedupe|subs] removed {before-after} duplicate substitution row(s)")
+
+            # Emit per-case long + DNA-style matrices (from substitutions)
+            write_aa_tables_by_case(
+                all_cases_df,
+                out_dir=out_dir,
+                case_col="case_id",
+                aa_ref_col="AA_start",
+                aa_alt_col="AA_end",
+                ion_col="Ion",
+                labels=("SNV","SNP"),
+                ion_min=None,  # or 10.0 if you want a stricter minimum Ion
+            )
+
+
+            # Cohort rollup summary
+            agg = all_cases_df.copy()
+            for c in ["Log2FC_RNA", "Delta_CNV", "Log2FC_CH3"]:
+                if c in agg.columns:
+                    agg[c] = pd.to_numeric(agg[c], errors="coerce")
+            grouped = (
+                agg.groupby(["Gene", "Substitution"], dropna=False)
+                   .agg(
+                       n_cases=("case_id", "nunique"),
+                       cases=("case_id", lambda x: ";".join(sorted(set(map(str, x)))[:25])),
+                       mean_Log2FC_RNA=("Log2FC_RNA", "mean"),
+                       mean_Delta_CNV=("Delta_CNV", "mean"),
+                       mean_Log2FC_CH3=("Log2FC_CH3", "mean"),
+                       protein_hit_cases=("Protein_Present",
+                                          lambda s: int(pd.Series(s).fillna(False).astype(bool).sum())),
+                   )
+                   .reset_index()
+            )
+            (cohort_dir / "substitutions_summary.tsv").parent.mkdir(parents=True, exist_ok=True)
             grouped.to_csv(cohort_dir / "substitutions_summary.tsv", sep="\t", index=False)
-            logging.info(f"Wrote substitutions summary -> {cohort_dir/'substitutions_summary.tsv'}")
+            logging.info(f"Wrote substitutions summary -> {cohort_dir / 'substitutions_summary.tsv'}")
         else:
-            logging.info("No per-case substitution files found; skipped substitutions_summary.tsv")
-    
-    # Build cohort SNV/SNP packages (substitutions table + 21x21 AA matrix + 12-channel signature)
+            logging.info("No per-case substitution files found; skipped AA tables and substitutions_summary.tsv")
+
+    # Build cohort-level packages and ion-only variants
     try:
-        _build_cohort_substitution_packages(out_dir / "per_case", Path(args.integrated_dir), cohort_dir, labels=("SNV","SNP"), verbose=args.verbose)
+        _build_cohort_substitution_packages(
+            out_dir / "per_case", Path(args.integrated_dir), cohort_dir,
+            labels=("SNV", "SNP"), verbose=args.verbose
+        )
     except Exception as e:
         logging.warning(f"[analysis] cohort substitutions packaging failed: {e}")
 
+    try:
+        _build_cohort_aa_matrices_ion_only(
+            cohort_dir, labels=("SNV", "SNP"), min_ion=None, verbose=args.verbose
+        )
+    except Exception as e:
+        logging.warning(f"[analysis] ion-only AA matrix build failed: {e}")
 
-    # Cohort plots — write directly into cohort/
+    # Cohort plots
     if args.cohort_plots:
         try:
-            _make_cohort_boxplots_and_volcano(out_dir / "per_case", Path(args.integrated_dir), cohort_dir, verbose=args.verbose)
+            _make_cohort_boxplots_and_volcano(
+                out_dir / "per_case", Path(args.integrated_dir), cohort_dir,
+                verbose=args.verbose, use_ch3_m=args.ch3_use_m, ext=args.plot_ext
+            )
         except Exception as e:
             logging.warning(f"Cohort plots failed: {e}")
 
         if args.cohort_plots_by_protein:
             try:
-                _make_cohort_boxplots_and_volcano_by_protein(out_dir / "per_case", Path(args.integrated_dir), cohort_dir, verbose=args.verbose)
+                _make_cohort_boxplots_and_volcano_by_protein(
+                    out_dir / "per_case", Path(args.integrated_dir), cohort_dir,
+                    verbose=args.verbose, use_ch3_m=args.ch3_use_m, ext=args.plot_ext
+                )
             except Exception as e:
                 logging.warning(f"Cohort-by-protein plots failed: {e}")
             try:
-                _make_volcano_protein_yes_vs_no(out_dir / "per_case", Path(args.integrated_dir), cohort_dir, verbose=args.verbose)
+                _make_volcano_protein_yes_vs_no(
+                    out_dir / "per_case", Path(args.integrated_dir), cohort_dir,
+                    verbose=args.verbose, use_ch3_m=args.ch3_use_m, ext=args.plot_ext
+                )
             except Exception as e:
                 logging.warning(f"Protein yes/no volcano failed: {e}")
             try:
-                _make_boxplots_protein_yes_vs_no(out_dir / "per_case", Path(args.integrated_dir), cohort_dir, verbose=args.verbose)
+                _make_boxplots_protein_yes_vs_no(
+                    out_dir / "per_case", Path(args.integrated_dir), cohort_dir,
+                    verbose=args.verbose, use_ch3_m=args.ch3_use_m, ext=args.plot_ext
+                )
             except Exception as e:
                 logging.warning(f"Protein yes/no boxplots failed: {e}")
 
+    # === Per-case correlation heatmap + clustering (if --make_plots) ===
+    if args.make_plots:
+        data: Dict[str, pd.DataFrame] = {}
+        per_case_files = sorted((out_dir / "per_case").glob("*_analysis.csv"))
+        for f in per_case_files:
+            try:
+                case_id = _case_id_from_path(f)
+                data[case_id] = pd.read_csv(f, dtype=str, low_memory=False)
+            except Exception as e:
+                logging.warning(f"[plots] Failed to load {f.name}: {e}")
+
+        if not data:
+            logging.warning("[plots] No per-case analysis tables available; skipping correlation/clustering.")
+        else:
+            try:
+                generate_plots(data, cohort_dir, ext=args.plot_ext)
+            except Exception as e:
+                logging.warning(f"[plots] Correlation heatmap failed: {e}")
+            try:
+                clustering_analysis(data, cohort_dir, ext=args.plot_ext)
+            except Exception as e:
+                logging.warning(f"[plots] Clustering analysis failed: {e}")
+            try:
+                build_master_statistics_summary(out_dir)
+            except Exception as e:
+                logging.warning(f"[master] building master summary failed: {e}")
 
     logging.info("Done.")
     print(f"[analysis] Done. Outputs under: {out_dir}")
     return 0
 
+
 if __name__ == "__main__":
     raise SystemExit(main())
+
     
